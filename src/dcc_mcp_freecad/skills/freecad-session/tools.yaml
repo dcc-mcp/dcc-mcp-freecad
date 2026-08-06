@@ -1,0 +1,22 @@
+tools:
+  - name: get_status
+    description: Check FreeCAD bridge availability. Read-only.
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: sync
+    affinity: any
+    source_file: scripts/get_status.py
+  - name: inspect_document
+    description: Read-only document inspection.
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    read_only: true
+    destructive: false
+    idempotent: true
+    execution: sync
+    affinity: any
+    source_file: scripts/inspect_host.py
+
