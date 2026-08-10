@@ -22,6 +22,7 @@ class FreecadMcpServer(DccServerBase):
             server_name="dcc-mcp-freecad",
             server_version=__version__,
             adapter_version=__version__,
+            instance_type="standalone",
         )
         super().__init__(options=options)
 
@@ -55,3 +56,7 @@ def main():
         event.wait()
     finally:
         stop_server()
+
+
+if __name__ == "__main__":
+    main()

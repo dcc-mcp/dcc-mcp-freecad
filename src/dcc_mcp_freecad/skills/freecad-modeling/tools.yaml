@@ -1,0 +1,174 @@
+tools:
+  - name: add_primitive
+    description: Add a typed parametric box, cylinder, sphere, cone, or torus with placement.
+    source_file: scripts/add_primitive.py
+    input_schema:
+      type: object
+      required: [document_path, primitive, name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        primitive: {type: string, enum: [box, cone, cylinder, sphere, torus]}
+        name: {type: string, minLength: 1, maxLength: 64}
+        label: {type: string, minLength: 1, maxLength: 256}
+        dimensions:
+          type: object
+          properties:
+            length: {type: number, exclusiveMinimum: 0}
+            width: {type: number, exclusiveMinimum: 0}
+            height: {type: number, exclusiveMinimum: 0}
+            radius: {type: number, exclusiveMinimum: 0}
+            radius1: {type: number, minimum: 0}
+            radius2: {type: number, minimum: 0}
+            angle: {type: number, minimum: 0}
+            angle1: {type: number}
+            angle2: {type: number}
+            angle3: {type: number}
+          additionalProperties: false
+        translation: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
+        rotation_axis: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
+        rotation_degrees: {type: number, default: 0}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", primitive: box, name: Body, dimensions: {length: 80, width: 50, height: 24}}
+    next-tools: {on-success: [validate_document], on-failure: [inspect_document]}
+
+  - name: update_primitive
+    description: Update allowed dimensional properties on an existing supported primitive.
+    source_file: scripts/update_primitive.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, dimensions]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        dimensions:
+          type: object
+          minProperties: 1
+          properties:
+            length: {type: number, exclusiveMinimum: 0}
+            width: {type: number, exclusiveMinimum: 0}
+            height: {type: number, exclusiveMinimum: 0}
+            radius: {type: number, exclusiveMinimum: 0}
+            radius1: {type: number, minimum: 0}
+            radius2: {type: number, minimum: 0}
+            angle: {type: number, minimum: 0}
+            angle1: {type: number}
+            angle2: {type: number}
+            angle3: {type: number}
+          additionalProperties: false
+        label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    next-tools: {on-success: [validate_document], on-failure: [inspect_document]}
+
+  - name: transform_object
+    description: Set an object's absolute translation and axis-angle rotation.
+    source_file: scripts/transform_object.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, translation]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        translation: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
+        rotation_axis: {type: array, minItems: 3, maxItems: 3, items: {type: number}, default: [0, 0, 1]}
+        rotation_degrees: {type: number, default: 0}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+
+  - name: boolean_operation
+    description: Create a parametric union, cut, or intersection from two Part shape objects.
+    source_file: scripts/boolean_operation.py
+    input_schema:
+      type: object
+      required: [document_path, operation, base_object, tool_object, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        operation: {type: string, enum: [cut, intersection, union]}
+        base_object: {type: string, minLength: 1, maxLength: 64}
+        tool_object: {type: string, minLength: 1, maxLength: 64}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", operation: cut, base_object: Body, tool_object: Vent, result_name: VentedBody}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}
+
+  - name: import_geometry
+    description: Import one STEP, IGES, BREP, STL, or OBJ artifact as a named Part or Mesh object.
+    source_file: scripts/import_geometry.py
+    input_schema:
+      type: object
+      required: [document_path, input_path, object_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        input_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 600}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    next-tools: {on-success: [validate_document], on-failure: [inspect_document]}
+
+  - name: export_geometry
+    description: Export selected Part or Mesh objects to STEP, IGES, BREP, STL, or OBJ with bounded tessellation.
+    source_file: scripts/export_geometry.py
+    input_schema:
+      type: object
+      required: [document_path, object_names, output_path]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_names: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 64}}
+        output_path: {type: string, minLength: 1}
+        linear_deflection: {type: number, exclusiveMinimum: 0, maximum: 100, default: 0.1}
+        angular_deflection_degrees: {type: number, exclusiveMinimum: 0, maximum: 180, default: 15}
+        overwrite: {type: boolean, default: false}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 600}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", object_names: [VentedBody], output_path: "build/enclosure.step"}
+      - arguments: {document_path: "projects/enclosure.FCStd", object_names: [VentedBody], output_path: "build/enclosure.stl", linear_deflection: 0.05}
+    next-tools: {on-failure: [validate_document, inspect_document]}
