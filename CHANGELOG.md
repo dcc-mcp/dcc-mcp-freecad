@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.1.0...v0.1.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* restore complete MIT license text ([#3](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/3)) ([2aef023](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/2aef0231f82d2e8d227fc06bc40a7f4ebd5acb28))
+
 ## 0.1.0 (2026-08-10)
 
 
