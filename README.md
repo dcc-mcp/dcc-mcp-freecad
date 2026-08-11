@@ -7,6 +7,10 @@
 Production FreeCAD adapter for typed, durable parametric modeling and CAD
 exchange through DCC-MCP.
 
+![Parametric bracket moving through FreeCAD topology validation to a game-ready mesh](docs/images/dcc-mcp-freecad-showcase.webp)
+
+_Illustrative workflow based on the live OpenSCAD → FreeCAD → Blender/Godot acceptance run; generated source is retained in `docs/images/dcc-mcp-freecad-showcase-source.png`._
+
 ## Capabilities
 
 - Detect FreeCADCmd and report the actual FreeCAD/Python runtime.
