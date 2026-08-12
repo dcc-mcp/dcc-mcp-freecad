@@ -56,6 +56,9 @@ freecad="dcc_mcp_freecad:FreecadMcpServer"
 packages=["src/dcc_mcp_freecad"]
 artifacts=["src/dcc_mcp_freecad/skills/**"]
 
+[tool.hatch.build.targets.sdist]
+exclude=["docs/**/*.png", "docs/**/*.svg", "docs/**/*.webp"]
+
 [tool.pytest.ini_options]
 testpaths=["tests"]
 pythonpath=["src","."]
