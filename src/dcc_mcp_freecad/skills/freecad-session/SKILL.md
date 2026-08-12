@@ -11,7 +11,7 @@ metadata:
   dcc-mcp:
     dcc: freecad
     layer: domain
-    version: "0.1.1"  # x-release-please-version
+    version: "0.1.2"  # x-release-please-version
     tags: [freecad, cad, parametric-modeling, pipeline]
     search-hint: >-
       FreeCAD status capabilities create inspect validate copy FCStd document

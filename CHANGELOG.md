@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.1.1...v0.1.2) (2026-08-12)
+
+
+### Documentation
+
+* add CAD interchange showcase ([#5](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/5)) ([6e83d40](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/6e83d40432bc79c75379891db808f440fbf6d9ca))
+* publish approved FreeCAD showcase ([#7](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/7)) ([054963f](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/054963fae29d3bf9f31d4cd791b83ff634174dd5))
+
 ## [0.1.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.1.0...v0.1.1) (2026-08-10)
 
 
