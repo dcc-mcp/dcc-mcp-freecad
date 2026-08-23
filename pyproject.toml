@@ -47,7 +47,7 @@ dev=[
 ]
 
 [project.scripts]
-dcc-mcp-freecad="dcc_mcp_freecad.server:main"
+dcc-mcp-freecad="dcc_mcp_freecad.cli:main"
 
 [project.entry-points."dcc_mcp.adapters"]
 freecad="dcc_mcp_freecad:FreecadMcpServer"

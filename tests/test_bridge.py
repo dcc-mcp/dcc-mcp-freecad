@@ -49,6 +49,15 @@ class FakeFreecad(FreecadBridge):
         return {"object_count": 0}
 
 
+def test_discovery_accepts_a_macos_application_bundle(tmp_path: Path):
+    application = tmp_path / "FreeCAD.app"
+    executable = application / "Contents" / "Resources" / "bin" / "FreeCADCmd"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"")
+
+    assert FreecadBridge._resolve_executable(str(application)) == str(executable.resolve())
+
+
 def test_status_and_capabilities_are_explicit(tmp_path: Path):
     bridge = FakeFreecad(tmp_path)
 

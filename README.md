@@ -34,17 +34,20 @@ accepted. The adapter invokes only its packaged method-dispatch driver.
 
 ## Install
 
-```bash
-python -m pip install dcc-mcp-freecad
+Install the published wheel, prove the standalone FreeCAD runtime, then start
+the service:
+
+```text
+python -m pip install --upgrade dcc-mcp-freecad
+dcc-mcp-freecad doctor --json
+dcc-mcp-freecad verify --json
 dcc-mcp-freecad
 ```
 
-For development:
-
-```bash
-python -m pip install -e ".[dev]"
-python -m pytest
-```
+See [install.md](install.md) for Windows, macOS, and Linux discovery, stable
+doctor exits, configuration, wheel upgrades, uninstall, and troubleshooting.
+FreeCAD remains OS/package-manager owned; the adapter does not download or
+cache external binaries.
 
 ## Configuration
 
