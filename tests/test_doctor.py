@@ -12,6 +12,7 @@ def test_public_doctor_reports_missing_freecad_as_structured_preflight(
     tmp_path, monkeypatch, capsys
 ):
     from dcc_mcp_freecad import cli
+    from dcc_mcp_freecad.__version__ import __version__
 
     monkeypatch.delenv("DCC_MCP_FREECAD_EXECUTABLE", raising=False)
     monkeypatch.setenv("PATH", "")
@@ -24,7 +25,7 @@ def test_public_doctor_reports_missing_freecad_as_structured_preflight(
     assert report["schema_version"] == 1
     assert report["status"] == "failed"
     assert report["dcc_type"] == "freecad"
-    assert report["adapter_version"] == "0.1.2"
+    assert report["adapter_version"] == __version__
     assert report["core_version"]
     assert report["receipt_path"] is None
     assert report["verify"] == {
