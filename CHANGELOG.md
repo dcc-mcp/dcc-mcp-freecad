@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.1.2...v0.2.0) (2026-08-25)
+
+
+### Features
+
+* add standalone FreeCAD doctor ([#9](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/9)) ([f5a59f8](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/f5a59f8222a5194a6644cf5c73a3cbff6f12b53b))
+
 ## [0.1.2](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.1.1...v0.1.2) (2026-08-12)
 
 
