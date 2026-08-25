@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -97,16 +98,20 @@ class FreecadBridge:
         self.driver_path = Path(__file__).with_name("freecad_driver.py").resolve()
 
     @classmethod
-    def from_env(cls) -> "FreecadBridge":
+    def from_env(cls, executable: Optional[str] = None) -> "FreecadBridge":
         roots_value = os.environ.get("DCC_MCP_FREECAD_ALLOWED_ROOTS", "")
         roots = _split_roots(roots_value) if roots_value else [Path.cwd().resolve()]
+        max_document_bytes = int(
+            os.environ.get("DCC_MCP_FREECAD_MAX_DOCUMENT_BYTES", str(2 * 1024**3))
+        )
+        max_timeout_secs = float(os.environ.get("DCC_MCP_FREECAD_MAX_TIMEOUT_SECS", "1800"))
+        if max_document_bytes <= 0 or max_timeout_secs <= 0:
+            raise ValueError("FreeCAD document and timeout limits must be positive")
         return cls(
-            os.environ.get("DCC_MCP_FREECAD_EXECUTABLE") or None,
+            executable or os.environ.get("DCC_MCP_FREECAD_EXECUTABLE") or None,
             allowed_roots=roots,
-            max_document_bytes=int(
-                os.environ.get("DCC_MCP_FREECAD_MAX_DOCUMENT_BYTES", str(2 * 1024**3))
-            ),
-            max_timeout_secs=float(os.environ.get("DCC_MCP_FREECAD_MAX_TIMEOUT_SECS", "1800")),
+            max_document_bytes=max_document_bytes,
+            max_timeout_secs=max_timeout_secs,
         )
 
     @staticmethod
@@ -128,6 +133,13 @@ class FreecadBridge:
                         program_files / "FreeCAD" / "bin" / "FreeCADCmd.exe",
                     )
                 )
+            elif sys.platform == "darwin":
+                candidates.extend(
+                    (
+                        Path("/Applications/FreeCAD.app"),
+                        Path.home() / "Applications" / "FreeCAD.app",
+                    )
+                )
         for candidate in candidates:
             candidate = candidate.resolve()
             if candidate.is_dir():
@@ -136,6 +148,9 @@ class FreecadBridge:
                     candidate / "bin" / "FreeCADCmd.exe",
                     candidate / "freecadcmd",
                     candidate / "bin" / "freecadcmd",
+                    candidate / "Contents" / "Resources" / "bin" / "FreeCADCmd",
+                    candidate / "Contents" / "Resources" / "bin" / "freecadcmd",
+                    candidate / "Contents" / "MacOS" / "FreeCADCmd",
                 )
                 candidate = next((item for item in options if item.is_file()), candidate)
             if candidate.is_file():
@@ -331,7 +346,7 @@ class FreecadBridge:
                 staged.unlink()
             _remove_staged_backups(staged)
 
-    def status(self) -> dict[str, Any]:
+    def status(self, timeout_secs: float = 30) -> dict[str, Any]:
         if not self.executable:
             return {
                 "ready": False,
@@ -340,7 +355,7 @@ class FreecadBridge:
                 "reason": "freecadcmd_not_found",
                 "allowed_roots": [str(root) for root in self.allowed_roots],
             }
-        result = self._invoke("system.status", {}, 30)
+        result = self._invoke("system.status", {}, timeout_secs)
         result.update(
             {
                 "ready": True,
