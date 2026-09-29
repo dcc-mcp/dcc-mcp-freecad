@@ -22,7 +22,13 @@ def test_public_doctor_reports_missing_freecad_as_structured_preflight(
 
     report = json.loads(capsys.readouterr().out)
     assert code == 10
-    assert report["schema_version"] == 1
+    # Read the version from the shared contract instead of pinning a literal:
+    # dcc-mcp-core owns the Install SOP schema and has moved it to v2, so a
+    # hardcoded 1 breaks the moment the resolved core advances.
+    from dcc_mcp_freecad.install_contract import SCHEMA_VERSION
+
+    assert report["schema_version"] == SCHEMA_VERSION
+    assert SCHEMA_VERSION >= 1
     assert report["status"] == "failed"
     assert report["dcc_type"] == "freecad"
     assert report["adapter_version"] == __version__
