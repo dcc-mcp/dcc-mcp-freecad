@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dcc_mcp_freecad.bridge import BridgeError, FreecadBridge
+from dcc_mcp_freecad.bridge import BridgeError, FreecadBridge, WriteVerificationError
 
 
 class FakeFreecad(FreecadBridge):
@@ -156,6 +156,44 @@ def test_export_refuses_implicit_overwrite(tmp_path: Path):
 
 def _real_freecad() -> str:
     return os.environ.get("FREECAD_TEST_EXECUTABLE", "")
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_read_back_reaches_the_caller_structured(tmp_path: Path):
+    """A disagreement inside the host must reach the caller as a mismatch.
+
+    A box a nanometre across is accepted by the property write and then rejected
+    by the kernel, so the object exists with the requested dimensions while its
+    shape is unusable. That is precisely the shape of the bug this contract
+    exists for: the call looks like it worked, and the geometry is not there.
+
+    What is pinned here is the failure, not the value: an ``isinstance``
+    -checkable error naming the tool, the check, both sides, and the host
+    version, with the document left untouched behind it.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "read-back.FCStd"
+    bridge.create_document(str(document))
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        bridge.add_primitive(
+            str(document),
+            "box",
+            "Body",
+            dimensions={"length": 1e-9, "width": 1e-9, "height": 1e-9},
+        )
+
+    error = excinfo.value
+    assert isinstance(error, BridgeError), "existing handlers must still catch it"
+    assert error.tool == "model.add_primitive"
+    assert error.check
+    assert "expected" in error.payload and "actual" in error.payload
+    assert error.host_version == bridge.status()["version"]
+
+    # The mutation was refused, so the document must be exactly as it was.
+    inspected = bridge.inspect_document(str(document))
+    assert inspected["object_count"] == 0
 
 
 @pytest.mark.freecad

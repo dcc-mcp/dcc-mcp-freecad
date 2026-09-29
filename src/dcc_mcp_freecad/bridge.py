@@ -28,6 +28,40 @@ class BridgeTimeoutError(BridgeError):
     """FreeCADCmd exceeded the configured deadline."""
 
 
+class WriteVerificationError(BridgeError):
+    """A mutating tool's post-write read-back disagreed with the request.
+
+    Raised instead of a plain :class:`BridgeError` so a caller can branch on the
+    structured mismatch instead of parsing the message. The keys mirror
+    ``write_contract.WriteVerificationError``: ``tool``, ``check``,
+    ``expected``, ``actual``, ``host_version``, ``host_matrix``, ``params``.
+    """
+
+    def __init__(self, payload: Mapping[str, Any], message: str):
+        super().__init__(message)
+        self.payload = dict(payload)
+
+    @property
+    def tool(self) -> Any:
+        return self.payload.get("tool")
+
+    @property
+    def check(self) -> Any:
+        return self.payload.get("check")
+
+    @property
+    def expected(self) -> Any:
+        return self.payload.get("expected")
+
+    @property
+    def actual(self) -> Any:
+        return self.payload.get("actual")
+
+    @property
+    def host_version(self) -> Any:
+        return self.payload.get("host_version")
+
+
 def _within(path: Path, roots: Sequence[Path]) -> bool:
     candidate = os.path.normcase(str(path))
     for root in roots:
@@ -281,7 +315,11 @@ class FreecadBridge:
             payload = json.loads(result_path.read_text(encoding="utf-8"))
             if not payload.get("ok"):
                 error = payload.get("error") or {}
-                raise BridgeError(str(error.get("message") or "FreeCAD operation failed"))
+                message = str(error.get("message") or "FreeCAD operation failed")
+                verification = error.get("write_verification")
+                if isinstance(verification, dict):
+                    raise WriteVerificationError(verification, message)
+                raise BridgeError(message)
             result = payload.get("result")
             if not isinstance(result, dict):
                 result = {"result": result}
