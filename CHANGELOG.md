@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.2.0...v0.3.0) (2026-09-29)
+
+
+### Features
+
+* machine-readable FreeCAD host compatibility matrix and startup preflight ([#14](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/14)) ([7b8f388](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/7b8f388b74ca4eef14abf967b0069f84dc32e21b))
+
 ## [0.2.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.1.2...v0.2.0) (2026-08-25)
 
 
