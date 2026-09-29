@@ -30,7 +30,29 @@ accepted. The adapter invokes only its packaged method-dispatch driver.
 
 - Python 3.7+
 - `dcc-mcp-core` 0.20.36+
-- FreeCAD 1.0 or newer with `FreeCADCmd`/`freecadcmd`
+- A FreeCAD version covered by the compatibility matrix below, with a working
+  `FreeCADCmd`/`freecadcmd`
+
+### FreeCAD compatibility matrix
+
+Supported host versions are declared in
+[`compat_matrix.json`](src/dcc_mcp_freecad/compat_matrix.json) — that file is the
+contract, this section only points at it:
+
+| FreeCAD | Status |
+| --- | --- |
+| 1.0.x | supported |
+| 1.1.x | supported |
+| anything else | rejected with an explicit error code |
+
+Both supported lines are exercised end-to-end on real FreeCAD in CI. A version
+outside the matrix is **not** silently downgraded to "probably fine":
+`dcc-mcp-freecad doctor --json` fails with an `error_code`
+(`freecad_host_version_unsupported`, `freecad_host_version_unverified`,
+`freecad_host_version_unlisted`, or `freecad_host_version_unparsable`), the
+supported ranges, and the command that pins a supported one. The same matrix is
+re-checked inside FreeCAD before any geometry work, so a skipped preflight does
+not turn into a silent modelling bug.
 
 ## Install
 

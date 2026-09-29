@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "host": "freecad",
+  "matrix_version": "2026-09-29",
+  "notes": "Single source of truth for FreeCAD host support. Read by dcc_mcp_freecad.compat (service side) and by freecad_driver.py (inside FreeCAD's interpreter). A version outside `supported_ranges` is rejected explicitly; it is never silently downgraded.",
+  "executable_names": [
+    "FreeCADCmd",
+    "freecadcmd"
+  ],
+  "supported_ranges": [
+    {
+      "id": "1.0.x",
+      "min_version": "1.0.0",
+      "max_version": "1.0.9999",
+      "status": "supported",
+      "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, 1 passed / 0 skipped.",
+      "ci_matrix_entry": "FreeCAD_1.0.2-conda-Linux-x86_64-py311.AppImage"
+    },
+    {
+      "id": "1.1.x",
+      "min_version": "1.1.0",
+      "max_version": "1.1.9999",
+      "status": "supported",
+      "evidence": "Real FreeCAD 1.1.4 end-to-end run in CI: same end-to-end path, 1 passed / 0 skipped. No adapter-visible API break; the Part/Placement/boolean/MeshPart surface used by the driver is unchanged.",
+      "ci_matrix_entry": "FreeCAD_1.1.4-Linux-x86_64-py311.AppImage"
+    }
+  ],
+  "breaking_changes": [
+    {
+      "id": "sketcher-symmetric-renamed-to-midplane",
+      "title": "Sketcher constraint property `Symmetric` renamed to `Midplane`",
+      "changed_in": "1.1",
+      "applies_from": "1.1",
+      "kind": "renamed",
+      "removed_symbol": "Symmetric",
+      "replacement": "Midplane",
+      "probe": {
+        "module": "Sketcher",
+        "owner_type_id": "Sketcher::SketchObject",
+        "attribute": "Symmetric",
+        "replacement_attribute": "Midplane",
+        "expected_on_or_after_changed_in": "absent",
+        "expected_before_changed_in": "unverified",
+        "pre_change_note": "A freshly added Sketcher::SketchObject on real FreeCAD 1.0.2 does not expose Symmetric as an instance attribute either, so the pre-change presence claim is recorded as unverified instead of being assumed."
+      },
+      "symptom": "Sketch constraints set through the old property name are dropped; the document recomputes as if the constraint never existed, so the tool reports success while the geometry stays wrong.",
+      "adapter_usage": "unused",
+      "enforcement": "guard",
+      "remediation": "Use `Midplane` on FreeCAD 1.1+; keep the `Symmetric` spelling only on 1.0.x."
+    },
+    {
+      "id": "sketcher-external-geometry-count-removed",
+      "title": "Sketcher `ExternalGeometryCount` removed",
+      "changed_in": "1.1",
+      "applies_from": "1.1",
+      "kind": "removed",
+      "removed_symbol": "ExternalGeometryCount",
+      "replacement": "ExternalGeometry (list)",
+      "probe": {
+        "module": "Sketcher",
+        "owner_type_id": "Sketcher::SketchObject",
+        "attribute": "ExternalGeometryCount",
+        "replacement_attribute": "ExternalGeometry",
+        "expected_on_or_after_changed_in": "absent",
+        "expected_before_changed_in": "unverified",
+        "pre_change_note": "A freshly added Sketcher::SketchObject on real FreeCAD 1.0.2 does not expose ExternalGeometryCount as an instance attribute either, so the pre-change presence claim is recorded as unverified instead of being assumed."
+      },
+      "symptom": "Reading the count returns nothing instead of a number, so sketch bookkeeping silently reports zero external references.",
+      "adapter_usage": "unused",
+      "enforcement": "guard",
+      "remediation": "Read `len(ExternalGeometry)` on FreeCAD 1.1+."
+    },
+    {
+      "id": "meshpart-tessellate-deflection",
+      "title": "MeshPart tessellation (`meshFromShape`) deflection behaviour changed",
+      "changed_in": "1.1",
+      "applies_from": "1.1",
+      "kind": "behaviour",
+      "removed_symbol": "MeshPart.meshFromShape",
+      "replacement": "MeshPart.meshFromShape with an explicitly asserted mesh result",
+      "probe": {
+        "module": "MeshPart",
+        "attribute": "meshFromShape",
+        "expected_on_or_after_changed_in": "present"
+      },
+      "symptom": "Tessellation honours deflection differently, so an STL/OBJ export can succeed with an empty or degenerate mesh instead of failing.",
+      "adapter_usage": "guarded",
+      "enforcement": "postcondition",
+      "remediation": "The adapter asserts the tessellated mesh is non-empty and bounded before exporting; a degenerate mesh raises an explicit error naming the host version instead of writing a short file."
+    }
+  ]
+}

@@ -2,7 +2,194 @@
 
 import json
 import math
+import os
 import sys
+
+_MATRIX_FILENAME = "compat_matrix.json"
+_COMPAT_MODULE = None
+
+
+class IncompatibleHostError(RuntimeError):
+    """The running FreeCAD host exposes an API the matrix declares as broken."""
+
+
+def _matrix_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), _MATRIX_FILENAME)
+
+
+def _compat_module():
+    """Load the shared compatibility module from this driver's own directory.
+
+    The driver is executed directly by FreeCADCmd, so the adapter package is not
+    importable. Loading ``compat.py`` by path keeps one single compatibility
+    source of truth instead of duplicating the matrix inside this file.
+    """
+    global _COMPAT_MODULE
+    if _COMPAT_MODULE is None:
+        import importlib.util
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compat.py")
+        if not os.path.isfile(path) or not os.path.isfile(_matrix_path()):
+            raise RuntimeError(
+                "The FreeCAD compatibility matrix is missing next to the packaged driver "
+                "(%s); reinstall dcc-mcp-freecad" % path
+            )
+        spec = importlib.util.spec_from_file_location("dcc_mcp_freecad_compat", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _COMPAT_MODULE = module
+    return _COMPAT_MODULE
+
+
+def _host_version():
+    import FreeCAD as App
+
+    return ".".join(list(App.Version())[:3])
+
+
+def _applied_breaking_changes(version):
+    return _compat_module().breaking_changes_for(version)
+
+
+def _breaking_change_for_symbol(symbol, version):
+    """Return the declared break covering ``symbol`` on this host version."""
+    for entry in _applied_breaking_changes(version):
+        probe = entry.get("probe") or {}
+        covered = {entry.get("removed_symbol"), probe.get("attribute")}
+        if symbol in {item for item in covered if item}:
+            return entry
+    return None
+
+
+def host_matrix(version):
+    """Classify ``version`` against the shipped matrix."""
+    return _compat_module().classify_host(version)
+
+
+def _require_supported_host(version):
+    """Refuse to mutate or export geometry on a host outside the matrix.
+
+    ``system.status`` stays available on every host: it is the instrument that
+    measures the version, so it must never be the thing that cannot report it.
+    """
+    verdict = host_matrix(version)
+    if verdict["status"] == _compat_module().SUPPORTED:
+        return verdict
+    raise IncompatibleHostError(
+        "%s Install or pin a supported FreeCAD and re-run "
+        "`dcc-mcp-freecad doctor --json`." % _compat_module().unsupported_reason(verdict)
+    )
+
+
+def _resolve_property(obj, name, version):
+    """Resolve a host property, failing loudly instead of silently no-op'ing.
+
+    Writing to a renamed or removed property is the classic silent-success bug:
+    the call returns and the geometry never changes. Every dimension write goes
+    through here so a moved API raises with the replacement spelled out.
+    """
+    entry = _breaking_change_for_symbol(name, version)
+    if entry is not None and name == entry.get("removed_symbol"):
+        kind = entry.get("kind")
+        replacement = entry.get("replacement") or "no drop-in replacement"
+        if kind == "renamed":
+            raise IncompatibleHostError(
+                "FreeCAD %s renamed %s to %s (changed in %s). %s"
+                % (version, name, replacement, entry.get("changed_in"), entry.get("remediation"))
+            )
+        if kind == "removed":
+            raise IncompatibleHostError(
+                "FreeCAD %s removed %s (changed in %s). Use %s instead. %s"
+                % (version, name, entry.get("changed_in"), replacement, entry.get("remediation"))
+            )
+    if not hasattr(obj, name):
+        raise IncompatibleHostError(
+            "FreeCAD %s does not expose property %s on %s; the host API moved outside the "
+            "verified compatibility matrix, so the write was refused instead of silently "
+            "doing nothing" % (version, name, getattr(obj, "TypeId", type(obj).__name__))
+        )
+    return name
+
+
+def _probe_instance_property(type_id, attribute):
+    """Probe a property on a live object of ``type_id``.
+
+    FreeCAD exposes many properties only on instances, so ``dir()`` on the type
+    cannot answer whether a property still exists. The object is created in a
+    throwaway document that is never saved or touched on disk.
+    """
+    import FreeCAD as App
+
+    document = App.newDocument("DccMcpCompatProbe")
+    try:
+        obj = document.addObject(type_id, "DccMcpProbeObject")
+        return "present" if hasattr(obj, attribute) else "absent"
+    finally:
+        App.closeDocument(document.Name)
+
+
+def _probe_owner(module, probe):
+    """Resolve the object a probe should inspect, or None when unavailable."""
+    owner_name = probe.get("owner")
+    if owner_name:
+        return getattr(module, str(owner_name).split("::")[-1], None)
+    return module
+
+
+def _probe_breaking_changes(version):
+    """Introspect this host for every declared break and compare with the matrix.
+
+    Every declared break is probed, not only the ones that apply to this host: on
+    a pre-change host the old symbol is expected to still be present, and seeing
+    it is positive evidence that the matrix is right. The probe is evidence, not
+    a gate: a mismatch is reported so the matrix can be corrected before a wrong
+    assumption reaches a user.
+    """
+    compat = _compat_module()
+    parsed = compat.parse_version(version)
+    probes = []
+    for entry in compat.load_matrix().get("breaking_changes") or ():
+        probe = entry.get("probe") or {}
+        module_name = probe.get("module")
+        attribute = probe.get("attribute")
+        changed_in = compat.parse_version(str(entry.get("changed_in", "")))
+        applies = bool(parsed and changed_in and parsed >= changed_in)
+        expected = (
+            probe.get("expected_on_or_after_changed_in")
+            if applies
+            else probe.get("expected_before_changed_in", "present")
+        )
+        result = {
+            "id": entry.get("id"),
+            "attribute": attribute,
+            "applies_to_host": applies,
+            "expected": expected,
+            "observed": "unavailable",
+            "replacement_observed": None,
+            "matches_expected": None,
+        }
+        if attribute:
+            try:
+                __import__(module_name)
+                if probe.get("owner_type_id"):
+                    result["observed"] = _probe_instance_property(probe["owner_type_id"], attribute)
+                    replacement = probe.get("replacement_attribute")
+                    if replacement:
+                        result["replacement_observed"] = _probe_instance_property(
+                            probe["owner_type_id"], replacement
+                        )
+                else:
+                    owner = _probe_owner(sys.modules[module_name], probe)
+                    if owner is not None:
+                        result["observed"] = "present" if hasattr(owner, attribute) else "absent"
+            except Exception:
+                result["observed"] = "unavailable"
+        # "unverified" means the matrix states no expectation for this host, so
+        # the observation is recorded as evidence without claiming a match.
+        if result["observed"] != "unavailable" and expected != "unverified":
+            result["matches_expected"] = result["observed"] == expected
+        probes.append(result)
+    return probes
 
 
 def _vector(value, name):
@@ -121,11 +308,14 @@ def system_status(_params):
     import FreeCAD as App
 
     version = list(App.Version())
+    reported = ".".join(version[:3])
     return {
-        "version": ".".join(version[:3]),
+        "version": reported,
         "version_details": version,
         "console_mode": True,
         "python_version": sys.version.split()[0],
+        "host_matrix": host_matrix(reported),
+        "api_probe": _probe_breaking_changes(reported),
     }
 
 
@@ -258,7 +448,7 @@ _DIMENSION_PROPERTIES = {
 }
 
 
-def _apply_dimensions(obj, dimensions):
+def _apply_dimensions(obj, dimensions, version):
     allowed = _DIMENSION_PROPERTIES.get(obj.TypeId)
     if allowed is None:
         raise ValueError("Object is not a supported parametric primitive: %s" % obj.TypeId)
@@ -279,7 +469,8 @@ def _apply_dimensions(obj, dimensions):
             limit = 90 if obj.TypeId == "Part::Sphere" else 180
             if not -limit <= number <= limit:
                 raise ValueError("%s must be between -%s and %s" % (name, limit, limit))
-        setattr(obj, allowed[name], number)
+        property_name = _resolve_property(obj, allowed[name], version)
+        setattr(obj, property_name, number)
 
 
 def model_add_primitive(params):
@@ -295,7 +486,7 @@ def model_add_primitive(params):
         obj = doc.addObject(_PRIMITIVE_TYPES[primitive], params["name"])
         if params.get("label"):
             obj.Label = str(params["label"])
-        _apply_dimensions(obj, params.get("dimensions") or {})
+        _apply_dimensions(obj, params.get("dimensions") or {}, _host_version())
         translation = _vector(params["translation"], "translation")
         obj.Placement = App.Placement(
             App.Vector(*translation),
@@ -317,7 +508,7 @@ def model_update_primitive(params):
         obj = doc.getObject(params["object_name"])
         if obj is None:
             raise ValueError("Object does not exist: %s" % params["object_name"])
-        _apply_dimensions(obj, params.get("dimensions") or {})
+        _apply_dimensions(obj, params.get("dimensions") or {}, _host_version())
         if params.get("label") is not None:
             obj.Label = str(params["label"])
         _save_document(doc)
@@ -414,6 +605,36 @@ def model_import_geometry(params):
         _close_document(App, doc)
 
 
+def _assert_tessellation(mesh_obj, source_name, version):
+    """Assert tessellation produced a real mesh instead of a silent empty one.
+
+    MeshPart deflection behaviour moved between FreeCAD 1.0 and 1.1. A changed
+    deflection is only visible as a degenerate mesh, so the export asserts the
+    result and names the host version instead of writing a plausible file.
+    """
+    mesh = getattr(mesh_obj, "Mesh", None)
+    points = int(getattr(mesh, "CountPoints", 0) or 0)
+    facets = int(getattr(mesh, "CountFacets", 0) or 0)
+    if points <= 0 or facets <= 0:
+        entry = _breaking_change_for_symbol("MeshPart.meshFromShape", version) or {}
+        raise IncompatibleHostError(
+            "FreeCAD %s tessellated %s into an empty mesh (%d points, %d facets) with "
+            "linear_deflection=%s and angular_deflection_degrees=%s. Refusing to export a "
+            "degenerate mesh. %s"
+            % (
+                version,
+                source_name,
+                points,
+                facets,
+                "unknown",
+                "unknown",
+                entry.get("remediation")
+                or "Increase the deflection or repair the shape, then retry.",
+            )
+        )
+    return mesh
+
+
 def model_export_geometry(params):
     import FreeCAD as App
 
@@ -451,6 +672,7 @@ def model_export_geometry(params):
                         ),
                         Relative=False,
                     )
+                    _assert_tessellation(mesh_obj, obj.Name, _host_version())
                     temp_meshes.append(mesh_obj)
                     mesh_objects.append(mesh_obj)
                 else:
@@ -494,6 +716,9 @@ def main():
         method = request.get("method")
         if method not in _METHODS:
             raise ValueError("Unknown FreeCAD method: %s" % method)
+        if method != "system.status":
+            # Pre-flight gate: an unverified host must not reach geometry work.
+            _require_supported_host(_host_version())
         result = _METHODS[method](request.get("params") or {})
         payload = {"ok": True, "result": result}
     except Exception as exc:

@@ -118,10 +118,17 @@ def test_doctor_rejects_legacy_freecad_before_claiming_usability(tmp_path, monke
     report = json.loads(capsys.readouterr().out)
     assert report["verify"]["directly_usable"] is False
     assert report["verify"]["failure_stage"] == "host_version"
-    assert "1.0 or newer" in report["verify"]["failure_reason"]
+    assert report["error_code"] == "freecad_host_version_unsupported"
+    assert "0.21.2" in report["verify"]["failure_reason"]
+    assert report["checks"]["runtime"]["host_matrix"]["status"] == "too_old"
+    assert "1.0.x" in report["verify"]["failure_reason"]
     assert report["checks"]["runtime"]["success"] is False
-    assert len(report["next_steps"]) == 1
-    assert report["next_steps"][0]["command"]
+    # Pin a supported version, then re-run the same preflight against it.
+    assert [step["id"] for step in report["next_steps"]] == [
+        "install-freecad",
+        "recheck-host-matrix",
+    ]
+    assert all(step["command"] for step in report["next_steps"])
 
 
 def test_doctor_runtime_failure_uses_verify_exit(tmp_path, monkeypatch, capsys):

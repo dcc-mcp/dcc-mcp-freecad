@@ -1,4 +1,9 @@
-"""Standalone FreeCAD doctor and verify orchestration."""
+"""Standalone FreeCAD doctor and verify orchestration.
+
+Host support is decided by the machine-readable matrix in ``compat_matrix.json``
+(see ``compat.py``), never by a hardcoded minimum: an undeclared FreeCAD version
+is rejected with an explicit error code instead of being assumed compatible.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,16 @@ from typing import Any, Optional
 
 from .__version__ import __version__
 from .bridge import BridgeError, FreecadBridge
+from .compat import (
+    SUPPORTED,
+    TOO_NEW,
+    UNKNOWN,
+    UNLISTED,
+    classify_host,
+    load_matrix,
+    supported_range_labels,
+    unsupported_reason,
+)
 from .install_contract import (
     EXIT_OK,
     EXIT_PREFLIGHT,
@@ -20,8 +35,23 @@ from .install_contract import (
 )
 
 MIN_CORE_VERSION = "0.20.36"
-MIN_FREECAD_VERSION = "1.0"
 _RELEASE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?")
+
+# Machine-readable error codes for host support verdicts.
+ERROR_HOST_TOO_OLD = "freecad_host_version_unsupported"
+ERROR_HOST_TOO_NEW = "freecad_host_version_unverified"
+ERROR_HOST_UNLISTED = "freecad_host_version_unlisted"
+ERROR_HOST_UNKNOWN = "freecad_host_version_unparsable"
+
+_HOST_ERROR_CODES = {
+    TOO_NEW: ERROR_HOST_TOO_NEW,
+    UNLISTED: ERROR_HOST_UNLISTED,
+    UNKNOWN: ERROR_HOST_UNKNOWN,
+}
+
+
+def _host_error_code(status):
+    return _HOST_ERROR_CODES.get(status, ERROR_HOST_TOO_OLD)
 
 
 def _release_tuple(value: str) -> Optional[tuple[int, int, int]]:
@@ -33,6 +63,7 @@ def _release_tuple(value: str) -> Optional[tuple[int, int, int]]:
 
 
 def _install_freecad_step() -> dict[str, Any]:
+    ranges = ", ".join(supported_range_labels(load_matrix())) or "a supported version"
     if os.name == "nt" and shutil.which("winget"):
         command = ["winget", "install", "--id", "FreeCAD.FreeCAD", "--exact"]
     elif sys.platform == "darwin" and shutil.which("brew"):
@@ -45,7 +76,7 @@ def _install_freecad_step() -> dict[str, Any]:
         command = [sys.executable, "-m", "webbrowser", "https://www.freecad.org/downloads.php"]
     return {
         "id": "install-freecad",
-        "description": "Install or upgrade an OS-managed FreeCAD 1.0 or newer",
+        "description": "Install or pin an OS-managed FreeCAD in the supported range: %s" % ranges,
         "command": command,
         "why": "The standalone adapter requires a local FreeCADCmd executable",
     }
@@ -66,11 +97,13 @@ def _report(
     failure_stage: Optional[str] = None,
     failure_reason: Optional[str] = None,
     next_steps: Optional[list[dict[str, Any]]] = None,
+    error_code: Optional[str] = None,
 ) -> dict[str, Any]:
     directly_usable = exit_code == EXIT_OK
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ok" if directly_usable else "failed",
+        "error_code": error_code,
         "dcc_type": "freecad",
         "verb": verb,
         "adapter_version": __version__,
@@ -304,9 +337,7 @@ def doctor_report(
                 )
             ],
         )
-    freecad_release = _release_tuple(freecad_version)
-    minimum_freecad = _release_tuple(MIN_FREECAD_VERSION)
-    if freecad_release is None:
+    if _release_tuple(freecad_version) is None:
         reason = "FreeCADCmd did not report a valid runtime version"
         checks["runtime"] = {"success": False, "freecad_version": freecad_version}
         steps.append({"id": "verify-runtime", "status": "failed", "message": reason})
@@ -319,18 +350,18 @@ def doctor_report(
             "runtime",
             reason,
             [_install_freecad_step()],
+            ERROR_HOST_UNKNOWN,
         )
+    verdict = classify_host(freecad_version)
+    verdict["api_probe"] = runtime.get("api_probe") or []
     checks["runtime"] = {
-        "success": minimum_freecad is not None and freecad_release >= minimum_freecad,
+        "success": verdict["status"] == SUPPORTED,
         "freecad_version": freecad_version,
         "python_version": python_version,
-        "minimum_freecad_version": MIN_FREECAD_VERSION,
+        "host_matrix": verdict,
     }
     if not checks["runtime"]["success"]:
-        reason = "FreeCAD %s is unsupported; %s or newer is required" % (
-            freecad_version,
-            MIN_FREECAD_VERSION,
-        )
+        reason = unsupported_reason(verdict)
         steps.append({"id": "verify-runtime", "status": "failed", "message": reason})
         return _report(
             verb,
@@ -340,7 +371,24 @@ def doctor_report(
             EXIT_PREFLIGHT,
             "host_version",
             reason,
-            [_install_freecad_step()],
+            [
+                _install_freecad_step(),
+                _command_step(
+                    "recheck-host-matrix",
+                    "Re-run the compatibility preflight against the pinned executable",
+                    ["dcc-mcp-freecad", verb, "--json", "--dcc-path", bridge.executable],
+                    reason,
+                ),
+            ],
+            _host_error_code(verdict["status"]),
         )
     steps.append({"id": "verify-runtime", "status": "ok"})
+    steps.append(
+        {
+            "id": "verify-host-matrix",
+            "status": "ok",
+            "message": "FreeCAD %s is inside the verified compatibility matrix (%s)"
+            % (freecad_version, ", ".join(verdict["supported_ranges"])),
+        }
+    )
     return _report(verb, core_version, checks, steps, EXIT_OK)
