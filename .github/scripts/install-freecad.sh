@@ -74,17 +74,18 @@ probe() {
   if ! timeout 300 "${executable}" --safe-mode --user-cfg "${probe_dir}/user.cfg" \
     "${driver}" --pass "${probe_dir}/request.json" "${probe_dir}/result.json" \
     > "${probe_dir}/stdout.log" 2> "${probe_dir}/stderr.log"; then
-    echo "candidate exited non-zero: ${executable}"
-    tail -20 "${probe_dir}/stderr.log"
+    # Diagnostics go to stderr: stdout is captured by the caller's $(...).
+    echo "candidate exited non-zero: ${executable}" >&2
+    tail -20 "${probe_dir}/stderr.log" >&2
     return 1
   fi
   if [ ! -f "${probe_dir}/result.json" ]; then
-    echo "candidate produced no result file: ${executable}"
-    tail -20 "${probe_dir}/stderr.log"
+    echo "candidate produced no result file: ${executable}" >&2
+    tail -20 "${probe_dir}/stderr.log" >&2
     return 1
   fi
   if ! version="$(python3 "${script_dir}/freecad-version.py" "${probe_dir}/result.json")"; then
-    echo "candidate driver probe failed: ${executable}"
+    echo "candidate driver probe failed: ${executable}" >&2
     return 1
   fi
   printf '%s' "${version}"
@@ -96,7 +97,7 @@ for candidate in "${candidates[@]}"; do
     continue
   fi
   if [[ "${reported}" != "${expected_series}".* ]]; then
-    echo "candidate reported FreeCAD ${reported}, expected the ${expected_series}.x series"
+    echo "candidate reported FreeCAD ${reported}, expected the ${expected_series}.x series" >&2
     continue
   fi
   echo "Resolved FreeCADCmd ${candidate} (FreeCAD ${reported})"
