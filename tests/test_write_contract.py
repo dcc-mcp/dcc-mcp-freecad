@@ -14,6 +14,7 @@ geometry; this file proves they do fire when a write does not stick.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import types
 from pathlib import Path
@@ -388,8 +389,12 @@ class FakeMesh(types.ModuleType):
 class FakeMeshPart(types.ModuleType):
     def __init__(self):
         super().__init__("MeshPart")
+        # Recorded so a test can prove which deflection actually reached the
+        # host, instead of inferring it from the exported bytes.
+        self.calls = []
 
     def meshFromShape(self, **kwargs):
+        self.calls.append(kwargs)
         return _Mesh()
 
 
@@ -419,6 +424,26 @@ def _document(host, tmp_path, name="model"):
     path = tmp_path / ("%s.FCStd" % name)
     path.write_bytes(b"document")
     return host.app.openDocument(str(path)), str(path)
+
+
+def _new_objects_with_shape(doc, shape):
+    """Make every object created from here on carry ``shape``.
+
+    Models the host behaviour the shape read-back is the only guard against:
+    the property writes land, the object exists with the requested dimensions,
+    and the geometry behind it is unusable. Nothing in the dimension or
+    placement checks can see that, so without this fixture the shape check is
+    the one assertion in the primitive read-back no fast-lane test exercises.
+    """
+    original = doc.addObject
+
+    def addObject(type_id, name):
+        obj = original(type_id, name)
+        obj.Shape = shape
+        return obj
+
+    doc.addObject = addObject
+    return original
 
 
 def _silence_new_objects(doc):
@@ -544,6 +569,25 @@ def test_add_primitive_refuses_when_the_placement_did_not_land(host, tmp_path):
     assert _mismatch(excinfo).check == "object.placement"
 
 
+def test_add_primitive_refuses_an_object_with_no_geometry(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    _new_objects_with_shape(doc, _Shape(null=True))
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_add_primitive(
+            {
+                "document_path": path,
+                "primitive": "box",
+                "name": "Body",
+                "dimensions": {"length": 80, "width": 50, "height": 24},
+            }
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "object.shape.not_null"
+    assert error.actual == "null"
+
+
 def test_add_primitive_rejects_a_dimension_the_primitive_does_not_have(host, tmp_path):
     _doc, path = _document(host, tmp_path)
 
@@ -619,6 +663,22 @@ def test_update_primitive_refuses_a_silently_dropped_write(host, tmp_path):
     assert error.check == "dimension.Length"
     assert error.expected == 84.0
     assert error.actual == 80.0
+
+
+def test_update_primitive_refuses_an_object_whose_shape_is_invalid(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    body = doc.addObject("Part::Box", "Body")
+    body.Shape = _Shape(valid=False)
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_update_primitive(
+            {"document_path": path, "object_name": "Body", "dimensions": {"length": 84}}
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "object.shape.valid"
+    assert error.expected is True
+    assert error.actual is False
 
 
 def test_update_primitive_reports_the_label_it_failed_to_persist(host, tmp_path):
@@ -933,6 +993,60 @@ def test_export_geometry_refuses_a_mesh_outside_the_source_envelope(host, tmp_pa
         )
 
     assert _mismatch(excinfo).check == "artifact.bounding_box"
+
+
+def test_export_geometry_keeps_the_documented_default_deflections(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    doc.addObject("Part::Box", "Body")
+    output = tmp_path / "model.stl"
+
+    result = freecad_driver.model_export_geometry(
+        {"document_path": path, "object_names": ["Body"], "output_path": str(output)}
+    )
+
+    assert "artifact.mesh_non_empty" in result["verified"]
+    assert host.mesh_part.calls[0]["LinearDeflection"] == 0.1
+    assert host.mesh_part.calls[0]["AngularDeflection"] == math.radians(15)
+
+
+def test_export_geometry_refuses_an_explicit_zero_linear_deflection(host, tmp_path):
+    """A deflection of 0 is refused, not silently replaced by the default.
+
+    ``params.get("linear_deflection") or 0.1`` accepted the parameter and then
+    ignored it, which is the swallowed-parameter behaviour the contract forbids:
+    the caller asked for one tessellation and was reported a different one.
+    """
+    doc, path = _document(host, tmp_path)
+    doc.addObject("Part::Box", "Body")
+    output = tmp_path / "model.stl"
+
+    with pytest.raises(ValueError, match="linear_deflection must be a finite positive number"):
+        freecad_driver.model_export_geometry(
+            {
+                "document_path": path,
+                "object_names": ["Body"],
+                "output_path": str(output),
+                "linear_deflection": 0,
+            }
+        )
+
+
+def test_export_geometry_refuses_an_explicit_zero_angular_deflection(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    doc.addObject("Part::Box", "Body")
+    output = tmp_path / "model.stl"
+
+    with pytest.raises(
+        ValueError, match="angular_deflection_degrees must be a finite positive number"
+    ):
+        freecad_driver.model_export_geometry(
+            {
+                "document_path": path,
+                "object_names": ["Body"],
+                "output_path": str(output),
+                "angular_deflection_degrees": 0,
+            }
+        )
 
 
 def test_export_geometry_refuses_an_empty_mesh_artifact(host, tmp_path):

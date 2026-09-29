@@ -102,6 +102,28 @@ def _replace_staged_path(value: Any, staged: Path, final: Path) -> Any:
     return value
 
 
+def _unstage_failure(error: BaseException, staged: Path, final: Path) -> BaseException:
+    """Rewrite ``staged`` back to ``final`` inside a failure report.
+
+    The staging copy is unlinked in ``finally``, so a path that survives into an
+    error names a file the caller can no longer open. That matters because the
+    point of a read-back mismatch is that the agent can act on it: told the
+    document is ``.model.FCStd.x7fk2b``, the obvious next step is to inspect it,
+    and that step answers "file does not exist" instead of describing the
+    mismatch. Reporting the path the caller passed in keeps the recovery path
+    open, so a report is rewritten before it leaves the staging wrapper.
+    """
+    payload = getattr(error, "payload", None)
+    if isinstance(payload, dict):
+        error.payload = _replace_staged_path(payload, staged, final)
+    if error.args:
+        error.args = tuple(
+            _replace_staged_path(arg, staged, final) if isinstance(arg, str) else arg
+            for arg in error.args
+        )
+    return error
+
+
 def _remove_staged_backups(staged: Path) -> None:
     """Remove only FreeCAD backups derived from a unique staged filename."""
     prefix = "%s." % staged.stem.lower()
@@ -353,7 +375,10 @@ class FreecadBridge:
             shutil.copy2(str(document), str(staged))
             request = dict(params)
             request["document_path"] = str(staged)
-            result = self._invoke(method, request, timeout_secs)
+            try:
+                result = self._invoke(method, request, timeout_secs)
+            except BaseException as exc:
+                raise _unstage_failure(exc, staged, document) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
                 raise BridgeError("FreeCAD mutation did not produce a durable document")
             os.replace(str(staged), str(document))
@@ -450,11 +475,14 @@ class FreecadBridge:
         staged = Path(temp_name)
         staged.unlink()
         try:
-            result = self._invoke(
-                "document.create",
-                {"document_path": str(staged), "name": name},
-                timeout_secs,
-            )
+            try:
+                result = self._invoke(
+                    "document.create",
+                    {"document_path": str(staged), "name": name},
+                    timeout_secs,
+                )
+            except BaseException as exc:
+                raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
                 raise BridgeError("FreeCAD did not create a durable document")
             os.replace(str(staged), str(output))
@@ -511,11 +539,14 @@ class FreecadBridge:
         staged = Path(temp_name)
         staged.unlink()
         try:
-            result = self._invoke(
-                "document.save_copy",
-                {"document_path": str(source), "output_path": str(staged)},
-                timeout_secs,
-            )
+            try:
+                result = self._invoke(
+                    "document.save_copy",
+                    {"document_path": str(source), "output_path": str(staged)},
+                    timeout_secs,
+                )
+            except BaseException as exc:
+                raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
                 raise BridgeError("FreeCAD did not create the document copy")
             os.replace(str(staged), str(output))
@@ -686,17 +717,20 @@ class FreecadBridge:
         staged = Path(temp_name)
         staged.unlink()
         try:
-            result = self._invoke(
-                "model.export_geometry",
-                {
-                    "document_path": str(document),
-                    "object_names": names,
-                    "output_path": str(staged),
-                    "linear_deflection": linear_deflection,
-                    "angular_deflection_degrees": angular_deflection_degrees,
-                },
-                timeout_secs,
-            )
+            try:
+                result = self._invoke(
+                    "model.export_geometry",
+                    {
+                        "document_path": str(document),
+                        "object_names": names,
+                        "output_path": str(staged),
+                        "linear_deflection": linear_deflection,
+                        "angular_deflection_degrees": angular_deflection_degrees,
+                    },
+                    timeout_secs,
+                )
+            except BaseException as exc:
+                raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
                 raise BridgeError("FreeCAD did not create a durable export")
             os.replace(str(staged), str(output))

@@ -1289,12 +1289,19 @@ def model_export_geometry(params):
             import Mesh
             import MeshPart
 
+            # ``or`` would swallow an explicit 0 and substitute the default,
+            # which is the silent-parameter behaviour this contract forbids: a
+            # deflection of 0 is meaningless, so it is refused rather than
+            # quietly replaced by 0.1. Only an absent parameter defaults.
             linear_deflection = _positive(
-                params.get("linear_deflection") or 0.1, "linear_deflection"
+                params["linear_deflection"] if params.get("linear_deflection") is not None else 0.1,
+                "linear_deflection",
             )
             angular_deflection = math.radians(
                 _positive(
-                    params.get("angular_deflection_degrees") or 15,
+                    params["angular_deflection_degrees"]
+                    if params.get("angular_deflection_degrees") is not None
+                    else 15,
                     "angular_deflection_degrees",
                 )
             )

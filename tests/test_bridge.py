@@ -14,6 +14,9 @@ class FakeFreecad(FreecadBridge):
         self.executable = "fake-freecadcmd"
         self.calls = []
         self.fail_method = None
+        # Set together with ``fail_method``: fail with a structured read-back
+        # mismatch instead of a plain error, so a test can inspect the payload.
+        self.fail_verification = None
 
     def _invoke(self, method, params, timeout_secs=120):
         self.calls.append((method, dict(params), timeout_secs))
@@ -21,7 +24,19 @@ class FakeFreecad(FreecadBridge):
             document = params.get("document_path")
             if document:
                 Path(document).write_bytes(b"partial-corruption")
-            raise BridgeError("simulated host failure")
+            if self.fail_verification is not None:
+                raise WriteVerificationError(
+                    {
+                        "tool": method,
+                        "check": self.fail_verification,
+                        "expected": 84.0,
+                        "actual": 80.0,
+                        "host_version": "1.1.4",
+                        "params": dict(params),
+                    },
+                    "simulated read-back mismatch",
+                )
+            raise BridgeError("simulated host failure on %s" % (document or ""))
         if method == "system.status":
             return {"version": "1.1.3", "python_version": "3.11.14"}
         if method == "document.create":
@@ -126,6 +141,73 @@ def test_successful_mutation_replaces_document_and_reports_provenance(tmp_path: 
     assert result["document_bytes"] == len(b"known-good-mutated")
     assert len(result["document_sha256"]) == 64
     assert not list(tmp_path.glob(".*.FCBak"))
+
+
+def test_a_failed_mutation_reports_the_callers_document_path(tmp_path: Path):
+    """A mismatch must name a path the caller can still open.
+
+    The staging copy is deleted before the error surfaces, so a payload that
+    still points at it sends whoever follows the report to a file that is gone.
+    """
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+    bridge.fail_method = "model.add_primitive"
+    bridge.fail_verification = "dimension.Length"
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        bridge.add_primitive(str(document), "box", "Body", dimensions={"length": 84})
+
+    reported = excinfo.value.payload["params"]["document_path"]
+    assert reported == str(document)
+    assert ".model." not in reported
+    assert not list(tmp_path.glob(".model.*.FCStd"))
+
+
+def test_a_plain_host_failure_also_loses_the_staged_path(tmp_path: Path):
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+    bridge.fail_method = "model.add_primitive"
+
+    with pytest.raises(BridgeError) as excinfo:
+        bridge.add_primitive(str(document), "box", "Body")
+
+    message = str(excinfo.value)
+    assert str(document) in message, "the caller's path must survive in the message"
+    assert ".model." not in message, "the deleted staging copy must not"
+
+
+def test_a_failed_export_reports_the_callers_output_path(tmp_path: Path):
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    output = tmp_path / "model.step"
+    bridge = FakeFreecad(tmp_path)
+    bridge.fail_method = "model.export_geometry"
+    bridge.fail_verification = "artifact.solids"
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        bridge.export_geometry(str(document), ["Body"], str(output))
+
+    reported = excinfo.value.payload["params"]["output_path"]
+    assert reported == str(output)
+    assert ".model." not in reported
+
+
+def test_a_failed_copy_reports_the_callers_output_path(tmp_path: Path):
+    source = tmp_path / "model.FCStd"
+    source.write_bytes(b"known-good")
+    output = tmp_path / "copy.FCStd"
+    bridge = FakeFreecad(tmp_path)
+    bridge.fail_method = "document.save_copy"
+    bridge.fail_verification = "copy.objects"
+
+    with pytest.raises(WriteVerificationError) as excinfo:
+        bridge.save_copy(str(source), str(output))
+
+    reported = excinfo.value.payload["params"]["output_path"]
+    assert reported == str(output)
+    assert ".copy." not in reported
 
 
 def test_object_names_and_update_dimensions_are_validated(tmp_path: Path):
