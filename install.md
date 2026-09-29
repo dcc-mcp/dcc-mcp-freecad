@@ -6,7 +6,9 @@ before changing an installation.
 
 ## Requirements
 
-- Python 3.7 or newer for the adapter service.
+- Python 3.7 or newer for the adapter service. This is the **wrapper** side
+  only; FreeCAD runs its own, newer interpreter — see
+  [Host Python interpreter](#host-python-interpreter).
 - `dcc-mcp-core>=0.20.36` in the same Python environment.
 - A FreeCAD version listed in the compatibility matrix below, with a working
   `FreeCADCmd`/`freecadcmd` executable.
@@ -28,6 +30,9 @@ which the service and the in-FreeCAD driver both read:
 | 1.1.x | supported | CI end-to-end run on 1.1.4 |
 | anything else | rejected | n/a |
 
+Both pinned CI artifacts are Linux AppImages built against Python 3.11, so
+3.11 is the host interpreter the matrix is currently verified against.
+
 | Platform | FreeCAD installation | Discovery |
 | --- | --- | --- |
 | Windows | Official 64-bit installer or `winget install --id FreeCAD.FreeCAD --exact` | `PATH`, `Program Files`, or `--dcc-path` |
@@ -37,8 +42,8 @@ which the service and the in-FreeCAD driver both read:
 Distribution repositories can carry an older FreeCAD. The doctor launches the
 discovered executable through the packaged status driver and reports the actual
 version plus a `host_matrix` verdict instead of trusting the package name or
-install path. A version outside the matrix fails the preflight
-(`failure_stage: host_version`) with an `error_code`:
+install path. A version that **parsed** but sits outside the matrix fails the
+preflight (`failure_stage: host_version`, exit `10`) with an `error_code`:
 
 | `error_code` | Meaning |
 | --- | --- |
@@ -46,6 +51,13 @@ install path. A version outside the matrix fails the preflight
 | `freecad_host_version_unverified` | Newer than every verified range |
 | `freecad_host_version_unlisted` | Inside the covered span but not in any declared range |
 | `freecad_host_version_unparsable` | The executable did not report a usable version |
+
+`freecad_host_version_unparsable` is the exception to that routing: when the
+executable reports a string the version parser cannot read — for example
+`unknown`, or a major-only string such as `1` — the doctor cannot classify it
+against the matrix at all, so it returns `failure_stage: runtime` (exit `40`)
+instead. The problem there is the host runtime reporting an unusable version, not
+a FreeCAD release to upgrade to.
 
 An undeclared version is never treated as "good enough". Add and verify a new
 range in `compat_matrix.json` before running on it.
@@ -59,6 +71,75 @@ report success while the geometry silently stays wrong, so the adapter refuses
 to start unverified rather than guessing. Declared breaks are listed per version
 in `checks.runtime.host_matrix.breaking_changes`, and every run against a real
 host records `api_probe` evidence next to them.
+
+## Host Python interpreter
+
+`dcc-mcp-freecad` runs in two separate Python interpreters:
+
+| Side | Runs | Python version |
+| --- | --- | --- |
+| Wrapper | the `dcc-mcp-freecad` CLI, server, and `doctor`, plus the process that launches `FreeCADCmd` | 3.7 or newer, from the environment the wheel was installed into |
+| Host | `freecad_driver.py` and every skill script, inside FreeCAD | the interpreter FreeCAD ships: 3.10 or newer (3.11 in the verified CI runs) |
+
+They do not share `sys.path` or site-packages. Installing the wheel into the
+wrapper environment does not make `import FreeCAD` work there, and installing it
+into FreeCAD's interpreter is neither required nor supported. The wrapper reaches
+the host only by launching `FreeCADCmd` with the packaged driver, so the
+wrapper's Python version never constrains the host's.
+
+### Confirm the host interpreter version
+
+The authoritative value is what FreeCAD itself reports. `doctor` reads it from
+inside FreeCAD, so one call gives you both host versions:
+
+```text
+dcc-mcp-freecad doctor --json
+```
+
+Read `checks.runtime.python_version` for the host interpreter and
+`checks.runtime.freecad_version` for the host application.
+
+To ask FreeCAD directly, run the executable in console mode with a one-line
+Python argument. `FreeCADCmd` executes a positional argument that is not an
+existing file as Python code, so this prints the interpreter the driver will
+actually run on:
+
+```bash
+FreeCADCmd -c "import sys; print(sys.version)"
+```
+
+```powershell
+& "C:\Program Files\FreeCAD 1.0\bin\FreeCADCmd.exe" -c "import sys; print(sys.version)"
+```
+
+For the wrapper side, run `python -V` in the environment that owns the
+`dcc-mcp-freecad` command. Confirm the host interpreter whenever
+`DCC_MCP_FREECAD_EXECUTABLE` or `--dcc-path` points at a non-default install, or
+when several FreeCAD builds are installed side by side.
+
+### Version mismatch symptoms
+
+The two interpreters do not negotiate a version — the bridge launches
+`FreeCADCmd` and never imports FreeCAD into the wrapper. Every symptom that
+looks like a wrapper/host version mismatch is therefore one of these:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `ModuleNotFoundError: No module named 'FreeCAD'` in the wrapper environment | importing FreeCAD from the wrapper, which never has it | drive FreeCAD through the adapter instead of importing it |
+| the driver fails on a package that is installed in the wrapper | the host interpreter cannot see the wrapper's site-packages | the driver uses only FreeCAD's own modules; remove that dependency from the driver path |
+| `checks.runtime.python_version` is older than expected | discovery selected a different FreeCAD build than intended | look for an earlier executable ahead on `PATH`, then pin with `DCC_MCP_FREECAD_EXECUTABLE` or `--dcc-path` and re-run `doctor --json` |
+| syntax or stdlib errors raised inside the driver | the host interpreter is older than the driver assumes | upgrade FreeCAD to a version declared in `compat_matrix.json` |
+
+`failure_stage` remains the routing key, and the two host-version shapes route
+differently:
+
+| Shape | `failure_stage` | Exit | `error_code` |
+| --- | --- | --- | --- |
+| the version could not be parsed at all | `runtime` | `40` | `freecad_host_version_unparsable` |
+| the version parsed but is outside the matrix | `host_version` | `10` | `freecad_host_version_unsupported`, `freecad_host_version_unverified`, or `freecad_host_version_unlisted` |
+
+Anything else at the interpreter level — a broken or unready FreeCAD runtime —
+also surfaces as `runtime` (exit `40`) with the bounded reason FreeCAD reported.
 
 ## Agent quick path
 
@@ -78,8 +159,8 @@ return the same safe standalone contract:
 
 - exit `0`: configuration, Core, packaged driver, FreeCAD version, and runtime
   status all passed; `directly_usable` is true;
-- exit `10`: executable, FreeCAD version, Core, or configuration preflight
-  failed;
+- exit `10`: executable, FreeCAD version outside the matrix, Core, or
+  configuration preflight failed;
 - exit `40`: FreeCAD was discovered but its packaged runtime status probe
   failed.
 
@@ -162,6 +243,11 @@ adapter uninstall.
 - `failure_stage: runtime`: run the emitted retry command and inspect the
   bounded reason. FreeCAD licensing/startup errors and a broken Python runtime
   must be repaired in the owning FreeCAD installation.
+- Host interpreter looks wrong: compare `checks.runtime.python_version` from
+  `dcc-mcp-freecad doctor --json` with the `FreeCADCmd -c "import sys; ..."`
+  one-liner in [Host Python interpreter](#host-python-interpreter). If they
+  disagree, discovery is picking a different build than you tested — pin it with
+  `DCC_MCP_FREECAD_EXECUTABLE` or `--dcc-path`.
 - Documents rejected as outside the workspace: add only the required existing
   root to `DCC_MCP_FREECAD_ALLOWED_ROOTS`; do not broaden it to an entire drive.
 - Timeouts: raise `DCC_MCP_FREECAD_MAX_TIMEOUT_SECS` deliberately, then pass a

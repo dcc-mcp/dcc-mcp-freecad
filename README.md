@@ -28,10 +28,30 @@ accepted. The adapter invokes only its packaged method-dispatch driver.
 
 ## Requirements
 
-- Python 3.7+
-- `dcc-mcp-core` 0.20.36+
+This adapter spans **two separate Python interpreters**. They have different
+versions, different `sys.path`, and different site-packages:
+
+| Side | What runs there | Python version | Who owns that version |
+| --- | --- | --- | --- |
+| Wrapper (service side) | the `dcc-mcp-freecad` CLI, server, and `doctor`, plus the process that launches `FreeCADCmd` | **3.7+** (`requires-python = ">=3.7"`) | the environment you `pip install dcc-mcp-freecad` into |
+| Host (FreeCAD side) | `src/dcc_mcp_freecad/freecad_driver.py` and every skill script | **3.10+** — the interpreter FreeCAD is built against and ships (3.11 in both release lines CI exercises) | your FreeCAD installation |
+
+- `dcc-mcp-core` 0.20.36+ in the **wrapper** environment.
 - A FreeCAD version covered by the compatibility matrix below, with a working
-  `FreeCADCmd`/`freecadcmd`
+  `FreeCADCmd`/`freecadcmd`.
+
+Because the two interpreters are separate:
+
+- **Do not create a Python 3.7 virtualenv and expect `import FreeCAD` to work in
+  it.** The wrapper runs fine on 3.7, but FreeCAD's modules exist only inside
+  FreeCAD's own Python, which is 3.10 or newer in every supported release.
+- Installing the wheel into FreeCAD's interpreter is neither required nor
+  supported; the wrapper drives the host by launching `FreeCADCmd` with the
+  packaged driver.
+- `dcc-mcp-freecad doctor --json` reports the host interpreter as
+  `checks.runtime.python_version`, next to `checks.runtime.freecad_version`. See
+  [install.md](install.md#host-python-interpreter) for how to read and
+  cross-check both.
 
 ### FreeCAD compatibility matrix
 
@@ -45,8 +65,11 @@ contract, this section only points at it:
 | 1.1.x | supported |
 | anything else | rejected with an explicit error code |
 
-Both supported lines are exercised end-to-end on real FreeCAD in CI. A version
-outside the matrix is **not** silently downgraded to "probably fine":
+Both supported lines are exercised end-to-end on real FreeCAD in CI —
+**1.0.2** and **1.1.4**, the two pinned AppImages in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) — and both ship Python
+3.11 as the host interpreter. A version outside the matrix is **not** silently
+downgraded to "probably fine":
 `dcc-mcp-freecad doctor --json` fails with an `error_code`
 (`freecad_host_version_unsupported`, `freecad_host_version_unverified`,
 `freecad_host_version_unlisted`, or `freecad_host_version_unparsable`), the
