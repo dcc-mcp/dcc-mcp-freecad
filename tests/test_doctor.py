@@ -65,7 +65,7 @@ def test_public_doctor_verifies_the_discovered_freecad_runtime(tmp_path, monkeyp
         return {"version": "1.0.2", "python_version": "3.11.9", "ready": True}
 
     monkeypatch.setattr(doctor.FreecadBridge, "status", status)
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     code = cli.main(
         [
@@ -111,7 +111,7 @@ def test_doctor_rejects_legacy_freecad_before_claiming_usability(tmp_path, monke
             "ready": True,
         },
     )
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 10
 
@@ -134,7 +134,7 @@ def test_doctor_runtime_failure_uses_verify_exit(tmp_path, monkeypatch, capsys):
         raise BridgeError("FreeCAD driver did not return a result")
 
     monkeypatch.setattr(doctor.FreecadBridge, "status", fail_status)
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 40
 
@@ -157,7 +157,7 @@ def test_doctor_fails_closed_when_runtime_does_not_report_ready(tmp_path, monkey
             "ready": False,
         },
     )
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 40
 
@@ -184,9 +184,9 @@ def test_doctor_rejects_old_core_before_launching_freecad(tmp_path, monkeypatch,
     assert report["checks"]["core"] == {
         "success": False,
         "version": "0.19.90",
-        "minimum": "0.19.91",
+        "minimum": doctor.MIN_CORE_VERSION,
     }
-    assert report["next_steps"][0]["command"][-1] == "dcc-mcp-core>=0.19.91"
+    assert report["next_steps"][0]["command"][-1] == "dcc-mcp-core>=%s" % doctor.MIN_CORE_VERSION
 
 
 def test_doctor_reports_invalid_environment_configuration(tmp_path, monkeypatch, capsys):
@@ -194,7 +194,7 @@ def test_doctor_reports_invalid_environment_configuration(tmp_path, monkeypatch,
 
     executable = _freecad_executable(tmp_path)
     monkeypatch.setenv("DCC_MCP_FREECAD_MAX_TIMEOUT_SECS", "not-a-number")
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 10
 
@@ -218,7 +218,7 @@ def test_doctor_rejects_non_positive_document_limit(tmp_path, monkeypatch, capsy
             "ready": True,
         },
     )
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 10
 
@@ -237,7 +237,7 @@ def test_doctor_rejects_invalid_server_port_before_launch(tmp_path, monkeypatch,
         raise AssertionError("invalid port must fail before FreeCAD launch")
 
     monkeypatch.setattr(doctor.FreecadBridge, "status", unexpected_status)
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 10
 
@@ -259,7 +259,7 @@ def test_verify_uses_the_same_standalone_runtime_contract(tmp_path, monkeypatch,
             "ready": True,
         },
     )
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["verify", "--json", "--dcc-path", str(executable)]) == 0
 
@@ -277,7 +277,7 @@ def test_doctor_rejects_invalid_probe_timeout_before_launch(tmp_path, monkeypatc
         raise AssertionError("invalid timeout must fail before FreeCAD launch")
 
     monkeypatch.setattr(doctor.FreecadBridge, "status", unexpected_status)
-    monkeypatch.setattr(doctor, "runtime_core_version", lambda: "0.20.8")
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
 
     assert cli.main(["doctor", "--json", "--dcc-path", str(executable), "--timeout", "0"]) == 10
 

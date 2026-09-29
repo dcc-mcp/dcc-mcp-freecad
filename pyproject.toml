@@ -23,7 +23,7 @@ classifiers=[
   "Programming Language :: Python :: 3.12",
   "Operating System :: OS Independent",
 ]
-dependencies=["dcc-mcp-core>=0.19.91,<1.0.0"]
+dependencies=["dcc-mcp-core>=0.20.36,<1.0.0"]
 
 [project.urls]
 Homepage="https://github.com/dcc-mcp/dcc-mcp-freecad"
