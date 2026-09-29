@@ -53,10 +53,11 @@ preflight (`failure_stage: host_version`, exit `10`) with an `error_code`:
 | `freecad_host_version_unparsable` | The executable did not report a usable version |
 
 `freecad_host_version_unparsable` is the exception to that routing: when the
-executable reports a string the version parser cannot read (a dev build such as
-`1.1.0dev`), the doctor cannot classify it against the matrix at all, so it
-returns `failure_stage: runtime` (exit `40`) instead. The problem there is the
-host runtime reporting an unusable version, not a FreeCAD release to upgrade to.
+executable reports a string the version parser cannot read — for example
+`unknown`, or a major-only string such as `1` — the doctor cannot classify it
+against the matrix at all, so it returns `failure_stage: runtime` (exit `40`)
+instead. The problem there is the host runtime reporting an unusable version, not
+a FreeCAD release to upgrade to.
 
 An undeclared version is never treated as "good enough". Add and verify a new
 range in `compat_matrix.json` before running on it.
@@ -158,8 +159,8 @@ return the same safe standalone contract:
 
 - exit `0`: configuration, Core, packaged driver, FreeCAD version, and runtime
   status all passed; `directly_usable` is true;
-- exit `10`: executable, FreeCAD version, Core, or configuration preflight
-  failed;
+- exit `10`: executable, FreeCAD version outside the matrix, Core, or
+  configuration preflight failed;
 - exit `40`: FreeCAD was discovered but its packaged runtime status probe
   failed.
 
