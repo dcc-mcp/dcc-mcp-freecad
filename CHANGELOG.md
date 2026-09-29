@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.3.0...v0.4.0) (2026-09-29)
+
+
+### Features
+
+* prove every mutating tool took effect before it reports success ([#17](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/17)) ([eb677ae](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/eb677ae678a7d0a4464af37f60b3005cdd2c4726))
+
 ## [0.3.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.2.0...v0.3.0) (2026-09-29)
 
 
