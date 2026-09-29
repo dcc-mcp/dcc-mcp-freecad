@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.4.0...v0.4.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* report caller paths in write failures and refuse zero deflections ([867d3f1](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/867d3f10194ea3cacf16a6d349cf59398a7331d8))
+
 ## [0.4.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.3.0...v0.4.0) (2026-09-29)
 
 
