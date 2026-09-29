@@ -5,7 +5,7 @@ description: >-
   through an isolated FreeCADCmd process. Use for FCStd document lifecycle and
   diagnostics; load freecad-modeling for geometry operations.
 license: MIT
-compatibility: "Python 3.7+; FreeCAD 1.0+; dcc-mcp-core 0.19+"
+compatibility: "Python 3.7+; FreeCAD 1.0.x or 1.1.x (see compat_matrix.json); dcc-mcp-core 0.20.36+"
 allowed-tools: "python"
 metadata:
   dcc-mcp:

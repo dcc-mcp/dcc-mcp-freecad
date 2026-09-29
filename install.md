@@ -8,7 +8,8 @@ before changing an installation.
 
 - Python 3.7 or newer for the adapter service.
 - `dcc-mcp-core>=0.20.36` in the same Python environment.
-- FreeCAD 1.0 or newer with a working `FreeCADCmd`/`freecadcmd` executable.
+- A FreeCAD version listed in the compatibility matrix below, with a working
+  `FreeCADCmd`/`freecadcmd` executable.
 - Existing directories for every entry in `DCC_MCP_FREECAD_ALLOWED_ROOTS`.
 
 FreeCAD is an external OS-managed application. The adapter invokes only its
@@ -17,6 +18,16 @@ paths, or additional FreeCAD command-line flags.
 
 ## Supported versions
 
+Host support is declared in the machine-readable matrix at
+[`src/dcc_mcp_freecad/compat_matrix.json`](src/dcc_mcp_freecad/compat_matrix.json),
+which the service and the in-FreeCAD driver both read:
+
+| FreeCAD | Status | Real-machine evidence |
+| --- | --- | --- |
+| 1.0.x | supported | CI end-to-end run on 1.0.2 |
+| 1.1.x | supported | CI end-to-end run on 1.1.4 |
+| anything else | rejected | n/a |
+
 | Platform | FreeCAD installation | Discovery |
 | --- | --- | --- |
 | Windows | Official 64-bit installer or `winget install --id FreeCAD.FreeCAD --exact` | `PATH`, `Program Files`, or `--dcc-path` |
@@ -24,8 +35,30 @@ paths, or additional FreeCAD command-line flags.
 | Linux | Distribution package or a version-pinned official package managed by the operator | `PATH` or `--dcc-path` |
 
 Distribution repositories can carry an older FreeCAD. The doctor launches the
-discovered executable through the packaged status driver and rejects any
-runtime below 1.0 instead of trusting the package name or install path.
+discovered executable through the packaged status driver and reports the actual
+version plus a `host_matrix` verdict instead of trusting the package name or
+install path. A version outside the matrix fails the preflight
+(`failure_stage: host_version`) with an `error_code`:
+
+| `error_code` | Meaning |
+| --- | --- |
+| `freecad_host_version_unsupported` | Below the covered ranges; upgrade FreeCAD |
+| `freecad_host_version_unverified` | Newer than every verified range |
+| `freecad_host_version_unlisted` | Inside the covered span but not in any declared range |
+| `freecad_host_version_unparsable` | The executable did not report a usable version |
+
+An undeclared version is never treated as "good enough". Add and verify a new
+range in `compat_matrix.json` before running on it.
+
+### Why an unverified host is refused
+
+FreeCAD moved host API between 1.0 and 1.1 (for example the Sketcher
+`Symmetric` → `Midplane` rename, the removal of `ExternalGeometryCount`, and
+`MeshPart` tessellation deflection changes). Those moves surface as tools that
+report success while the geometry silently stays wrong, so the adapter refuses
+to start unverified rather than guessing. Declared breaks are listed per version
+in `checks.runtime.host_matrix.breaking_changes`, and every run against a real
+host records `api_probe` evidence next to them.
 
 ## Agent quick path
 
@@ -115,11 +148,13 @@ adapter uninstall.
 
 ## Troubleshooting
 
-- `failure_stage: host`: install FreeCAD 1.0+ or pass the exact
-  `FreeCADCmd` path with `--dcc-path`.
-- `failure_stage: host_version`: the discovered executable is too old; upgrade
-  it with its OS/package manager and check for a stale earlier executable on
-  `PATH`.
+- `failure_stage: host`: no `FreeCADCmd`/`freecadcmd` was found. Install a
+  FreeCAD version covered by `compat_matrix.json` (1.0.x or 1.1.x) or pass the
+  exact executable with `--dcc-path`.
+- `failure_stage: host_version`: the discovered FreeCAD is outside the
+  compatibility matrix. Read `error_code` and
+  `checks.runtime.host_matrix.supported_ranges`, then install or pin a covered
+  version and check for a stale earlier executable on `PATH`.
 - `failure_stage: core`: upgrade `dcc-mcp-core` in the same environment that
   provides the `dcc-mcp-freecad` command.
 - `failure_stage: configuration`: ensure allowed roots exist and the document
