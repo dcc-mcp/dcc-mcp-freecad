@@ -109,6 +109,13 @@ the kind of failure rather than parsing a sentence. `host_matrix` is the trimmed
 compatibility-matrix verdict from the host compatibility work, which is what
 tells you whether you are looking at drift or at a genuine modelling error.
 
+Every path in the payload is a path the caller passed in, never an internal one.
+An adapter that writes through a temporary file and renames it into place must
+rewrite its own staging paths out of the report before raising: the temporary
+file is gone by the time the caller reads the error, so leaving it in sends the
+caller to inspect a file that no longer exists instead of recovering from the
+mismatch it was told about.
+
 The rendered message states the tool, the check, both values, and the host
 version, in that order:
 
