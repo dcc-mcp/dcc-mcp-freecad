@@ -7,7 +7,7 @@ before changing an installation.
 ## Requirements
 
 - Python 3.7 or newer for the adapter service.
-- `dcc-mcp-core>=0.19.91` in the same Python environment.
+- `dcc-mcp-core>=0.20.36` in the same Python environment.
 - FreeCAD 1.0 or newer with a working `FreeCADCmd`/`freecadcmd` executable.
 - Existing directories for every entry in `DCC_MCP_FREECAD_ALLOWED_ROOTS`.
 

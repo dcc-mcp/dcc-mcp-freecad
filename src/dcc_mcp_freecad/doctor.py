@@ -19,7 +19,7 @@ from .install_contract import (
     runtime_core_version,
 )
 
-MIN_CORE_VERSION = "0.19.91"
+MIN_CORE_VERSION = "0.20.36"
 MIN_FREECAD_VERSION = "1.0"
 _RELEASE = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?")
 

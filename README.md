@@ -29,7 +29,7 @@ accepted. The adapter invokes only its packaged method-dispatch driver.
 ## Requirements
 
 - Python 3.7+
-- `dcc-mcp-core` 0.19.91+
+- `dcc-mcp-core` 0.20.36+
 - FreeCAD 1.0 or newer with `FreeCADCmd`/`freecadcmd`
 
 ## Install
