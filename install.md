@@ -148,8 +148,9 @@ adapter uninstall.
 
 ## Troubleshooting
 
-- `failure_stage: host`: install FreeCAD 1.0+ or pass the exact
-  `FreeCADCmd` path with `--dcc-path`.
+- `failure_stage: host`: no `FreeCADCmd`/`freecadcmd` was found. Install a
+  FreeCAD version covered by `compat_matrix.json` (1.0.x or 1.1.x) or pass the
+  exact executable with `--dcc-path`.
 - `failure_stage: host_version`: the discovered FreeCAD is outside the
   compatibility matrix. Read `error_code` and
   `checks.runtime.host_matrix.supported_ranges`, then install or pin a covered

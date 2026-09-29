@@ -86,7 +86,7 @@
       "symptom": "Tessellation honours deflection differently, so an STL/OBJ export can succeed with an empty or degenerate mesh instead of failing.",
       "adapter_usage": "guarded",
       "enforcement": "postcondition",
-      "remediation": "The adapter asserts the tessellated mesh is non-empty and bounded before exporting; a degenerate mesh raises an explicit error naming the host version instead of writing a short file."
+      "remediation": "The adapter asserts the tessellated mesh is non-empty and bounded before exporting: an empty mesh, or one whose bounding box is missing or not finite, raises an explicit error naming the host version instead of writing a plausible-looking file."
     }
   ]
 }

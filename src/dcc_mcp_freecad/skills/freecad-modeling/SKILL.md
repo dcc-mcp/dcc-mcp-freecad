@@ -5,7 +5,7 @@ description: >-
   perform booleans, and import or export CAD/mesh geometry. Use after
   freecad-session has created or inspected a durable FCStd document.
 license: MIT
-compatibility: "Python 3.7+; FreeCAD 1.0+; dcc-mcp-core 0.19+"
+compatibility: "Python 3.7+; FreeCAD 1.0.x or 1.1.x (see compat_matrix.json); dcc-mcp-core 0.20.36+"
 allowed-tools: "python"
 metadata:
   dcc-mcp:

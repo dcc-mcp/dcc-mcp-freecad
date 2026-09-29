@@ -606,7 +606,7 @@ def model_import_geometry(params):
 
 
 def _assert_tessellation(mesh_obj, source_name, version):
-    """Assert tessellation produced a real mesh instead of a silent empty one.
+    """Assert tessellation produced a real, bounded mesh instead of a silent one.
 
     MeshPart deflection behaviour moved between FreeCAD 1.0 and 1.1. A changed
     deflection is only visible as a degenerate mesh, so the export asserts the
@@ -615,24 +615,47 @@ def _assert_tessellation(mesh_obj, source_name, version):
     mesh = getattr(mesh_obj, "Mesh", None)
     points = int(getattr(mesh, "CountPoints", 0) or 0)
     facets = int(getattr(mesh, "CountFacets", 0) or 0)
-    if points <= 0 or facets <= 0:
+    empty = points <= 0 or facets <= 0
+    unbounded = _is_unbounded(mesh)
+    if empty or unbounded:
         entry = _breaking_change_for_symbol("MeshPart.meshFromShape", version) or {}
+        reason = (
+            "an empty mesh (%d points, %d facets)" % (points, facets)
+            if empty
+            else "an unbounded mesh (no finite bounding box)"
+        )
         raise IncompatibleHostError(
-            "FreeCAD %s tessellated %s into an empty mesh (%d points, %d facets) with "
-            "linear_deflection=%s and angular_deflection_degrees=%s. Refusing to export a "
-            "degenerate mesh. %s"
+            "FreeCAD %s tessellated %s into %s. Refusing to export a degenerate mesh. %s"
             % (
                 version,
                 source_name,
-                points,
-                facets,
-                "unknown",
-                "unknown",
+                reason,
                 entry.get("remediation")
                 or "Increase the deflection or repair the shape, then retry.",
             )
         )
     return mesh
+
+
+def _is_unbounded(mesh):
+    """True when the mesh exposes a bounding box that is missing or not finite.
+
+    A host that does not report a bounding box is not treated as unbounded: the
+    assertion only fails on a box that exists and is demonstrably unusable, so a
+    thinner host API cannot turn this guard into a false rejection.
+    """
+    box = getattr(mesh, "BoundBox", None)
+    if box is None:
+        return False
+    if getattr(box, "isValid", None) is not None and not box.isValid():
+        return True
+    for axis in ("XLength", "YLength", "ZLength"):
+        value = getattr(box, axis, None)
+        if value is None:
+            return False
+        if not math.isfinite(float(value)) or float(value) < 0:
+            return True
+    return False
 
 
 def model_export_geometry(params):
@@ -672,8 +695,10 @@ def model_export_geometry(params):
                         ),
                         Relative=False,
                     )
-                    _assert_tessellation(mesh_obj, obj.Name, _host_version())
+                    # Register for cleanup before asserting, so a refused
+                    # export still removes the throwaway mesh object.
                     temp_meshes.append(mesh_obj)
+                    _assert_tessellation(mesh_obj, obj.Name, _host_version())
                     mesh_objects.append(mesh_obj)
                 else:
                     raise ValueError("Object cannot be meshed: %s" % obj.Name)

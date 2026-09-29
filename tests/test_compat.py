@@ -308,9 +308,22 @@ def test_the_property_guard_does_not_fire_on_supported_symbols():
     assert (obj.Length, obj.Width, obj.Height) == (2, 2, 2)
 
 
-def test_an_unsupported_host_cannot_reach_geometry_work(monkeypatch):
-    monkeypatch.setattr(freecad_driver, "_host_version", lambda: "1.2.0")
+def test_dimension_writes_route_through_the_guard_and_refuse_a_missing_property():
+    """The guard must be wired into the write path, not merely exist.
 
+    Without it, setattr on a host that no longer exposes the property adds a
+    plain attribute and the call succeeds while the geometry never changes.
+    """
+    obj = _FakeObject()  # a Part::Box that lost its Length property
+
+    with pytest.raises(freecad_driver.IncompatibleHostError) as error:
+        freecad_driver._apply_dimensions(obj, {"length": 84}, "1.1.4")
+
+    assert "Length" in str(error.value)
+    assert not hasattr(obj, "Length")
+
+
+def test_an_unsupported_host_cannot_reach_geometry_work():
     with pytest.raises(freecad_driver.IncompatibleHostError) as error:
         freecad_driver._require_supported_host("1.2.0")
 
@@ -321,12 +334,83 @@ def test_a_supported_host_passes_the_preflight_gate():
     assert freecad_driver._require_supported_host("1.1.4")["status"] == "supported"
 
 
-def test_system_status_stays_measurable_on_an_unsupported_host(monkeypatch):
-    """The version probe must work on the host it is about to reject."""
-    monkeypatch.setattr(freecad_driver, "_host_version", lambda: "1.2.0")
+def _run_driver(monkeypatch, tmp_path, method, params, version):
+    """Drive freecad_driver.main() the way FreeCADCmd does, and read the result."""
+    request = tmp_path / "request.json"
+    result = tmp_path / "result.json"
+    request.write_text(
+        json.dumps({"method": method, "params": params}, ensure_ascii=False), encoding="utf-8"
+    )
+    monkeypatch.setattr(freecad_driver, "_host_version", lambda: version)
+    monkeypatch.setattr(sys, "argv", ["driver", "--pass", str(request), str(result)])
+    freecad_driver.main()
+    return json.loads(result.read_text(encoding="utf-8"))
 
-    with pytest.raises(freecad_driver.IncompatibleHostError):
-        freecad_driver._require_supported_host(freecad_driver._host_version())
+
+def test_the_dispatch_gate_blocks_geometry_work_on_an_unsupported_host(tmp_path, monkeypatch):
+    """The gate lives in the request loop, so it is tested through main().
+
+    A policy function that is never called by the dispatcher is the exact
+    silent-success failure this matrix exists to prevent, so this assertion
+    runs a real dispatch rather than poking _require_supported_host directly.
+    """
+    payload = _run_driver(
+        monkeypatch,
+        tmp_path,
+        "model.add_primitive",
+        {
+            "document_path": str(tmp_path / "doc.FCStd"),
+            "primitive": "box",
+            "name": "Body",
+            "dimensions": {"length": 10, "width": 5, "height": 2},
+            "translation": [0, 0, 0],
+            "rotation_axis": [0, 0, 1],
+            "rotation_degrees": 0,
+        },
+        "1.2.0",
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "IncompatibleHostError"
+    assert "refuses to run unverified" in payload["error"]["message"]
+    # Nothing was written: the geometry work never ran.
+    assert not (tmp_path / "doc.FCStd").exists()
+
+
+def test_the_dispatch_gate_spares_the_version_probe(tmp_path, monkeypatch):
+    """system.status must still answer on the host the gate is about to reject."""
+    fake_freecad = type(sys)("FreeCAD")
+    fake_freecad.Version = lambda: ["1", "2", "0", "", "", ""]
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_freecad)
+
+    payload = _run_driver(monkeypatch, tmp_path, "system.status", {}, "1.2.0")
+
+    assert payload["ok"] is True
+    assert payload["result"]["version"] == "1.2.0"
+    assert payload["result"]["host_matrix"]["status"] == "too_new"
+    assert payload["result"]["host_matrix"]["supported_ranges"] == ["1.0.x", "1.1.x"]
+
+
+def test_a_supported_host_is_dispatched_normally(tmp_path, monkeypatch):
+    """The gate must not block the hosts the matrix covers."""
+    dispatched = []
+
+    def fake_add_primitive(params):
+        dispatched.append(params)
+        return {"object": {"name": params["name"]}}
+
+    monkeypatch.setitem(freecad_driver._METHODS, "model.add_primitive", fake_add_primitive)
+
+    payload = _run_driver(
+        monkeypatch,
+        tmp_path,
+        "model.add_primitive",
+        {"document_path": str(tmp_path / "doc.FCStd"), "name": "Body"},
+        "1.1.4",
+    )
+
+    assert payload["ok"] is True
+    assert dispatched and dispatched[0]["name"] == "Body"
 
 
 class _Mesh:
@@ -353,6 +437,115 @@ def test_a_real_tessellation_passes_the_postcondition():
         _FakeObject(Mesh=_GoodMesh()), "BodyWithPort", "1.1.4"
     )
     assert mesh.CountFacets == 240
+
+
+def test_an_unbounded_tessellation_is_an_explicit_error():
+    class _Box:
+        XLength = float("inf")
+        YLength = 2.0
+        ZLength = 3.0
+
+    class _UnboundedMesh:
+        CountPoints = 120
+        CountFacets = 240
+        BoundBox = _Box()
+
+    with pytest.raises(freecad_driver.IncompatibleHostError) as error:
+        freecad_driver._assert_tessellation(
+            _FakeObject(Mesh=_UnboundedMesh()), "BodyWithPort", "1.1.4"
+        )
+
+    assert "unbounded" in str(error.value)
+
+
+def test_a_mesh_without_a_bounding_box_is_not_treated_as_unbounded():
+    """A thinner host API must not turn the guard into a false rejection."""
+
+    class _ThinMesh:
+        CountPoints = 120
+        CountFacets = 240
+
+    mesh = freecad_driver._assert_tessellation(
+        _FakeObject(Mesh=_ThinMesh()), "BodyWithPort", "1.1.4"
+    )
+    assert mesh.CountFacets == 240
+
+
+class _FakeShape:
+    def isNull(self):
+        return False
+
+
+class _EmptyMesh:
+    CountPoints = 0
+    CountFacets = 0
+
+
+class _FakeDocument:
+    Name = "DccMcpExportDoc"
+
+    def __init__(self, objects):
+        self._objects = objects
+        self.removed = []
+        self.added = []
+
+    def getObject(self, name):
+        return self._objects.get(name)
+
+    def addObject(self, type_id, name):
+        self.added.append(name)
+        holder = _FakeObject(Name=name, Mesh=_EmptyMesh())
+        self._objects[name] = holder
+        return holder
+
+    def removeObject(self, name):
+        self.removed.append(name)
+
+
+def _stub_freecad(monkeypatch, document, version="1.1.4"):
+    """Install the smallest FreeCAD surface model_export_geometry needs."""
+    fake_freecad = type(sys)("FreeCAD")
+    fake_freecad.Version = lambda: list(version.split(".")) + ["", ""]
+    fake_freecad.openDocument = lambda path: document
+    fake_freecad.closeDocument = lambda name: None
+    monkeypatch.setitem(sys.modules, "FreeCAD", fake_freecad)
+
+    mesh = type(sys)("Mesh")
+    mesh.export = lambda objects, path: None
+    monkeypatch.setitem(sys.modules, "Mesh", mesh)
+
+    mesh_part = type(sys)("MeshPart")
+    # A deflection that silently produces nothing, which is the 1.1 failure mode.
+    mesh_part.meshFromShape = lambda **kwargs: _EmptyMesh()
+    monkeypatch.setitem(sys.modules, "MeshPart", mesh_part)
+    return fake_freecad
+
+
+def test_export_refuses_an_empty_tessellation_instead_of_writing_a_file(monkeypatch, tmp_path):
+    """The postcondition must be wired into the export path, not merely exist.
+
+    Without it a changed deflection writes a plausible-looking short STL and
+    reports success, which is the failure this matrix exists to prevent.
+    """
+    document = _FakeDocument({"BodyWithPort": _FakeObject(Name="BodyWithPort", Shape=_FakeShape())})
+    _stub_freecad(monkeypatch, document)
+    output = tmp_path / "model.stl"
+
+    with pytest.raises(freecad_driver.IncompatibleHostError) as error:
+        freecad_driver.model_export_geometry(
+            {
+                "document_path": str(tmp_path / "doc.FCStd"),
+                "object_names": ["BodyWithPort"],
+                "output_path": str(output),
+                "linear_deflection": 0.1,
+                "angular_deflection_degrees": 15,
+            }
+        )
+
+    assert "empty mesh" in str(error.value)
+    assert not output.exists()
+    # The throwaway mesh object is cleaned up even when the export is refused.
+    assert document.removed == ["DccMcpExportMesh0"]
 
 
 def test_the_api_probe_reads_module_level_symbols(monkeypatch):
