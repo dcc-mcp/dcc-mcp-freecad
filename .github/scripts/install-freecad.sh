@@ -46,7 +46,7 @@ root="${workdir}/squashfs-root"
 if [ ! -d "${root}" ]; then
   echo "::group::Extract ${asset}"
   chmod +x "${asset}"
-  "${asset}" --appimage-extract >/dev/null
+  "./${asset}" --appimage-extract >/dev/null
   echo "::endgroup::"
 fi
 

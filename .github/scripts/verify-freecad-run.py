@@ -7,6 +7,7 @@ run. This guard reads the JUnit report and requires a real, non-skipped pass.
 
 from __future__ import annotations
 
+import os
 import sys
 import xml.etree.ElementTree as ElementTree
 
@@ -21,6 +22,8 @@ def _as_int(value: str | None) -> int:
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         sys.exit("usage: verify-freecad-run.py <junit.xml>")
+    if not os.path.isfile(argv[1]):
+        sys.exit("no JUnit report at %s: pytest -m freecad never ran" % argv[1])
     root = ElementTree.parse(argv[1]).getroot()
     suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
 
