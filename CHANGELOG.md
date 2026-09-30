@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.4.1...v0.4.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* emit the Install SOP report schema version, not the artifact revision ([#21](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/21)) ([84bc9c9](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/84bc9c93f447403451857f939b77fcaf076e861f))
+
 ## [0.4.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.4.0...v0.4.1) (2026-09-29)
 
 
