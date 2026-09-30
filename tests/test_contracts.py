@@ -56,3 +56,26 @@ def test_server_declares_standalone_lifetime():
     server = FreecadMcpServer(port=0)
     options = next(value for value in vars(server).values() if hasattr(value, "instance_type"))
     assert options.instance_type == "standalone"
+
+
+def test_report_schema_version_is_the_const_and_not_the_artifact_revision():
+    """The two schema counters must never collapse back into one name.
+
+    `dcc-mcp-core` publishes an Install SOP *artifact* whose revision moved to 2
+    in 0.20.36, while the documents it describes keep `schema_version: 1`. Every
+    report emitted between 0.3.0 and 0.4.1 carried the artifact revision, so the
+    reports failed the very schema they claimed to follow. Naming them apart is
+    what stops that from recurring; these assertions keep them apart.
+    """
+    import dcc_mcp_core
+
+    from dcc_mcp_freecad import install_contract
+
+    assert install_contract.ARTIFACT_SCHEMA_VERSION == dcc_mcp_core.INSTALL_SOP_SCHEMA_VERSION
+    schema = install_contract.load_install_sop_schema()
+    assert schema["properties"]["schema_version"]["const"] == install_contract.SCHEMA_VERSION
+
+
+def test_doctor_never_stamps_the_artifact_schema_revision():
+    doctor = (ROOT / "src" / "dcc_mcp_freecad" / "doctor.py").read_text(encoding="utf-8")
+    assert "ARTIFACT_SCHEMA_VERSION" not in doctor

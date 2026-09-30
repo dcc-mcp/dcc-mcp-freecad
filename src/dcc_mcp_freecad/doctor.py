@@ -31,6 +31,7 @@ from .install_contract import (
     EXIT_PREFLIGHT,
     EXIT_VERIFY,
     SCHEMA_VERSION,
+    load_install_sop_schema,
     runtime_core_version,
 )
 
@@ -42,6 +43,10 @@ ERROR_HOST_TOO_OLD = "freecad_host_version_unsupported"
 ERROR_HOST_TOO_NEW = "freecad_host_version_unverified"
 ERROR_HOST_UNLISTED = "freecad_host_version_unlisted"
 ERROR_HOST_UNKNOWN = "freecad_host_version_unparsable"
+
+# Machine-readable error codes for Install SOP schema drift.
+ERROR_CORE_SCHEMA_UNAVAILABLE = "core_schema_unavailable"
+ERROR_CORE_SCHEMA_INVALID = "core_schema_invalid"
 
 _HOST_ERROR_CODES = {
     TOO_NEW: ERROR_HOST_TOO_NEW,
@@ -121,12 +126,77 @@ def _report(
     }
 
 
+def _schema_preflight() -> Optional[dict[str, str]]:
+    """Return a failure description unless the core artifact agrees with us.
+
+    ``doctor``/``verify`` reports are consumed by tooling that validates them
+    against the Install SOP artifact shipped in ``dcc-mcp-core``. When the value
+    this adapter stamps was taken from the artifact revision rather than from the
+    ``schema_version`` const the artifact pins, every report it produced was
+    invalid -- and because the value came from core itself, nothing in this
+    repository noticed. Checking it here turns that silent drift into an
+    explicit preflight failure.
+    """
+    try:
+        schema = load_install_sop_schema()
+    except Exception as exc:  # the resolved core decides whether it can serve one
+        return {
+            "reason": "dcc-mcp-core did not publish an Install SOP schema: %s" % exc,
+            "error_code": ERROR_CORE_SCHEMA_UNAVAILABLE,
+        }
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return {
+            "reason": "The Install SOP schema published by dcc-mcp-core is not a JSON object",
+            "error_code": ERROR_CORE_SCHEMA_INVALID,
+        }
+    const = schema.get("properties", {}).get("schema_version", {}).get("const")
+    if const != SCHEMA_VERSION:
+        return {
+            "reason": "dcc-mcp-core %s pins report schema_version to %r, but this adapter "
+            "emits %r; the Install SOP contract has moved"
+            % (runtime_core_version(), const, SCHEMA_VERSION),
+            "error_code": ERROR_CORE_SCHEMA_INVALID,
+        }
+    return None
+
+
 def doctor_report(
     executable: Optional[Path] = None, verb: str = "doctor", timeout: float = 30
 ) -> dict[str, Any]:
     core_version = runtime_core_version()
     checks: dict[str, Any] = {}
     steps: list[dict[str, Any]] = []
+    schema_failure = _schema_preflight()
+    if schema_failure is not None:
+        reason = schema_failure["reason"]
+        checks["schema"] = {"success": False, "reason": reason}
+        steps.append({"id": "validate-core-schema", "status": "failed", "message": reason})
+        return _report(
+            verb,
+            core_version,
+            checks,
+            steps,
+            EXIT_PREFLIGHT,
+            "schema",
+            reason,
+            [
+                _command_step(
+                    "reinstall-core",
+                    "Reinstall a dcc-mcp-core that publishes this adapter's Install SOP schema",
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "dcc-mcp-core>=%s" % MIN_CORE_VERSION,
+                    ],
+                    reason,
+                )
+            ],
+            schema_failure["error_code"],
+        )
+    steps.append({"id": "validate-core-schema", "status": "ok"})
     try:
         bridge = FreecadBridge.from_env(str(executable) if executable is not None else None)
     except (OSError, ValueError) as exc:

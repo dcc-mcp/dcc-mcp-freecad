@@ -22,13 +22,14 @@ def test_public_doctor_reports_missing_freecad_as_structured_preflight(
 
     report = json.loads(capsys.readouterr().out)
     assert code == 10
-    # Read the version from the shared contract instead of pinning a literal:
-    # dcc-mcp-core owns the Install SOP schema and has moved it to v2, so a
-    # hardcoded 1 breaks the moment the resolved core advances.
-    from dcc_mcp_freecad.install_contract import SCHEMA_VERSION
+    # The report field must equal the const the published schema pins, not the
+    # revision of the schema artifact itself. Those are two different counters
+    # (core's artifact is at v2 while the documents it describes still carry 1),
+    # so asserting against the artifact revision would pass on an invalid report.
+    from dcc_mcp_freecad.install_contract import SCHEMA_VERSION, load_install_sop_schema
 
+    assert load_install_sop_schema()["properties"]["schema_version"]["const"] == SCHEMA_VERSION
     assert report["schema_version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION >= 1
     assert report["status"] == "failed"
     assert report["dcc_type"] == "freecad"
     assert report["adapter_version"] == __version__
@@ -273,6 +274,45 @@ def test_verify_uses_the_same_standalone_runtime_contract(tmp_path, monkeypatch,
     report = json.loads(capsys.readouterr().out)
     assert report["verb"] == "verify"
     assert report["verify"]["directly_usable"] is True
+
+
+def test_doctor_fails_closed_when_the_core_schema_const_drifts(monkeypatch, capsys):
+    from dcc_mcp_freecad import cli, doctor
+    from dcc_mcp_freecad.install_contract import SCHEMA_VERSION
+
+    monkeypatch.setattr(
+        doctor,
+        "load_install_sop_schema",
+        lambda: {
+            "type": "object",
+            "required": ["schema_version"],
+            "properties": {"schema_version": {"const": SCHEMA_VERSION + 1}},
+        },
+    )
+
+    assert cli.main(["doctor", "--json"]) == 10
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["error_code"] == "core_schema_invalid"
+    assert report["verify"]["failure_stage"] == "schema"
+    assert report["checks"]["schema"]["success"] is False
+    assert report["next_steps"][0]["command"][-1] == "dcc-mcp-core>=%s" % doctor.MIN_CORE_VERSION
+
+
+def test_doctor_fails_closed_when_the_core_schema_is_unavailable(monkeypatch, capsys):
+    from dcc_mcp_freecad import cli, doctor
+
+    def unavailable():
+        raise RuntimeError("this core publishes no Install SOP schema")
+
+    monkeypatch.setattr(doctor, "load_install_sop_schema", unavailable)
+
+    assert cli.main(["doctor", "--json"]) == 10
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["error_code"] == "core_schema_unavailable"
+    assert report["verify"]["failure_stage"] == "schema"
+    assert report["checks"]["schema"]["success"] is False
 
 
 def test_doctor_rejects_invalid_probe_timeout_before_launch(tmp_path, monkeypatch, capsys):
