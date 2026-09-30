@@ -1,5 +1,27 @@
 import json
 
+import pytest
+
+
+def _published_schema_const():
+    """The ``schema_version`` value the published Install SOP schema pins."""
+    from dcc_mcp_core.deployment import load_install_sop_schema
+
+    return load_install_sop_schema()["properties"]["schema_version"]["const"]
+
+
+def test_report_schema_version_matches_the_published_schema_const():
+    # ``ARTIFACT_SCHEMA_VERSION`` tracks the schema *artifact* revision and moves
+    # independently of the report field. The report field must track the
+    # artifact's ``const``, so a core that drifts it has to break this test
+    # instead of shipping invalid reports.
+    import dcc_mcp_core
+
+    from dcc_mcp_freecad.install_contract import ARTIFACT_SCHEMA_VERSION, SCHEMA_VERSION
+
+    assert SCHEMA_VERSION == _published_schema_const()
+    assert ARTIFACT_SCHEMA_VERSION == dcc_mcp_core.INSTALL_SOP_SCHEMA_VERSION
+
 
 def _freecad_executable(tmp_path):
     executable = tmp_path / "FreeCAD 1.0" / "bin" / "FreeCADCmd.exe"
@@ -22,13 +44,13 @@ def test_public_doctor_reports_missing_freecad_as_structured_preflight(
 
     report = json.loads(capsys.readouterr().out)
     assert code == 10
-    # Read the version from the shared contract instead of pinning a literal:
-    # dcc-mcp-core owns the Install SOP schema and has moved it to v2, so a
-    # hardcoded 1 breaks the moment the resolved core advances.
-    from dcc_mcp_freecad.install_contract import SCHEMA_VERSION
-
-    assert report["schema_version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION >= 1
+    # The report field is not the schema *artifact* revision (that one is 2 and
+    # moves with core); it is the value the published schema pins via
+    # `properties.schema_version.const`. Assert both sides so a core drift breaks
+    # here instead of shipping invalid reports.
+    expected = _published_schema_const()
+    assert report["schema_version"] == expected
+    assert expected >= 1
     assert report["status"] == "failed"
     assert report["dcc_type"] == "freecad"
     assert report["adapter_version"] == __version__
@@ -42,6 +64,44 @@ def test_public_doctor_reports_missing_freecad_as_structured_preflight(
     assert report["checks"]["executable"]["success"] is False
     assert len(report["next_steps"]) == 1
     assert report["next_steps"][0]["command"]
+
+
+def test_doctor_and_verify_reports_satisfy_the_published_schema(tmp_path, monkeypatch, capsys):
+    from dcc_mcp_core.deployment import validate_install_sop_report
+
+    from dcc_mcp_freecad import cli, doctor
+
+    # The validator runs through the native ABI, which a pure-Python core build
+    # does not ship. The const assertion above stays unconditional; only this
+    # whole-document check is allowed to stand down.
+    native_core = pytest.importorskip("dcc_mcp_core._core")
+    if not callable(getattr(native_core, "_validate_install_sop_report_json", None)):
+        pytest.skip("resolved dcc-mcp-core has no Install SOP validator ABI")
+
+    executable = _freecad_executable(tmp_path)
+    monkeypatch.setattr(
+        doctor.FreecadBridge,
+        "status",
+        lambda self, timeout_secs=30: {
+            "version": "1.0.2",
+            "python_version": "3.11.9",
+            "ready": True,
+        },
+    )
+    monkeypatch.setattr(doctor, "runtime_core_version", lambda: doctor.MIN_CORE_VERSION)
+
+    # Both verbs, both exit paths: a schema violation on any of them is a defect.
+    assert cli.main(["doctor", "--json", "--dcc-path", str(executable)]) == 0
+    validate_install_sop_report(json.loads(capsys.readouterr().out))
+
+    assert cli.main(["verify", "--json", "--dcc-path", str(executable)]) == 0
+    validate_install_sop_report(json.loads(capsys.readouterr().out))
+
+    monkeypatch.delenv("DCC_MCP_FREECAD_EXECUTABLE", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    assert cli.main(["doctor", "--json"]) == 10
+    validate_install_sop_report(json.loads(capsys.readouterr().out))
 
 
 def test_no_verb_preserves_the_existing_server_entrypoint(monkeypatch):
