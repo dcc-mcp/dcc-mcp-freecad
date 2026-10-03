@@ -164,6 +164,12 @@ def _publish_exclusive(staged: Path, final: Path) -> None:
     fallback are exactly the shared mounts where a wider mode is visible to
     other users. The mode is set again after the copy because ``os.open`` masks
     it with the umask, which would strip bits back off in the other direction.
+
+    The create adds owner-write so a failed copy can always discard its own
+    partial output: given a read-only stage mode, Windows creates a read-only
+    target that ``unlink`` then refuses, leaving an undeletable fragment on the
+    publication path this tool owns. The post-copy chmod still commits the
+    staged mode.
     """
     try:
         os.link(str(staged), str(final))
@@ -179,7 +185,7 @@ def _publish_exclusive(staged: Path, final: Path) -> None:
             _hardlink_unsupported_message("the staged copy has no readable mode (%s)" % error)
         ) from None
     try:
-        descriptor = os.open(str(final), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        descriptor = os.open(str(final), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode | stat.S_IWUSR)
     except FileExistsError:
         raise BridgeError(_OUTPUT_EXISTS_MESSAGE) from None
     except OSError as error:
