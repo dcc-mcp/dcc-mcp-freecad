@@ -1,0 +1,9 @@
+# Explicit native-library backend qualification
+
+The default FreeCAD CLI route stays intact. Operators may explicitly select `python-module`, a compatible interpreter and an installed FreeCAD module directory. Each call runs the package-owned whitelisted operation driver under an isolated interpreter and temporary application home. Existing workspace, operation, timeout, path and response-size bounds remain active; this does not add a generic Python execution tool.
+
+The result wrapper also preserves native verification names in `context.verified_checks` while using Core's boolean postcondition field correctly. Native mutations are no longer reported as failures because a verification list collides with that boolean field.
+
+The change is rebased onto current main's0.4.2 release commitaebbdb5e3926d24e23cdabc641499e69539f70f2. The complete local suite passes139tests, with3pre-existing real-CLI tests skipped. Ruff lint/format passes. An isolated Core/server/CLI0.20.41 runtime exercises13actual typed MCP tools on installed FreeCAD1.0.0/Python3.13.5: create, edit, transform, boolean, validate, inspect, exportSTEP/STL, save copy, reopen, import and remove. A drilled block's expected909.7345175425633mm³ volume agrees with native909.7345175425634mm³; copied readback is exact andSTEP reimport preserves volume.
+
+The accompanying JSON contains the final validation summary, selected actual MCP requests/results and the raw trace hash. Asynchronous polling is omitted from the selection; the validation summary records the final readbacks. Task workspace/home prefixes are replaced by placeholders, and native stdout/stderr diagnostics are omitted from both structured and embedded text responses. This fixture is capability evidence; it does not claim a finished artwork, interactive GUI testing, arbitrary library compatibility or qualification for every platform/interpreter pair.
