@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -353,6 +354,52 @@ def test_the_overwrite_escape_hatch_does_not_need_hardlinks(tmp_path, monkeypatc
     assert target.read_bytes() == b"copied-fcstd"
     assert result["overwritten"] is True
     assert source.read_bytes() == b"known-good"
+
+
+@pytest.mark.parametrize("stage_mode", [0o644, 0o400], ids=["umask-narrowing", "umask-widening"])
+@pytest.mark.parametrize("link_failures", [None, errno.EPERM], ids=["hard-link", "fallback-copy"])
+def test_both_publication_paths_keep_the_stage_mode(
+    tmp_path, monkeypatch, link_failures, stage_mode
+):
+    """The fallback must publish the mode the host gave the stage, either way.
+
+    A hard link shares the stage inode, so a fallback that lets the umask decide
+    disagrees with it in both directions: ``0666 & ~umask`` widens a ``0600``
+    stage, and ``os.open`` masks a ``0644`` stage down to ``0600`` under a
+    ``077`` umask. The volumes that need the fallback are the shared mounts
+    where either direction is visible to other users.
+
+    The umask is raised to ``0o077`` for the call so the narrowing direction is
+    reproducible: ``os.open`` masks the mode with it, and only the post-copy
+    ``chmod`` restores the staged mode. ``0o400`` gives the assertion a
+    discriminating value on Windows too, where a read-only file is reported as
+    ``0o444``; POSIX reports the mode as set and masks it through the umask.
+    """
+    source = tmp_path / "model.FCStd"
+    output = tmp_path / "copy.FCStd"
+    source.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+    staged_modes = []
+
+    def native(_method, params, _timeout):
+        staged = Path(params["output_path"])
+        staged.write_bytes(b"copied-fcstd")
+        os.chmod(staged, stage_mode)
+        staged_modes.append(stat.S_IMODE(staged.stat().st_mode))
+        return {"object_count": 1}
+
+    monkeypatch.setattr(bridge, "_invoke", native)
+    if link_failures is not None:
+        monkeypatch.setattr("os.link", _linkless(link_failures))
+
+    original_umask = os.umask(0o077)
+    try:
+        bridge.save_copy(str(source), str(output))
+    finally:
+        os.umask(original_umask)
+
+    assert staged_modes == [stat.S_IMODE(output.stat().st_mode)]
+    assert output.read_bytes() == b"copied-fcstd"
 
 
 def _real_freecad() -> str:

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -155,6 +156,14 @@ def _publish_exclusive(staged: Path, final: Path) -> None:
     create plus copy is kept as the fallback. ``O_EXCL`` preserves the same
     refusal to replace a concurrent destination; only the single-inode commit
     is given up.
+
+    The fallback reproduces the mode the host gave the stage instead of
+    asserting its own: a link shares the stage inode, so publishing
+    ``0666 & ~umask`` would let the two paths disagree whenever a host or site
+    policy creates the stage as ``0600`` - and the volumes that need the
+    fallback are exactly the shared mounts where a wider mode is visible to
+    other users. The mode is set again after the copy because ``os.open`` masks
+    it with the umask, which would strip bits back off in the other direction.
     """
     try:
         os.link(str(staged), str(final))
@@ -164,7 +173,13 @@ def _publish_exclusive(staged: Path, final: Path) -> None:
     except OSError as error:
         link_error = error
     try:
-        descriptor = os.open(str(final), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        mode = stat.S_IMODE(staged.stat().st_mode)
+    except OSError as error:
+        raise BridgeError(
+            _hardlink_unsupported_message("the staged copy has no readable mode (%s)" % error)
+        ) from None
+    try:
+        descriptor = os.open(str(final), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     except FileExistsError:
         raise BridgeError(_OUTPUT_EXISTS_MESSAGE) from None
     except OSError as error:
@@ -172,6 +187,8 @@ def _publish_exclusive(staged: Path, final: Path) -> None:
     try:
         with os.fdopen(descriptor, "wb") as destination, staged.open("rb") as source:
             shutil.copyfileobj(source, destination)
+        # os.open masked the mode with the umask; commit the staged mode.
+        os.chmod(final, mode)
     except OSError as error:
         _discard_partial(final)
         raise BridgeError(
