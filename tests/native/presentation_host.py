@@ -192,7 +192,8 @@ def _container(params):
         parent.ViewObject.Visibility = True
         leaf.ViewObject.Visibility = True
         if kind == "App::LinkGroup":
-            parent.VisibilityList = [False]
+            assert parent.setElementVisible(leaf.Name + ".", False) == 1
+            assert parent.isElementVisible(leaf.Name + ".") == 0
             assert list(parent.VisibilityList) == [False]
         view = Gui.getDocument(doc.Name).activeView()
         view.setAnimationEnabled(False)
