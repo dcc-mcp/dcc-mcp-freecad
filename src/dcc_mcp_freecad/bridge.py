@@ -193,8 +193,14 @@ def _publish_exclusive(staged: Path, final: Path) -> None:
     try:
         with os.fdopen(descriptor, "wb") as destination, staged.open("rb") as source:
             shutil.copyfileobj(source, destination)
-        # os.open masked the mode with the umask; commit the staged mode.
-        os.chmod(final, mode)
+            # os.open masked the mode with the umask; commit the staged mode
+            # through the descriptor where the platform offers it, so the mode
+            # lands on the file this call created rather than on whatever now
+            # answers to ``final``. Windows has no fchmod.
+            if hasattr(os, "fchmod"):
+                os.fchmod(destination.fileno(), mode)
+            else:
+                os.chmod(final, mode)
     except OSError as error:
         _discard_partial(final)
         raise BridgeError(
