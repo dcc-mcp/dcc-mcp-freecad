@@ -20,8 +20,14 @@ def _as_int(value: str | None) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        sys.exit("usage: verify-freecad-run.py <junit.xml>")
+    if len(argv) != 3:
+        sys.exit("usage: verify-freecad-run.py <junit.xml> <expected_count>")
+    try:
+        expected = int(argv[2])
+    except ValueError:
+        sys.exit("expected_count must be a positive integer")
+    if expected < 1:
+        sys.exit("expected_count must be a positive integer")
     if not os.path.isfile(argv[1]):
         sys.exit("no JUnit report at %s: pytest -m freecad never ran" % argv[1])
     root = ElementTree.parse(argv[1]).getroot()
@@ -36,6 +42,8 @@ def main(argv: list[str]) -> int:
 
     if tests == 0:
         sys.exit("no real FreeCAD test was collected; the marker selected nothing")
+    if tests != expected:
+        sys.exit("expected %s real FreeCAD test(s), but collected %s" % (expected, tests))
     if skipped:
         sys.exit("%s of %s real FreeCAD test(s) were skipped; the host did not run" % (skipped, tests))
     if errors or failures:

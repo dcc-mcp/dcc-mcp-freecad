@@ -695,6 +695,19 @@ def document_validate(params):
         _close_document(App, doc)
 
 
+def _presentation_geometry(doc):
+    result = []
+    for obj in doc.Objects:
+        value = _object_payload(obj)
+        if "shape" in value:
+            # A GUI triangulation cache must not change the measured BRep bounds.
+            value["shape"]["bounding_box"] = _bound_box_payload(
+                obj.Shape.optimalBoundingBox(False, False)
+            )
+        result.append(value)
+    return result
+
+
 def document_save_copy(params):
     import FreeCAD as App
 
@@ -702,11 +715,40 @@ def document_save_copy(params):
     version = _host_version()
     output_path = _required(params, "output_path", tool)
     read_back = _ReadBack(tool, version, params)
+    presentation = None
+    gui = None
+    if params.get("visible_objects") is not None:
+        presentation = _load_sibling_module("presentation.py", "dcc_mcp_freecad_presentation")
+        presentation.validate_selection(params["visible_objects"], params.get("view", "isometric"))
+        gui = presentation.initialize()
     doc = _open_document(App, params["document_path"])
     try:
         doc.recompute()
         expected = sorted(obj.Name for obj in doc.Objects)
         count = len(doc.Objects)
+        expected_objects = _presentation_geometry(doc) if presentation else None
+        expected_presentation = None
+        if presentation:
+            expected_presentation = presentation.apply(
+                doc, gui, params["visible_objects"], params.get("view", "isometric")
+            )
+            read_back.check(
+                presentation.requested_matches(
+                    params["visible_objects"],
+                    params.get("view", "isometric"),
+                    expected_presentation,
+                ),
+                "copy.presentation_request",
+                {
+                    "visible_objects": sorted(params["visible_objects"]),
+                    "camera_type": "Orthographic",
+                    "camera_orientation": presentation.VIEW_ROTATIONS[
+                        params.get("view", "isometric")
+                    ],
+                },
+                expected_presentation,
+                "Native visibility and orientation must match the requested presentation.",
+            )
         doc.saveAs(output_path)
     finally:
         _close_document(App, doc)
@@ -750,9 +792,27 @@ def document_save_copy(params):
             "The copy does not contain the source objects; treating it as a "
             "successful copy would lose that silently.",
         )
+        if presentation:
+            actual_presentation = presentation.inspect(copy, gui)
+            read_back.check(
+                presentation.matches(expected_presentation, actual_presentation),
+                "copy.presentation",
+                expected_presentation,
+                actual_presentation,
+                "The saved native view providers or camera did not survive reopening.",
+            )
+            actual_objects = _presentation_geometry(copy)
+            read_back.check(
+                presentation.geometry_matches(expected_objects, actual_objects),
+                "copy.geometry",
+                expected_objects,
+                actual_objects,
+                "Recorded object, link, placement, topology counts and geometry must persist.",
+            )
     finally:
         _close_document(App, copy)
     return {
+        "presentation": expected_presentation,
         "object_count": count,
         "object_names": expected,
         "verified": _verified_checks(read_back),

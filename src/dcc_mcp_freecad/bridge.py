@@ -589,9 +589,23 @@ class FreecadBridge:
         output_path: str,
         overwrite: bool = False,
         timeout_secs: float = 120,
+        visible_objects: Optional[list[str]] = None,
+        view: str = "isometric",
     ) -> dict[str, Any]:
         source = self._document_path(source_path)
         output = self._output_path(output_path, {_DOCUMENT_SUFFIX})
+        presentation = {}
+        if visible_objects is None and view != "isometric":
+            raise BridgeError("A view requires an explicit visible_objects selection")
+        if visible_objects is not None:
+            from .presentation import validate_selection
+
+            validate_selection(visible_objects, view)
+            for name in visible_objects:
+                self._object_name(name)
+            if source == output:
+                raise BridgeError("Presentation copies must not replace the source")
+            presentation = {"visible_objects": visible_objects, "view": view}
         replaced_existing = output.exists()
         if replaced_existing and not overwrite:
             raise BridgeError("Output already exists; set overwrite=true to replace it")
@@ -605,29 +619,51 @@ class FreecadBridge:
             try:
                 result = self._invoke(
                     "document.save_copy",
-                    {"document_path": str(source), "output_path": str(staged)},
+                    {"document_path": str(source), "output_path": str(staged), **presentation},
                     timeout_secs,
                 )
             except BaseException as exc:
                 raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
                 raise BridgeError("FreeCAD did not create the document copy")
-            os.replace(str(staged), str(output))
+            # Read metadata and prepare the response before the publication
+            # boundary. An unreadable stage must leave any old output intact.
             result = _replace_staged_path(result, staged, output)
             result.update(
                 {
                     "source_path": str(source),
                     "output_path": str(output),
-                    "bytes": output.stat().st_size,
-                    "sha256": _sha256_file(output),
+                    "bytes": staged.stat().st_size,
+                    "sha256": _sha256_file(staged),
                     "overwritten": replaced_existing,
                 }
             )
+            check_dcc_cancelled()
+            if overwrite:
+                os.replace(str(staged), str(output))
+            else:
+                # Publish the complete native file exclusively. A destination
+                # created during the native call must never be overwritten.
+                try:
+                    os.link(str(staged), str(output))
+                except FileExistsError:
+                    raise BridgeError(
+                        "Output already exists; set overwrite=true to replace it"
+                    ) from None
             return result
         finally:
-            if staged.exists():
-                staged.unlink()
-            _remove_staged_backups(staged)
+            # Cleanup owns only the unique stage and its native backups. A
+            # filesystem cleanup error must not change a committed success or
+            # obscure the original native failure/cancellation.
+            try:
+                if staged.exists():
+                    staged.unlink()
+            except OSError:
+                pass
+            try:
+                _remove_staged_backups(staged)
+            except OSError:
+                pass
 
     def add_primitive(
         self,
