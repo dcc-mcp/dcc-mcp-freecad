@@ -14,11 +14,19 @@ _server: Optional["FreecadMcpServer"] = None
 
 
 class FreecadMcpServer(DccServerBase):
-    def __init__(self, port: Optional[int] = None):
+    def __init__(
+        self,
+        port: Optional[int] = None,
+        *,
+        gateway_port: Optional[int] = None,
+        enable_gateway_failover: bool = True,
+    ):
         options = DccServerOptions.from_env(
             "freecad",
             Path(__file__).parent / "skills",
             port=port,
+            gateway_port=gateway_port,
+            enable_gateway_failover=enable_gateway_failover,
             server_name="dcc-mcp-freecad",
             server_version=__version__,
             adapter_version=__version__,

@@ -1,6 +1,6 @@
 tools:
   - name: get_status
-    description: Verify FreeCADCmd, its version, Python runtime, workspace roots, and limits.
+    description: Verify the configured native FreeCAD backend, version, Python runtime, workspace roots, and limits.
     source_file: scripts/get_status.py
     input_schema: {type: object, properties: {}, additionalProperties: false}
     output_schema: {type: object}

@@ -145,7 +145,26 @@ class FreecadBridge:
         allowed_roots: Optional[Iterable[Path]] = None,
         max_document_bytes: int = 2 * 1024 * 1024 * 1024,
         max_timeout_secs: float = 1_800,
+        backend: str = "freecadcmd",
+        module_directory: Optional[str] = None,
     ):
+        if backend not in {"freecadcmd", "python-module"}:
+            raise ValueError("FreeCAD backend must be freecadcmd or python-module")
+        self.backend = backend
+        self.module_directory = None
+        if backend == "python-module":
+            if not executable or not module_directory:
+                raise ValueError(
+                    "python-module requires an explicit interpreter and module directory"
+                )
+            directory = Path(module_directory).expanduser().resolve()
+            if not directory.is_dir() or not any(
+                (directory / name).is_file() for name in ("FreeCAD.so", "FreeCAD.pyd")
+            ):
+                raise ValueError(
+                    "Module directory must contain the installed native FreeCAD library"
+                )
+            self.module_directory = directory
         self.executable = self._resolve_executable(executable)
         roots = list(allowed_roots or (Path.cwd(),))
         self.allowed_roots = tuple(Path(root).expanduser().resolve() for root in roots)
@@ -155,6 +174,12 @@ class FreecadBridge:
 
     @classmethod
     def from_env(cls, executable: Optional[str] = None) -> "FreecadBridge":
+        backend = os.environ.get("DCC_MCP_FREECAD_BACKEND", "freecadcmd")
+        selected_executable = (
+            os.environ.get("DCC_MCP_FREECAD_PYTHON")
+            if backend == "python-module"
+            else os.environ.get("DCC_MCP_FREECAD_EXECUTABLE")
+        )
         roots_value = os.environ.get("DCC_MCP_FREECAD_ALLOWED_ROOTS", "")
         roots = _split_roots(roots_value) if roots_value else [Path.cwd().resolve()]
         max_document_bytes = int(
@@ -164,10 +189,12 @@ class FreecadBridge:
         if max_document_bytes <= 0 or max_timeout_secs <= 0:
             raise ValueError("FreeCAD document and timeout limits must be positive")
         return cls(
-            executable or os.environ.get("DCC_MCP_FREECAD_EXECUTABLE") or None,
+            executable or selected_executable or None,
             allowed_roots=roots,
             max_document_bytes=max_document_bytes,
             max_timeout_secs=max_timeout_secs,
+            backend=backend,
+            module_directory=os.environ.get("DCC_MCP_FREECAD_MODULE_DIRECTORY") or None,
         )
 
     @staticmethod
@@ -280,20 +307,45 @@ class FreecadBridge:
                 json.dumps({"method": method, "params": dict(params)}, ensure_ascii=False),
                 encoding="utf-8",
             )
-            command = [
-                self.executable,
-                "--safe-mode",
-                "--user-cfg",
-                str(config_path),
-                str(self.driver_path),
-                "--pass",
-                str(request_path),
-                str(result_path),
-            ]
+            if self.backend == "python-module":
+                command = [
+                    self.executable,
+                    "-I",
+                    str(self.driver_path.with_name("module_runner.py")),
+                    str(self.module_directory),
+                    str(request_path),
+                    str(result_path),
+                ]
+            else:
+                command = [
+                    self.executable,
+                    "--safe-mode",
+                    "--user-cfg",
+                    str(config_path),
+                    str(self.driver_path),
+                    "--pass",
+                    str(request_path),
+                    str(result_path),
+                ]
             started = time.monotonic()
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             environment = os.environ.copy()
             environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+            if self.backend == "python-module":
+                # A compatible installed native library, never arbitrary caller code.
+                # Keep every temporary preference/cache write out of the operator home.
+                for key, child in [
+                    ("HOME", "home"),
+                    ("XDG_CONFIG_HOME", "config"),
+                    ("XDG_CACHE_HOME", "cache"),
+                    ("XDG_DATA_HOME", "data"),
+                    ("FREECAD_USER_HOME", "freecad-home"),
+                ]:
+                    folder = temp_dir / child
+                    folder.mkdir()
+                    environment[key] = str(folder)
+                environment.pop("PYTHONPATH", None)
+                environment.pop("PYTHONHOME", None)
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_file:
                 with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr_file:
                     process = subprocess.Popen(
@@ -312,7 +364,8 @@ class FreecadBridge:
                             check_dcc_cancelled()
                             if time.monotonic() >= deadline:
                                 raise BridgeTimeoutError(
-                                    "FreeCADCmd exceeded the %.1f second timeout" % timeout
+                                    "FreeCAD %s backend exceeded the %.1f second timeout"
+                                    % (self.backend, timeout)
                                 )
                             time.sleep(0.05)
                     except BaseException:
@@ -329,8 +382,8 @@ class FreecadBridge:
                     stderr = stderr_file.read(65_537)
             if not result_path.is_file():
                 raise BridgeError(
-                    "FreeCADCmd did not return a result (exit %s): %s"
-                    % (process.returncode, (stderr or stdout).strip()[:1_000])
+                    "FreeCAD %s backend did not return a result (exit %s): %s"
+                    % (self.backend, process.returncode, (stderr or stdout).strip()[:1_000])
                 )
             if result_path.stat().st_size > 16 * 1024 * 1024:
                 raise BridgeError("FreeCAD result exceeded the 16 MiB response limit")
@@ -422,6 +475,8 @@ class FreecadBridge:
         result.update(
             {
                 "ready": True,
+                "backend": self.backend,
+                "module_directory": str(self.module_directory) if self.module_directory else None,
                 "executable": self.executable,
                 "instance_type": "standalone",
                 "allowed_roots": [str(root) for root in self.allowed_roots],

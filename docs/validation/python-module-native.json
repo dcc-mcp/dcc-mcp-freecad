@@ -1,0 +1,1161 @@
+{
+  "runtime": {
+    "versions": {
+      "dcc-mcp-core": "0.20.41",
+      "dcc-mcp-server": "0.20.41",
+      "dcc-mcp-cli": "0.20.41"
+    },
+    "gateway_port": 0,
+    "enable_gateway_failover": false
+  },
+  "validation": {
+    "status": "REAL_MCP_NATIVE_LIFECYCLE_PASS",
+    "backend": "explicit python-module, installed native FreeCAD1.0.0 / Python3.13.5",
+    "expected_volume_mm3": 909.7345175425633,
+    "native_volume_mm3": 909.7345175425634,
+    "step_reimport_volume_mm3": 909.7345175425634,
+    "copy_readback_exact": true,
+    "native_tools": [
+      "get_status",
+      "get_capabilities",
+      "create_document",
+      "add_primitive",
+      "update_primitive",
+      "transform_object",
+      "boolean_operation",
+      "validate_document",
+      "inspect_document",
+      "export_geometry",
+      "save_copy",
+      "import_geometry",
+      "remove_object"
+    ],
+    "mcp_events": 128,
+    "files": {
+      "proof.stl": {
+        "bytes": 15284,
+        "sha256": "c766fa1061591f477e7472ea6e83a0c114107b2da9f5432c3d8c65341dd27c3d"
+      },
+      "imported.FCStd": {
+        "bytes": 2278,
+        "sha256": "3929f64b48eb5ba39780c6e6d34aa9fa3693c6680860adfc7a6dbbce70006a14"
+      },
+      "proof.step": {
+        "bytes": 8286,
+        "sha256": "4d0f4b1bc9ed44badfaa53e43b46f2f8af153aaa28162443c1b325a939bab7c7"
+      },
+      "proof.FCStd": {
+        "bytes": 4907,
+        "sha256": "75156dad024936616a532f776a62bbfab0f7669aa5d90e88f0ec2d3a31a0b664"
+      },
+      "copy.FCStd": {
+        "bytes": 4906,
+        "sha256": "bd22e675f9c93289d4bb2f37591bca713ac6803cc38c5ab9074dd2f66dcd6873"
+      }
+    }
+  },
+  "source_trace_sha256": "b3cd8d78340be6faef006697a1e7f1508d764651c7d76fa6a9edae8bc7d38035",
+  "redaction": "Absolute task workspace/home prefixes replaced by CASE_ROOT/WORKSPACE/HOST_HOME; native stdout/stderr diagnostics omitted from structured and text responses. Tool arguments and other returned fields retained.",
+  "selected_actual_mcp_requests": [
+    {
+      "tool": "search_skills",
+      "arguments": {
+        "query": "freecad"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"total\":7,\"skill_total\":7,\"skipped_count\":0,\"query\":\"freecad\",\"skills\":[{\"name\":\"freecad-modeling\",\"description\":\"Build parametric FreeCAD primitives, update dimensions and placements, perform booleans, and import or export CAD/mesh geometry. Use after freecad-session has created or inspected a durable FCStd document.\",\"tools\":6,\"loaded\":false,\"dcc\":\"freecad\",\"scope\":\"repo\",\"tags\":[\"freecad\",\"cad\",\"parametric-modeling\",\"pipeline\"],\"search_hint\":\"FreeCAD add update transform primitive box cylinder sphere cone torus boolean union cut intersection import export STEP IGES BREP STL OBJ\"},{\"name\":\"freecad-session\",\"description\":\"Create, inspect, validate, copy, and safely edit durable FreeCAD documents through an isolated FreeCADCmd process. Use for FCStd document lifecycle and diagnostics; load freecad-modeling for geometry operations.\",\"tools\":7,\"loaded\":false,\"dcc\":\"freecad\",\"scope\":\"repo\",\"tags\":[\"freecad\",\"cad\",\"parametric-modeling\",\"pipeline\"],\"search_hint\":\"FreeCAD status capabilities create inspect validate copy FCStd document remove object dependency-aware atomic save\"},{\"name\":\"dcc-diagnostics\",\"description\":\"Infrastructure skill — DCC-agnostic observability primitives: generate error reports, capture screenshots, query audit logs, inspect tool performance metrics, and monitor process health. Works in any DCC environment (Maya, Blender, Houdini, Unreal, etc.) or standalone Python. Call dcc_diagnostics__error_report first whenever a tool fails with a vague error message. Not for primary task execution — use a domain skill for actual DCC operations.\",\"tools\":5,\"loaded\":false,\"dcc\":\"python\",\"scope\":\"repo\",\"tags\":[\"diagnostics\",\"observability\",\"error\",\"screenshot\",\"audit\",\"metrics\",\"debug\",\"infrastructure\"],\"search_hint\":\"error report, error log, failure, debug, maya error, blender error, houdini error, tool failed, mcp tool execution failed, screenshot, capture, audit log, metrics, performance, process monitor, diagnostics, health check, observability, job failed, job history, log file\"},{\"name\":\"media\",\"description\":\"Infrastructure skill - DCC-agnostic media probing, transcoding, thumbnails, frame extraction, and image-sequence-to-MP4 conversion through vx-managed FFmpeg. Use when agents need to inspect or share render/playblast outputs. Not for arbitrary shell or vx execution - use typed media tools only.\",\"tools\":6,\"loaded\":false,\"dcc\":\"python\",\"scope\":\"repo\",\"tags\":[\"media\",\"video\",\"image-sequence\",\"ffmpeg\",\"ffprobe\",\"vx\",\"infrastructure\",\"dcc-agnostic\"],\"search_hint\":\"media, ffmpeg, ffprobe, vx ffmpeg, image sequence, render output, playblast, mp4, transcode, extract frames, thumbnail, probe video\"},{\"name\":\"qt-ui-inspector\",\"description\":\"Infrastructure skill — DCC-agnostic Qt UI introspection: list top-level windows, find widgets by name/class, describe widget properties, walk the widget tree, and poll for availability. Works in any DCC with a Qt binding (Maya, Blender, Houdini, Unreal, etc.). All tools are read-only and lazy-loaded.\",\"tools\":5,\"loaded\":false,\"dcc\":\"python\",\"scope\":\"repo\",\"tags\":[\"\\\\\\\"qt\",\"ui\",\"introspection\",\"infrastructure\",\"gui\\\\\\\"\"],\"search_hint\":\"\\\\\\\"qt ui, qt widgets, gui introspection, find widget, describe widget, list windows, snapshot tree, wait for widget, PySide, PyQt, qtpy\\\\\\\"\"},{\"name\":\"ui-control\",\"description\":\"Infrastructure skill for application UI observation, scoped action, waits, and CUA trajectory recording when a typed DCC tool cannot expose the needed interface. Use this skill when the user asks for CUA, UI Control, dcc-cua, or application UI automation in a DCC. Prefer typed DCC tools first and CDP for browsers; use the standalone dcc-cua backend for native applications.\",\"tools\":8,\"loaded\":false,\"dcc\":\"python\",\"scope\":\"repo\",\"tags\":[\"ui-control\",\"cua\",\"dcc-cua\",\"computer-use\",\"ui-automation\",\"chrome-cdp\",\"diagnostics\",\"infrastructure\"],\"search_hint\":\"dcc ui control, ui control, UI Control, cua, CUA, dcc-cua, dcc cua, computer use, ui automation, chrome cdp, edge cdp, screenshot, click, type, keypress, scroll, wait, trajectory recording\"},{\"name\":\"workflow\",\"description\":\"Infrastructure skill — multi-step action orchestration: run a sequence of MCP tools in order, passing results between steps. Use when chaining two or more tools into a repeatable pipeline (select → rename → validate → export). Not for single-tool operations or DCC-specific business logic — use a domain skill for those.\",\"tools\":1,\"loaded\":false,\"dcc\":\"python\",\"scope\":\"repo\",\"tags\":[\"workflow\",\"orchestration\",\"chain\",\"pipeline\",\"automation\",\"infrastructure\"],\"search_hint\":\"chain, sequence, pipeline, multi-step, orchestration, workflow, batch, run steps, automate\"}],\"skipped\":[]}",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": null,
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "load_skill",
+      "arguments": {
+        "skill_name": "freecad-session"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"loaded\": true,\n  \"partial\": false,\n  \"registered_tools\": [\n    \"freecad_session__get_status\",\n    \"freecad_session__get_capabilities\",\n    \"freecad_session__create_document\",\n    \"freecad_session__inspect_document\",\n    \"freecad_session__validate_document\",\n    \"freecad_session__save_copy\",\n    \"freecad_session__remove_object\"\n  ],\n  \"tool_count\": 7,\n  \"newly_loaded\": [\n    \"freecad-session\"\n  ],\n  \"already_loaded\": [],\n  \"available_groups\": [],\n  \"activated_groups\": [],\n  \"tools\": [\n    {\n      \"name\": \"freecad_session__remove_object\",\n      \"description\": \"Remove an object, refusing dependents unless cascade removal is explicit.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"object_name\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"object_name\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"cascade\": {\n            \"type\": \"boolean\",\n            \"default\": false\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": true,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_session__create_document\",\n      \"description\": \"Create an empty durable FCStd document with atomic destination replacement.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"path\"\n        ],\n        \"properties\": {\n          \"path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"overwrite\": {\n            \"type\": \"boolean\",\n            \"default\": false\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": true,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_session__validate_document\",\n      \"description\": \"Recompute an FCStd document and report invalid or empty Part shapes.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"path\"\n        ],\n        \"properties\": {\n          \"path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": true,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": true,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_session__get_status\",\n      \"description\": \"Verify the configured native FreeCAD backend, version, Python runtime, workspace roots, and limits.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"properties\": {},\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": true,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": true,\n        \"open_world_hint\": false,\n        \"deferred_hint\": false\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"sync\",\n          \"timeoutHintSecs\": 30,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_session__get_capabilities\",\n      \"description\": \"List typed document/modeling methods, primitives, booleans, formats, and safety boundaries.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"properties\": {},\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": true,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": true,\n        \"open_world_hint\": false,\n        \"deferred_hint\": false\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"sync\",\n          \"timeoutHintSecs\": 30,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_session__inspect_document\",\n      \"description\": \"Inspect document metadata, objects, links, placements, shapes, meshes, and bounding boxes.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"path\"\n        ],\n        \"properties\": {\n          \"path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": true,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": true,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_session__save_copy\",\n      \"description\": \"Save an FCStd document to a new atomic output path without changing the source.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"source_path\",\n          \"output_path\"\n        ],\n        \"properties\": {\n          \"source_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"output_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"overwrite\": {\n            \"type\": \"boolean\",\n            \"default\": false\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-session\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": true,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    }\n  ]\n}",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": null,
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "load_skill",
+      "arguments": {
+        "skill_name": "freecad-modeling"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"loaded\": true,\n  \"partial\": false,\n  \"registered_tools\": [\n    \"freecad_modeling__add_primitive\",\n    \"freecad_modeling__update_primitive\",\n    \"freecad_modeling__transform_object\",\n    \"freecad_modeling__boolean_operation\",\n    \"freecad_modeling__import_geometry\",\n    \"freecad_modeling__export_geometry\"\n  ],\n  \"tool_count\": 6,\n  \"newly_loaded\": [\n    \"freecad-modeling\"\n  ],\n  \"already_loaded\": [],\n  \"available_groups\": [],\n  \"activated_groups\": [],\n  \"tools\": [\n    {\n      \"name\": \"freecad_modeling__transform_object\",\n      \"description\": \"Set an object's absolute translation and axis-angle rotation.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"object_name\",\n          \"translation\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"object_name\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"translation\": {\n            \"type\": \"array\",\n            \"minItems\": 3,\n            \"maxItems\": 3,\n            \"items\": {\n              \"type\": \"number\"\n            }\n          },\n          \"rotation_axis\": {\n            \"type\": \"array\",\n            \"minItems\": 3,\n            \"maxItems\": 3,\n            \"items\": {\n              \"type\": \"number\"\n            },\n            \"default\": [\n              0,\n              0,\n              1\n            ]\n          },\n          \"rotation_degrees\": {\n            \"type\": \"number\",\n            \"default\": 0\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-modeling\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": true,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_modeling__import_geometry\",\n      \"description\": \"Import one STEP, IGES, BREP, STL, or OBJ artifact as a named Part or Mesh object.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"input_path\",\n          \"object_name\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"input_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"object_name\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"label\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 256\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 600\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-modeling\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_modeling__export_geometry\",\n      \"description\": \"Export selected Part or Mesh objects to STEP, IGES, BREP, STL, or OBJ with bounded tessellation.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"object_names\",\n          \"output_path\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"object_names\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 100,\n            \"uniqueItems\": true,\n            \"items\": {\n              \"type\": \"string\",\n              \"minLength\": 1,\n              \"maxLength\": 64\n            }\n          },\n          \"output_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"linear_deflection\": {\n            \"type\": \"number\",\n            \"exclusiveMinimum\": 0,\n            \"maximum\": 100,\n            \"default\": 0.1\n          },\n          \"angular_deflection_degrees\": {\n            \"type\": \"number\",\n            \"exclusiveMinimum\": 0,\n            \"maximum\": 180,\n            \"default\": 15\n          },\n          \"overwrite\": {\n            \"type\": \"boolean\",\n            \"default\": false\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 600\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-modeling\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": true,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_modeling__add_primitive\",\n      \"description\": \"Add a typed parametric box, cylinder, sphere, cone, or torus with placement.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"primitive\",\n          \"name\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"primitive\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"box\",\n              \"cone\",\n              \"cylinder\",\n              \"sphere\",\n              \"torus\"\n            ]\n          },\n          \"name\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"label\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 256\n          },\n          \"dimensions\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"length\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"width\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"height\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"radius\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"radius1\": {\n                \"type\": \"number\",\n                \"minimum\": 0\n              },\n              \"radius2\": {\n                \"type\": \"number\",\n                \"minimum\": 0\n              },\n              \"angle\": {\n                \"type\": \"number\",\n                \"minimum\": 0\n              },\n              \"angle1\": {\n                \"type\": \"number\"\n              },\n              \"angle2\": {\n                \"type\": \"number\"\n              },\n              \"angle3\": {\n                \"type\": \"number\"\n              }\n            },\n            \"additionalProperties\": false\n          },\n          \"translation\": {\n            \"type\": \"array\",\n            \"minItems\": 3,\n            \"maxItems\": 3,\n            \"items\": {\n              \"type\": \"number\"\n            }\n          },\n          \"rotation_axis\": {\n            \"type\": \"array\",\n            \"minItems\": 3,\n            \"maxItems\": 3,\n            \"items\": {\n              \"type\": \"number\"\n            }\n          },\n          \"rotation_degrees\": {\n            \"type\": \"number\",\n            \"default\": 0\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-modeling\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_modeling__update_primitive\",\n      \"description\": \"Update allowed dimensional properties on an existing supported primitive.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"object_name\",\n          \"dimensions\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"object_name\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"dimensions\": {\n            \"type\": \"object\",\n            \"minProperties\": 1,\n            \"properties\": {\n              \"length\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"width\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"height\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"radius\": {\n                \"type\": \"number\",\n                \"exclusiveMinimum\": 0\n              },\n              \"radius1\": {\n                \"type\": \"number\",\n                \"minimum\": 0\n              },\n              \"radius2\": {\n                \"type\": \"number\",\n                \"minimum\": 0\n              },\n              \"angle\": {\n                \"type\": \"number\",\n                \"minimum\": 0\n              },\n              \"angle1\": {\n                \"type\": \"number\"\n              },\n              \"angle2\": {\n                \"type\": \"number\"\n              },\n              \"angle3\": {\n                \"type\": \"number\"\n              }\n            },\n            \"additionalProperties\": false\n          },\n          \"label\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 256\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 120\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-modeling\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": true,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    },\n    {\n      \"name\": \"freecad_modeling__boolean_operation\",\n      \"description\": \"Create a parametric union, cut, or intersection from two Part shape objects.\",\n      \"inputSchema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"document_path\",\n          \"operation\",\n          \"base_object\",\n          \"tool_object\",\n          \"result_name\"\n        ],\n        \"properties\": {\n          \"document_path\": {\n            \"type\": \"string\",\n            \"minLength\": 1\n          },\n          \"operation\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"cut\",\n              \"intersection\",\n              \"union\"\n            ]\n          },\n          \"base_object\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"tool_object\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"result_name\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 64\n          },\n          \"result_label\": {\n            \"type\": \"string\",\n            \"minLength\": 1,\n            \"maxLength\": 256\n          },\n          \"timeout_secs\": {\n            \"type\": \"number\",\n            \"minimum\": 1,\n            \"maximum\": 1800,\n            \"default\": 300\n          }\n        },\n        \"additionalProperties\": false\n      },\n      \"outputSchema\": {\n        \"type\": \"object\"\n      },\n      \"skill_name\": \"freecad-modeling\",\n      \"annotations\": {\n        \"read_only_hint\": false,\n        \"destructive_hint\": false,\n        \"idempotent_hint\": false,\n        \"open_world_hint\": false,\n        \"deferred_hint\": true\n      },\n      \"metadata\": {\n        \"dcc\": {\n          \"affinity\": \"any\",\n          \"execution\": \"async\",\n          \"timeoutHintSecs\": 1800,\n          \"jobStrategy\": \"monolithic\",\n          \"enforceThreadAffinity\": true\n        }\n      }\n    }\n  ]\n}",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": null,
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "get_status",
+      "arguments": {},
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"success\": true, \"message\": \"FreeCAD adapter status inspected.\", \"context\": {\"version\": \"1.0.0\", \"version_details\": [\"1\", \"0\", \"0\", \"\", \"https://code.launchpad.net/~vcs-imports/freecad/trunk\", \"2026/08/25 11:49:11\"], \"console_mode\": true, \"python_version\": \"3.13.5\", \"host_matrix\": {\"version\": \"1.0.0\", \"parsed_version\": \"1.0.0\", \"status\": \"supported\", \"matrix_version\": \"2026-09-29\", \"supported_ranges\": [\"1.0.x\", \"1.1.x\"], \"range\": {\"id\": \"1.0.x\", \"min_version\": \"1.0.0\", \"max_version\": \"1.0.9999\", \"evidence\": \"Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, 1 passed / 0 skipped.\"}, \"breaking_changes\": []}, \"api_probe\": [{\"id\": \"sketcher-symmetric-renamed-to-midplane\", \"attribute\": \"Symmetric\", \"applies_to_host\": false, \"expected\": \"unverified\", \"observed\": \"absent\", \"replacement_observed\": \"absent\", \"matches_expected\": null}, {\"id\": \"sketcher-external-geometry-count-removed\", \"attribute\": \"ExternalGeometryCount\", \"applies_to_host\": false, \"expected\": \"unverified\", \"observed\": \"absent\", \"replacement_observed\": \"present\", \"matches_expected\": null}, {\"id\": \"meshpart-tessellate-deflection\", \"attribute\": \"meshFromShape\", \"applies_to_host\": false, \"expected\": \"present\", \"observed\": \"present\", \"replacement_observed\": null, \"matches_expected\": true}], \"duration_secs\": 0.452, \"stdout_truncated\": false, \"stderr_truncated\": false, \"ready\": true, \"backend\": \"python-module\", \"module_directory\": \"/usr/lib/freecad-python3/lib\", \"executable\": \"/usr/bin/python3.13\", \"instance_type\": \"standalone\", \"allowed_roots\": [\"CASE_ROOT/runtime/freecad-core2041-rebased-02\", \"CASE_ROOT/runtime/freecad-module-write-04\"], \"max_document_bytes\": 2147483648, \"max_timeout_secs\": 1800.0}}",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "success": true,
+          "message": "FreeCAD adapter status inspected.",
+          "context": {
+            "version": "1.0.0",
+            "version_details": [
+              "1",
+              "0",
+              "0",
+              "",
+              "https://code.launchpad.net/~vcs-imports/freecad/trunk",
+              "2026/08/25 11:49:11"
+            ],
+            "console_mode": true,
+            "python_version": "3.13.5",
+            "host_matrix": {
+              "version": "1.0.0",
+              "parsed_version": "1.0.0",
+              "status": "supported",
+              "matrix_version": "2026-09-29",
+              "supported_ranges": [
+                "1.0.x",
+                "1.1.x"
+              ],
+              "range": {
+                "id": "1.0.x",
+                "min_version": "1.0.0",
+                "max_version": "1.0.9999",
+                "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, 1 passed / 0 skipped."
+              },
+              "breaking_changes": []
+            },
+            "api_probe": [
+              {
+                "id": "sketcher-symmetric-renamed-to-midplane",
+                "attribute": "Symmetric",
+                "applies_to_host": false,
+                "expected": "unverified",
+                "observed": "absent",
+                "replacement_observed": "absent",
+                "matches_expected": null
+              },
+              {
+                "id": "sketcher-external-geometry-count-removed",
+                "attribute": "ExternalGeometryCount",
+                "applies_to_host": false,
+                "expected": "unverified",
+                "observed": "absent",
+                "replacement_observed": "present",
+                "matches_expected": null
+              },
+              {
+                "id": "meshpart-tessellate-deflection",
+                "attribute": "meshFromShape",
+                "applies_to_host": false,
+                "expected": "present",
+                "observed": "present",
+                "replacement_observed": null,
+                "matches_expected": true
+              }
+            ],
+            "duration_secs": 0.452,
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "ready": true,
+            "backend": "python-module",
+            "module_directory": "/usr/lib/freecad-python3/lib",
+            "executable": "/usr/bin/python3.13",
+            "instance_type": "standalone",
+            "allowed_roots": [
+              "CASE_ROOT/runtime/freecad-core2041-rebased-02",
+              "CASE_ROOT/runtime/freecad-module-write-04"
+            ],
+            "max_document_bytes": 2147483648,
+            "max_timeout_secs": 1800.0
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "get_capabilities",
+      "arguments": {},
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"success\": true, \"message\": \"FreeCAD capabilities inspected.\", \"context\": {\"status\": {\"version\": \"1.0.0\", \"version_details\": [\"1\", \"0\", \"0\", \"\", \"https://code.launchpad.net/~vcs-imports/freecad/trunk\", \"2026/08/25 11:49:11\"], \"console_mode\": true, \"python_version\": \"3.13.5\", \"host_matrix\": {\"version\": \"1.0.0\", \"parsed_version\": \"1.0.0\", \"status\": \"supported\", \"matrix_version\": \"2026-09-29\", \"supported_ranges\": [\"1.0.x\", \"1.1.x\"], \"range\": {\"id\": \"1.0.x\", \"min_version\": \"1.0.0\", \"max_version\": \"1.0.9999\", \"evidence\": \"Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, 1 passed / 0 skipped.\"}, \"breaking_changes\": []}, \"api_probe\": [{\"id\": \"sketcher-symmetric-renamed-to-midplane\", \"attribute\": \"Symmetric\", \"applies_to_host\": false, \"expected\": \"unverified\", \"observed\": \"absent\", \"replacement_observed\": \"absent\", \"matches_expected\": null}, {\"id\": \"sketcher-external-geometry-count-removed\", \"attribute\": \"ExternalGeometryCount\", \"applies_to_host\": false, \"expected\": \"unverified\", \"observed\": \"absent\", \"replacement_observed\": \"present\", \"matches_expected\": null}, {\"id\": \"meshpart-tessellate-deflection\", \"attribute\": \"meshFromShape\", \"applies_to_host\": false, \"expected\": \"present\", \"observed\": \"present\", \"replacement_observed\": null, \"matches_expected\": true}], \"duration_secs\": 0.502, \"stdout_truncated\": false, \"stderr_truncated\": false, \"ready\": true, \"backend\": \"python-module\", \"module_directory\": \"/usr/lib/freecad-python3/lib\", \"executable\": \"/usr/bin/python3.13\", \"instance_type\": \"standalone\", \"allowed_roots\": [\"CASE_ROOT/runtime/freecad-core2041-rebased-02\", \"CASE_ROOT/runtime/freecad-module-write-04\"], \"max_document_bytes\": 2147483648, \"max_timeout_secs\": 1800.0}, \"methods\": [\"create_document\", \"inspect_document\", \"validate_document\", \"save_copy\", \"add_primitive\", \"update_primitive\", \"transform_object\", \"boolean_operation\", \"remove_object\", \"import_geometry\", \"export_geometry\"], \"primitives\": [\"box\", \"cone\", \"cylinder\", \"sphere\", \"torus\"], \"boolean_operations\": [\"cut\", \"intersection\", \"union\"], \"import_extensions\": [\".brep\", \".brp\", \".iges\", \".igs\", \".obj\", \".step\", \".stl\", \".stp\"], \"export_extensions\": [\".brep\", \".brp\", \".iges\", \".igs\", \".obj\", \".step\", \".stl\", \".stp\"], \"atomic_document_mutations\": true, \"arbitrary_python\": false}}",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "success": true,
+          "message": "FreeCAD capabilities inspected.",
+          "context": {
+            "status": {
+              "version": "1.0.0",
+              "version_details": [
+                "1",
+                "0",
+                "0",
+                "",
+                "https://code.launchpad.net/~vcs-imports/freecad/trunk",
+                "2026/08/25 11:49:11"
+              ],
+              "console_mode": true,
+              "python_version": "3.13.5",
+              "host_matrix": {
+                "version": "1.0.0",
+                "parsed_version": "1.0.0",
+                "status": "supported",
+                "matrix_version": "2026-09-29",
+                "supported_ranges": [
+                  "1.0.x",
+                  "1.1.x"
+                ],
+                "range": {
+                  "id": "1.0.x",
+                  "min_version": "1.0.0",
+                  "max_version": "1.0.9999",
+                  "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, 1 passed / 0 skipped."
+                },
+                "breaking_changes": []
+              },
+              "api_probe": [
+                {
+                  "id": "sketcher-symmetric-renamed-to-midplane",
+                  "attribute": "Symmetric",
+                  "applies_to_host": false,
+                  "expected": "unverified",
+                  "observed": "absent",
+                  "replacement_observed": "absent",
+                  "matches_expected": null
+                },
+                {
+                  "id": "sketcher-external-geometry-count-removed",
+                  "attribute": "ExternalGeometryCount",
+                  "applies_to_host": false,
+                  "expected": "unverified",
+                  "observed": "absent",
+                  "replacement_observed": "present",
+                  "matches_expected": null
+                },
+                {
+                  "id": "meshpart-tessellate-deflection",
+                  "attribute": "meshFromShape",
+                  "applies_to_host": false,
+                  "expected": "present",
+                  "observed": "present",
+                  "replacement_observed": null,
+                  "matches_expected": true
+                }
+              ],
+              "duration_secs": 0.502,
+              "stdout_truncated": false,
+              "stderr_truncated": false,
+              "ready": true,
+              "backend": "python-module",
+              "module_directory": "/usr/lib/freecad-python3/lib",
+              "executable": "/usr/bin/python3.13",
+              "instance_type": "standalone",
+              "allowed_roots": [
+                "CASE_ROOT/runtime/freecad-core2041-rebased-02",
+                "CASE_ROOT/runtime/freecad-module-write-04"
+              ],
+              "max_document_bytes": 2147483648,
+              "max_timeout_secs": 1800.0
+            },
+            "methods": [
+              "create_document",
+              "inspect_document",
+              "validate_document",
+              "save_copy",
+              "add_primitive",
+              "update_primitive",
+              "transform_object",
+              "boolean_operation",
+              "remove_object",
+              "import_geometry",
+              "export_geometry"
+            ],
+            "primitives": [
+              "box",
+              "cone",
+              "cylinder",
+              "sphere",
+              "torus"
+            ],
+            "boolean_operations": [
+              "cut",
+              "intersection",
+              "union"
+            ],
+            "import_extensions": [
+              ".brep",
+              ".brp",
+              ".iges",
+              ".igs",
+              ".obj",
+              ".step",
+              ".stl",
+              ".stp"
+            ],
+            "export_extensions": [
+              ".brep",
+              ".brp",
+              ".iges",
+              ".igs",
+              ".obj",
+              ".step",
+              ".stl",
+              ".stp"
+            ],
+            "atomic_document_mutations": true,
+            "arbitrary_python": false
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "create_document",
+      "arguments": {
+        "path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job d13b5d80-e3c2-43f6-ae45-3ccfbd37358a queued; poll jobs_get_status with core_job_id=d13b5d80-e3c2-43f6-ae45-3ccfbd37358a",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "d13b5d80-e3c2-43f6-ae45-3ccfbd37358a",
+          "core_job_id": "d13b5d80-e3c2-43f6-ae45-3ccfbd37358a",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "d13b5d80-e3c2-43f6-ae45-3ccfbd37358a",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "d13b5d80-e3c2-43f6-ae45-3ccfbd37358a",
+              "coreJobId": "d13b5d80-e3c2-43f6-ae45-3ccfbd37358a",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "add_primitive",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "primitive": "box",
+        "name": "Block",
+        "dimensions": {
+          "length": 20,
+          "width": 10,
+          "height": 4
+        }
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 4cb79906-dfd3-44bd-a6de-81e07e0d6905 queued; poll jobs_get_status with core_job_id=4cb79906-dfd3-44bd-a6de-81e07e0d6905",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "4cb79906-dfd3-44bd-a6de-81e07e0d6905",
+          "core_job_id": "4cb79906-dfd3-44bd-a6de-81e07e0d6905",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "4cb79906-dfd3-44bd-a6de-81e07e0d6905",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "4cb79906-dfd3-44bd-a6de-81e07e0d6905",
+              "coreJobId": "4cb79906-dfd3-44bd-a6de-81e07e0d6905",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "update_primitive",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "object_name": "Block",
+        "dimensions": {
+          "length": 24
+        }
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job c93d9ad3-8288-4c83-b312-69fd516f4f0e queued; poll jobs_get_status with core_job_id=c93d9ad3-8288-4c83-b312-69fd516f4f0e",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "c93d9ad3-8288-4c83-b312-69fd516f4f0e",
+          "core_job_id": "c93d9ad3-8288-4c83-b312-69fd516f4f0e",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "c93d9ad3-8288-4c83-b312-69fd516f4f0e",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "c93d9ad3-8288-4c83-b312-69fd516f4f0e",
+              "coreJobId": "c93d9ad3-8288-4c83-b312-69fd516f4f0e",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "add_primitive",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "primitive": "cylinder",
+        "name": "Hole",
+        "dimensions": {
+          "radius": 2,
+          "height": 6
+        }
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 50cb6b4c-349b-4b15-9c39-781e6c988179 queued; poll jobs_get_status with core_job_id=50cb6b4c-349b-4b15-9c39-781e6c988179",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "50cb6b4c-349b-4b15-9c39-781e6c988179",
+          "core_job_id": "50cb6b4c-349b-4b15-9c39-781e6c988179",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "50cb6b4c-349b-4b15-9c39-781e6c988179",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "50cb6b4c-349b-4b15-9c39-781e6c988179",
+              "coreJobId": "50cb6b4c-349b-4b15-9c39-781e6c988179",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "transform_object",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "object_name": "Hole",
+        "translation": [
+          12,
+          5,
+          -1
+        ],
+        "rotation_axis": [
+          0,
+          0,
+          1
+        ],
+        "rotation_degrees": 0
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 9caa48ce-bab9-4a1a-9aa9-c1dd986a3780 queued; poll jobs_get_status with core_job_id=9caa48ce-bab9-4a1a-9aa9-c1dd986a3780",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "9caa48ce-bab9-4a1a-9aa9-c1dd986a3780",
+          "core_job_id": "9caa48ce-bab9-4a1a-9aa9-c1dd986a3780",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "9caa48ce-bab9-4a1a-9aa9-c1dd986a3780",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "9caa48ce-bab9-4a1a-9aa9-c1dd986a3780",
+              "coreJobId": "9caa48ce-bab9-4a1a-9aa9-c1dd986a3780",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "boolean_operation",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "operation": "cut",
+        "base_object": "Block",
+        "tool_object": "Hole",
+        "result_name": "DrilledBlock"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job ea5ad35d-31f2-499e-a3dc-199001f47e50 queued; poll jobs_get_status with core_job_id=ea5ad35d-31f2-499e-a3dc-199001f47e50",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "ea5ad35d-31f2-499e-a3dc-199001f47e50",
+          "core_job_id": "ea5ad35d-31f2-499e-a3dc-199001f47e50",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "ea5ad35d-31f2-499e-a3dc-199001f47e50",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "ea5ad35d-31f2-499e-a3dc-199001f47e50",
+              "coreJobId": "ea5ad35d-31f2-499e-a3dc-199001f47e50",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "validate_document",
+      "arguments": {
+        "path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 5e02b12d-f3fe-4e54-8385-09af1ad158da queued; poll jobs_get_status with core_job_id=5e02b12d-f3fe-4e54-8385-09af1ad158da",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "5e02b12d-f3fe-4e54-8385-09af1ad158da",
+          "core_job_id": "5e02b12d-f3fe-4e54-8385-09af1ad158da",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "5e02b12d-f3fe-4e54-8385-09af1ad158da",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "5e02b12d-f3fe-4e54-8385-09af1ad158da",
+              "coreJobId": "5e02b12d-f3fe-4e54-8385-09af1ad158da",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "inspect_document",
+      "arguments": {
+        "path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 5060f146-3af6-4ca3-ad0e-3bd449d7e6b2 queued; poll jobs_get_status with core_job_id=5060f146-3af6-4ca3-ad0e-3bd449d7e6b2",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "5060f146-3af6-4ca3-ad0e-3bd449d7e6b2",
+          "core_job_id": "5060f146-3af6-4ca3-ad0e-3bd449d7e6b2",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "5060f146-3af6-4ca3-ad0e-3bd449d7e6b2",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "5060f146-3af6-4ca3-ad0e-3bd449d7e6b2",
+              "coreJobId": "5060f146-3af6-4ca3-ad0e-3bd449d7e6b2",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "export_geometry",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "object_names": [
+          "DrilledBlock"
+        ],
+        "output_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.step",
+        "linear_deflection": 0.05,
+        "angular_deflection_degrees": 10
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e queued; poll jobs_get_status with core_job_id=dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e",
+          "core_job_id": "dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e",
+              "coreJobId": "dd898fcb-2fc7-4e50-80bf-0f70c9d07b0e",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "export_geometry",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "object_names": [
+          "DrilledBlock"
+        ],
+        "output_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.stl",
+        "linear_deflection": 0.05,
+        "angular_deflection_degrees": 10
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 54c1d3b4-6676-4b36-83f2-80de27c34449 queued; poll jobs_get_status with core_job_id=54c1d3b4-6676-4b36-83f2-80de27c34449",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "54c1d3b4-6676-4b36-83f2-80de27c34449",
+          "core_job_id": "54c1d3b4-6676-4b36-83f2-80de27c34449",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "54c1d3b4-6676-4b36-83f2-80de27c34449",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "54c1d3b4-6676-4b36-83f2-80de27c34449",
+              "coreJobId": "54c1d3b4-6676-4b36-83f2-80de27c34449",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "save_copy",
+      "arguments": {
+        "source_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.FCStd",
+        "output_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/copy.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 5290d260-08b3-4eef-af75-8755253d09c9 queued; poll jobs_get_status with core_job_id=5290d260-08b3-4eef-af75-8755253d09c9",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "5290d260-08b3-4eef-af75-8755253d09c9",
+          "core_job_id": "5290d260-08b3-4eef-af75-8755253d09c9",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "5290d260-08b3-4eef-af75-8755253d09c9",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "5290d260-08b3-4eef-af75-8755253d09c9",
+              "coreJobId": "5290d260-08b3-4eef-af75-8755253d09c9",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "inspect_document",
+      "arguments": {
+        "path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/copy.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 88d0a7ad-97ca-411e-97d8-5f4f3f341d1d queued; poll jobs_get_status with core_job_id=88d0a7ad-97ca-411e-97d8-5f4f3f341d1d",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "88d0a7ad-97ca-411e-97d8-5f4f3f341d1d",
+          "core_job_id": "88d0a7ad-97ca-411e-97d8-5f4f3f341d1d",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "88d0a7ad-97ca-411e-97d8-5f4f3f341d1d",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "88d0a7ad-97ca-411e-97d8-5f4f3f341d1d",
+              "coreJobId": "88d0a7ad-97ca-411e-97d8-5f4f3f341d1d",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "create_document",
+      "arguments": {
+        "path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/imported.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 76b06d8f-cc06-4388-aecb-50e172d75386 queued; poll jobs_get_status with core_job_id=76b06d8f-cc06-4388-aecb-50e172d75386",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "76b06d8f-cc06-4388-aecb-50e172d75386",
+          "core_job_id": "76b06d8f-cc06-4388-aecb-50e172d75386",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "76b06d8f-cc06-4388-aecb-50e172d75386",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "76b06d8f-cc06-4388-aecb-50e172d75386",
+              "coreJobId": "76b06d8f-cc06-4388-aecb-50e172d75386",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "import_geometry",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/imported.FCStd",
+        "input_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/proof.step",
+        "object_name": "Reimported"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 0e4f5700-58eb-4201-a2d3-d964041db88d queued; poll jobs_get_status with core_job_id=0e4f5700-58eb-4201-a2d3-d964041db88d",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "0e4f5700-58eb-4201-a2d3-d964041db88d",
+          "core_job_id": "0e4f5700-58eb-4201-a2d3-d964041db88d",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "0e4f5700-58eb-4201-a2d3-d964041db88d",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "0e4f5700-58eb-4201-a2d3-d964041db88d",
+              "coreJobId": "0e4f5700-58eb-4201-a2d3-d964041db88d",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "add_primitive",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/imported.FCStd",
+        "primitive": "sphere",
+        "name": "Temporary",
+        "dimensions": {
+          "radius": 1
+        }
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 093a1ef3-7852-4f11-af66-aed69e5f6467 queued; poll jobs_get_status with core_job_id=093a1ef3-7852-4f11-af66-aed69e5f6467",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "093a1ef3-7852-4f11-af66-aed69e5f6467",
+          "core_job_id": "093a1ef3-7852-4f11-af66-aed69e5f6467",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "093a1ef3-7852-4f11-af66-aed69e5f6467",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "093a1ef3-7852-4f11-af66-aed69e5f6467",
+              "coreJobId": "093a1ef3-7852-4f11-af66-aed69e5f6467",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "remove_object",
+      "arguments": {
+        "document_path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/imported.FCStd",
+        "object_name": "Temporary"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job f2909777-9641-42e9-bf28-1b711504266a queued; poll jobs_get_status with core_job_id=f2909777-9641-42e9-bf28-1b711504266a",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "f2909777-9641-42e9-bf28-1b711504266a",
+          "core_job_id": "f2909777-9641-42e9-bf28-1b711504266a",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "f2909777-9641-42e9-bf28-1b711504266a",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "f2909777-9641-42e9-bf28-1b711504266a",
+              "coreJobId": "f2909777-9641-42e9-bf28-1b711504266a",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    },
+    {
+      "tool": "inspect_document",
+      "arguments": {
+        "path": "CASE_ROOT/runtime/freecad-core2041-rebased-02/imported.FCStd"
+      },
+      "response": {
+        "meta": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Core job 829e8f1e-056a-4f00-821d-9c4e505807f2 queued; poll jobs_get_status with core_job_id=829e8f1e-056a-4f00-821d-9c4e505807f2",
+            "annotations": null,
+            "meta": null
+          }
+        ],
+        "structured_content": {
+          "job_id": "829e8f1e-056a-4f00-821d-9c4e505807f2",
+          "core_job_id": "829e8f1e-056a-4f00-821d-9c4e505807f2",
+          "job_id_owner": "core",
+          "status": "pending",
+          "parent_job_id": null,
+          "core_poll": {
+            "owner": "core",
+            "tool": "jobs_get_status",
+            "arguments": {
+              "job_id": "829e8f1e-056a-4f00-821d-9c4e505807f2",
+              "include_result": true
+            }
+          },
+          "_meta": {
+            "status": "pending",
+            "dcc": {
+              "jobId": "829e8f1e-056a-4f00-821d-9c4e505807f2",
+              "coreJobId": "829e8f1e-056a-4f00-821d-9c4e505807f2",
+              "jobOwner": "core",
+              "pollTool": "jobs_get_status",
+              "parentJobId": null
+            }
+          }
+        },
+        "is_error": false,
+        "result_type": "complete"
+      }
+    }
+  ],
+  "selection": "Selected tool requests excluding asynchronous polling; validation above summarizes final native readbacks. Full raw trace retained privately."
+}

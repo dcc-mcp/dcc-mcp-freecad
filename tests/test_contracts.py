@@ -56,3 +56,10 @@ def test_server_declares_standalone_lifetime():
     server = FreecadMcpServer(port=0)
     options = next(value for value in vars(server).values() if hasattr(value, "instance_type"))
     assert options.instance_type == "standalone"
+
+
+def test_explicit_standalone_gateway_options_are_preserved():
+    server = FreecadMcpServer(port=0, gateway_port=0, enable_gateway_failover=False)
+    options = next(value for value in vars(server).values() if hasattr(value, "instance_type"))
+    assert options.gateway.port == 0
+    assert options.gateway.enable_failover is False

@@ -132,3 +132,7 @@ Typical sequence: `create_document` → `add_primitive` → `transform_object` �
 - Cascade removal is explicit and reports every removed dependent.
 
 FreeCAD Python API reference: <https://www.freecad.org/api/>
+
+## Optional native-library backend
+
+The default is still FreeCADCmd. A separately configured `python-module` backend runs the same typed driver in a fresh compatible interpreter and installed FreeCAD library, with isolated temporary user directories. It is opt-in and has no automatic fallback. See [configuration and exact qualification](docs/python-module-backend.md).
