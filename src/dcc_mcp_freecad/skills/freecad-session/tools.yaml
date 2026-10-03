@@ -83,7 +83,7 @@ tools:
     next-tools: {on-failure: [inspect_document, get_status]}
 
   - name: save_copy
-    description: Save an FCStd document to a new atomic output path without changing the source.
+    description: Save an FCStd document to a new atomic output path without changing the source. Every copy with overwrite=false, plain or presentation, requires sibling hard-link support on the output filesystem; publication fails if that operation is unavailable. Explicit overwrite uses atomic replacement.
     source_file: scripts/save_copy.py
     input_schema:
       type: object
@@ -98,7 +98,7 @@ tools:
           maxItems: 1000
           uniqueItems: true
           items: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
-          description: Optional explicit top-level non-container native view-provider selection; group members are rejected. Requires the installed FreeCAD GUI library. A no-overwrite copy requires sibling hard-link support.
+          description: Optional explicit top-level non-container native view-provider selection; group members are rejected. Requires the installed FreeCAD GUI library.
         view: {type: string, enum: [isometric, front, top, right], default: isometric}
         timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
       if:

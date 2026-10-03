@@ -52,8 +52,10 @@ object names consistently with the runtime.
 Source replacement is rejected in presentation mode even with explicit
 overwrite. Cancellation is checked before publication. No-overwrite copies
 publish the completed sibling native file through an exclusive hard link, so
-a destination created during native saving is preserved. This requires output
-filesystem hard-link support; explicit overwrite uses atomic replacement.
+a destination created during native saving is preserved. Every `save_copy`
+call with `overwrite=false` requires output-filesystem hard-link support,
+including plain copies without a presentation selection. Publication fails
+when that operation is unavailable; explicit overwrite uses atomic replacement.
 Size, SHA-256 and response metadata are obtained from the verified stage before
 publication. Cleanup of the owned stage and native backups is best effort:
 filesystem cleanup errors preserve the committed result or original failure,

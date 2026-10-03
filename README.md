@@ -125,6 +125,9 @@ Typical sequence: `create_document` → `add_primitive` → `transform_object` �
 
 - Requested documents and geometry stay under configured allowed roots.
 - Existing outputs require explicit `overwrite=true`.
+- Every `save_copy` call with `overwrite=false`, plain or presentation, requires
+  sibling hard-link support on the output filesystem. Publication fails if this
+  operation is unavailable. Explicit overwrite uses atomic replacement.
 - FCStd mutations happen on sibling staging copies and replace the original
   only after a successful, non-empty save.
 - Failed mutations leave the original document byte-for-byte unchanged.
