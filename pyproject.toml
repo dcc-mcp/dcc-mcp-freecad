@@ -62,7 +62,10 @@ exclude=["docs/**/*.png", "docs/**/*.svg", "docs/**/*.webp"]
 [tool.pytest.ini_options]
 testpaths=["tests"]
 pythonpath=["src","."]
-markers=["freecad: requires a real FreeCADCmd executable"]
+markers=[
+  "freecad: requires a real FreeCADCmd executable",
+  "freecad_gui: requires real FreeCAD GUI view providers in an offscreen native process",
+]
 
 [tool.ruff.lint]
 select=["E","F","I","B"]

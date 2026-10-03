@@ -87,16 +87,23 @@ jobs:
       - name: Real FreeCAD end-to-end
         run: |
           echo "FreeCAD ${FREECAD_REAL_VERSION} via ${FREECAD_TEST_EXECUTABLE}"
-          python -m pytest -m freecad -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
+          python -m pytest -m "freecad and not freecad_gui" -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
       - name: Assert the real test executed
         if: always()
-        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml
+        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 3
+      - name: Real native GUI presentation persistence
+        run: python -m pytest -m freecad_gui -v --junitxml=freecad-gui-${{ matrix.freecad_version }}.xml
+      - name: Assert GUI cases executed without skips
+        if: always()
+        run: python3 .github/scripts/verify-freecad-run.py freecad-gui-${{ matrix.freecad_version }}.xml 26
       - name: Upload real run report
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: freecad-real-${{ matrix.freecad_version }}
-          path: freecad-real-${{ matrix.freecad_version }}.xml
+          path: |
+            freecad-real-${{ matrix.freecad_version }}.xml
+            freecad-gui-${{ matrix.freecad_version }}.xml
           retention-days: 7
 
   lint-and-build:

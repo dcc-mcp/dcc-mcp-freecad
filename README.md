@@ -138,3 +138,34 @@ FreeCAD Python API reference: <https://www.freecad.org/api/>
 ## Optional native-library backend
 
 The default is still FreeCADCmd. A separately configured `python-module` backend runs the same typed driver in a fresh compatible interpreter and installed FreeCAD library, with isolated temporary user directories. It is opt-in and has no automatic fallback. See [configuration and exact qualification](docs/python-module-backend.md).
+
+### Native presentation copies
+
+`save_copy` accepts an optional bounded `visible_objects` list and a standard
+`view` (`isometric`, `front`, `top`, `right`). With this explicit opt-in it uses
+FreeCAD's installed GUI library to save view-provider visibility and an
+orthographic camera. Selections must be top-level non-container objects;
+Groups, LinkGroups, Parts, Bodies and their members are rejected before changing visibility because a
+hidden parent can hide or override a child's local state. Other objects remain
+editable but hidden. The original
+file stays unchanged; presentation mode refuses replacing the source even when
+overwrite is set. GUI-library availability is required; this is not a claim of
+offscreen OpenGL rendering.
+
+The isolated native process disables view animation before selecting the camera,
+verifies visibility, orthographic type and native quaternion orientation against
+the request, then saves and reopens its staging file. It verifies camera values
+(single-precision serialization tolerance of 1e-6), object names, links, topology
+counts, placement, volumes and analytic bounds (double precision tolerance 1e-10 relative,
+1e-9 absolute). Analytic bounds explicitly exclude GUI triangulation caches.
+A cancellation check precedes final publication. No FCStd XML or binary data is
+rewritten outside native FreeCAD APIs. Native raster thumbnails are disabled in
+this isolated process because an offscreen host may lack an OpenGL context.
+
+No-overwrite copy publication uses a sibling hard link to publish the complete
+native file without replacing a destination created during the native call;
+the output filesystem must support this operation. Explicit overwrite continues
+to use atomic replacement. These readbacks cover recorded geometry metrics,
+not full BRep or mesh connectivity equivalence. Source qualification and the
+supported-host GUI persistence gate are recorded in
+[presentation-copy validation](docs/validation/presentation-copy.md).
