@@ -53,9 +53,14 @@ Source replacement is rejected in presentation mode even with explicit
 overwrite. Cancellation is checked before publication. No-overwrite copies
 publish the completed sibling native file through an exclusive hard link, so
 a destination created during native saving is preserved. Every `save_copy`
-call with `overwrite=false` requires output-filesystem hard-link support,
-including plain copies without a presentation selection. Publication fails
-when that operation is unavailable; explicit overwrite uses atomic replacement.
+call with `overwrite=false` needs exclusive publication, including plain copies
+without a presentation selection: output-filesystem hard-link support, or the
+exclusive create (`O_CREAT|O_EXCL`) plus copy fallback used where the volume
+has none (FAT/exFAT, some SMB/FUSE mounts). The fallback keeps the same refusal
+to replace a concurrent destination; it drops only the single atomic inode
+commit. When neither is available, publication fails with a `BridgeError` that
+names hard links and the `overwrite=true` escape hatch; explicit overwrite uses
+atomic replacement.
 Size, SHA-256 and response metadata are obtained from the verified stage before
 publication. Cleanup of the owned stage and native backups is best effort:
 filesystem cleanup errors preserve the committed result or original failure,

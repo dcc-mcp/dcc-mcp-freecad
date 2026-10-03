@@ -83,7 +83,7 @@ tools:
     next-tools: {on-failure: [inspect_document, get_status]}
 
   - name: save_copy
-    description: Save an FCStd document to a new atomic output path without changing the source. Every copy with overwrite=false, plain or presentation, requires sibling hard-link support on the output filesystem; publication fails if that operation is unavailable. Explicit overwrite uses atomic replacement.
+    description: Save an FCStd document to a new atomic output path without changing the source. Every copy with overwrite=false, plain or presentation, publishes exclusively - a sibling hard link, or an exclusive create plus copy fallback on volumes without hard-link support - so a destination created during the native call is never replaced; publication fails with a hard-link error and the overwrite=true escape hatch if neither is available. Explicit overwrite uses atomic replacement.
     source_file: scripts/save_copy.py
     input_schema:
       type: object

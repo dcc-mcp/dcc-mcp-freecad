@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -234,6 +236,123 @@ def test_export_refuses_implicit_overwrite(tmp_path: Path):
     result = bridge.export_geometry(str(document), ["Body"], str(output), overwrite=True)
     assert output.read_bytes() == b"geometry"
     assert result["overwritten"] is True
+
+
+def _linkless(code: int):
+    """Stand in for a volume where ``os.link`` cannot work (FAT, exFAT, SMB)."""
+
+    def link(_source, _target, **_kwargs):
+        raise OSError(code, "hard links are not supported on this volume")
+
+    return link
+
+
+def test_plain_copy_publishes_without_overwrite(tmp_path: Path):
+    """The plain copy path is what an agent hits without an opt-in selection."""
+    source = tmp_path / "model.FCStd"
+    source.write_bytes(b"known-good")
+    output = tmp_path / "copy.FCStd"
+    bridge = FakeFreecad(tmp_path)
+
+    result = bridge.save_copy(str(source), str(output))
+
+    assert output.read_bytes() == b"copied-fcstd"
+    assert result["output_path"] == str(output)
+    assert result["bytes"] == len(b"copied-fcstd")
+    assert result["overwritten"] is False
+    assert source.read_bytes() == b"known-good"
+    assert not list(tmp_path.glob(".copy.*")), "the owned stage must not survive"
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.ENOTSUP])
+def test_plain_copy_falls_back_on_a_volume_without_hardlinks(tmp_path, monkeypatch, code):
+    """A linkless volume must publish by exclusive copy, not fail.
+
+    Every CI runner is ext4 or NTFS, so this branch is structurally unreachable
+    there; only an injected ``os.link`` failure pins it.
+    """
+    source = tmp_path / "model.FCStd"
+    source.write_bytes(b"known-good")
+    output = tmp_path / "copy.FCStd"
+    bridge = FakeFreecad(tmp_path)
+    attempts = []
+
+    def link(_source, _target, **_kwargs):
+        attempts.append(True)
+        raise OSError(code, "hard links are not supported on this volume")
+
+    monkeypatch.setattr("os.link", link)
+
+    result = bridge.save_copy(str(source), str(output))
+
+    assert attempts == [True], "the hard-link publication is still attempted first"
+    assert output.read_bytes() == b"copied-fcstd"
+    assert result["output_path"] == str(output)
+    assert result["bytes"] == len(b"copied-fcstd")
+    assert result["overwritten"] is False
+    assert source.read_bytes() == b"known-good"
+    assert not list(tmp_path.glob(".copy.*")), "the owned stage must not survive"
+
+
+def test_the_fallback_still_refuses_a_destination_from_the_native_call(tmp_path, monkeypatch):
+    """``O_EXCL`` must keep the TOCTOU fix even without hard links."""
+    source = tmp_path / "model.FCStd"
+    target = tmp_path / "copy.FCStd"
+    source.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+
+    def native(_method, params, _timeout):
+        Path(params["output_path"]).write_bytes(b"native copy")
+        target.write_bytes(b"concurrent-destination")
+        return {"object_count": 1}
+
+    monkeypatch.setattr("os.link", _linkless(errno.ENOTSUP))
+    monkeypatch.setattr(bridge, "_invoke", native)
+
+    with pytest.raises(BridgeError, match="Output already exists"):
+        bridge.save_copy(str(source), str(target))
+
+    assert target.read_bytes() == b"concurrent-destination"
+    assert not list(tmp_path.glob(".copy.*"))
+
+
+def test_a_volume_without_hardlinks_reports_a_bridge_error(tmp_path, monkeypatch):
+    """The agent must be told what failed, not handed a bare ``OSError``."""
+    source = tmp_path / "model.FCStd"
+    output = tmp_path / "copy.FCStd"
+    source.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+
+    def exhausted(_source, _destination, *args, **kwargs):
+        raise OSError(errno.ENOSPC, "no space left on the output volume")
+
+    monkeypatch.setattr("os.link", _linkless(errno.EPERM))
+    monkeypatch.setattr(shutil, "copyfileobj", exhausted)
+
+    with pytest.raises(BridgeError) as excinfo:
+        bridge.save_copy(str(source), str(output))
+
+    message = str(excinfo.value)
+    assert "hard link" in message, "the message must name the real cause"
+    assert "overwrite=true" in message, "the message must name the escape hatch"
+    assert not output.exists(), "a partial publication must not be left behind"
+    assert source.read_bytes() == b"known-good"
+    assert not list(tmp_path.glob(".copy.*"))
+
+
+def test_the_overwrite_escape_hatch_does_not_need_hardlinks(tmp_path, monkeypatch):
+    source = tmp_path / "model.FCStd"
+    target = tmp_path / "copy.FCStd"
+    source.write_bytes(b"known-good")
+    target.write_bytes(b"older-copy")
+    bridge = FakeFreecad(tmp_path)
+    monkeypatch.setattr("os.link", _linkless(errno.EPERM))
+
+    result = bridge.save_copy(str(source), str(target), overwrite=True)
+
+    assert target.read_bytes() == b"copied-fcstd"
+    assert result["overwritten"] is True
+    assert source.read_bytes() == b"known-good"
 
 
 def _real_freecad() -> str:
