@@ -125,9 +125,11 @@ Typical sequence: `create_document` → `add_primitive` → `transform_object` �
 
 - Requested documents and geometry stay under configured allowed roots.
 - Existing outputs require explicit `overwrite=true`.
-- Every `save_copy` call with `overwrite=false`, plain or presentation, requires
-  sibling hard-link support on the output filesystem. Publication fails if this
-  operation is unavailable. Explicit overwrite uses atomic replacement.
+- Every `save_copy` call with `overwrite=false`, plain or presentation, publishes
+  the staged copy exclusively, so a destination created during the native call is
+  never replaced. Publication prefers a sibling hard link and falls back to an
+  exclusive create plus copy on filesystems without hard-link support
+  (FAT/exFAT, some SMB/FUSE mounts). Explicit overwrite uses atomic replacement.
 - FCStd mutations happen on sibling staging copies and replace the original
   only after a successful, non-empty save.
 - Failed mutations leave the original document byte-for-byte unchanged.
@@ -165,10 +167,12 @@ A cancellation check precedes final publication. No FCStd XML or binary data is
 rewritten outside native FreeCAD APIs. Native raster thumbnails are disabled in
 this isolated process because an offscreen host may lack an OpenGL context.
 
-No-overwrite copy publication uses a sibling hard link to publish the complete
-native file without replacing a destination created during the native call;
-the output filesystem must support this operation. Explicit overwrite continues
-to use atomic replacement. These readbacks cover recorded geometry metrics,
-not full BRep or mesh connectivity equivalence. Source qualification and the
+No-overwrite copy publication publishes the complete native file exclusively,
+without replacing a destination created during the native call. It prefers a
+sibling hard link and falls back to an exclusive create plus copy where the
+output filesystem cannot hard-link, so the guarantee holds on every
+filesystem. Explicit overwrite continues to use atomic replacement. These
+readbacks cover recorded geometry metrics, not full BRep or mesh connectivity
+equivalence. Source qualification and the
 supported-host GUI persistence gate are recorded in
 [presentation-copy validation](docs/validation/presentation-copy.md).

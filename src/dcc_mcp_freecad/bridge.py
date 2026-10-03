@@ -124,6 +124,42 @@ def _unstage_failure(error: BaseException, staged: Path, final: Path) -> BaseExc
     return error
 
 
+def _publish_exclusive(staged: Path, output: Path) -> None:
+    """Publish ``staged`` at ``output`` without ever replacing a destination.
+
+    A destination created while the native call was running must survive, so
+    publication is exclusive: it either creates ``output`` or fails. Hard
+    linking is the fast path and copies nothing on the same filesystem. A
+    volume without hard-link support (FAT/exFAT, some SMB/FUSE mounts) rejects
+    ``os.link`` with an ``OSError`` that is not ``FileExistsError``, so it falls
+    back to an exclusive create followed by a byte copy. Both branches keep the
+    same guarantee, every failure is reported as a :class:`BridgeError`, and a
+    failed fallback removes the partial output again.
+    """
+    try:
+        os.link(str(staged), str(output))
+        return
+    except FileExistsError:
+        raise BridgeError("Output already exists; set overwrite=true to replace it") from None
+    except OSError:
+        pass
+    try:
+        descriptor = os.open(str(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        raise BridgeError("Output already exists; set overwrite=true to replace it") from None
+    except OSError as error:
+        raise BridgeError("Could not create the output copy: %s" % error) from None
+    try:
+        with os.fdopen(descriptor, "wb") as destination, staged.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+    except OSError as error:
+        try:
+            os.unlink(str(output))
+        except OSError:
+            pass
+        raise BridgeError("Could not write the output copy: %s" % error) from None
+
+
 def _remove_staged_backups(staged: Path) -> None:
     """Remove only FreeCAD backups derived from a unique staged filename."""
     prefix = "%s." % staged.stem.lower()
@@ -644,12 +680,7 @@ class FreecadBridge:
             else:
                 # Publish the complete native file exclusively. A destination
                 # created during the native call must never be overwritten.
-                try:
-                    os.link(str(staged), str(output))
-                except FileExistsError:
-                    raise BridgeError(
-                        "Output already exists; set overwrite=true to replace it"
-                    ) from None
+                _publish_exclusive(staged, output)
             return result
         finally:
             # Cleanup owns only the unique stage and its native backups. A

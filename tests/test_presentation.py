@@ -1,9 +1,12 @@
+import errno
+import hashlib
 import sys
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
+from dcc_mcp_freecad import bridge as bridge_module
 from dcc_mcp_freecad import freecad_driver, presentation, write_contract
 from dcc_mcp_freecad.bridge import BridgeError, FreecadBridge
 
@@ -310,3 +313,123 @@ def test_copy_cleanup_error_preserves_publication_or_native_failure(
         assert target.read_bytes() == b"native copy"
     assert cleanup_attempted
     assert source.read_bytes() == b"original"
+
+
+# Volumes without hard-link support reject os.link with an OSError that is not
+# FileExistsError: FAT/exFAT and some SMB/FUSE mounts (EPERM/ENOTSUP) and a
+# stage published across devices (EXDEV). None of them exist on the CI runners,
+# so the fallback is only reachable through an injected os.link failure.
+_HARDLINK_FAILURE_CODES = sorted({errno.EPERM, errno.EXDEV, getattr(errno, "ENOTSUP", errno.EXDEV)})
+
+
+def _reject_hard_links(monkeypatch, code):
+    def rejected_link(_source, _destination):
+        raise OSError(code, "hard links are not supported on this volume")
+
+    monkeypatch.setattr("dcc_mcp_freecad.bridge.os.link", rejected_link)
+
+
+@pytest.mark.parametrize("code", _HARDLINK_FAILURE_CODES)
+@pytest.mark.parametrize("selection", [None, ["A"]])
+def test_hardlink_failure_falls_back_to_an_exclusive_copy(tmp_path, monkeypatch, code, selection):
+    from pathlib import Path
+
+    source = tmp_path / "source.FCStd"
+    target = tmp_path / "target.FCStd"
+    source.write_bytes(b"original")
+    bridge = FreecadBridge(allowed_roots=[tmp_path])
+
+    def native(_method, params, _timeout):
+        Path(params["output_path"]).write_bytes(b"complete-native-copy")
+        return {"object_count": 1}
+
+    monkeypatch.setattr(bridge, "_invoke", native)
+    _reject_hard_links(monkeypatch, code)
+    result = bridge.save_copy(str(source), str(target), visible_objects=selection)
+    assert target.read_bytes() == b"complete-native-copy"
+    assert result["output_path"] == str(target)
+    assert result["bytes"] == len(b"complete-native-copy")
+    assert result["sha256"] == hashlib.sha256(b"complete-native-copy").hexdigest()
+    assert result["overwritten"] is False
+    assert source.read_bytes() == b"original"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["source.FCStd", "target.FCStd"]
+
+
+@pytest.mark.parametrize("selection", [None, ["A"]])
+def test_fallback_copy_still_refuses_a_destination_created_during_native_call(
+    tmp_path, monkeypatch, selection
+):
+    from pathlib import Path
+
+    source = tmp_path / "source.FCStd"
+    target = tmp_path / "target.FCStd"
+    source.write_bytes(b"original")
+    bridge = FreecadBridge(allowed_roots=[tmp_path])
+
+    def native(_method, params, _timeout):
+        Path(params["output_path"]).write_bytes(b"complete-native-copy")
+        target.write_bytes(b"concurrent-destination")
+        return {"object_count": 1}
+
+    monkeypatch.setattr(bridge, "_invoke", native)
+    _reject_hard_links(monkeypatch, errno.EPERM)
+    with pytest.raises(BridgeError, match="Output already exists"):
+        bridge.save_copy(str(source), str(target), visible_objects=selection)
+    assert target.read_bytes() == b"concurrent-destination"
+    assert source.read_bytes() == b"original"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["source.FCStd", "target.FCStd"]
+
+
+@pytest.mark.parametrize("selection", [None, ["A"]])
+def test_fallback_copy_failure_is_reported_as_a_bridge_error(tmp_path, monkeypatch, selection):
+    from pathlib import Path
+
+    source = tmp_path / "source.FCStd"
+    target = tmp_path / "target.FCStd"
+    source.write_bytes(b"original")
+    bridge = FreecadBridge(allowed_roots=[tmp_path])
+
+    def native(_method, params, _timeout):
+        Path(params["output_path"]).write_bytes(b"complete-native-copy")
+        return {"object_count": 1}
+
+    def failed_copy(_source, _destination):
+        raise OSError(errno.EIO, "output volume unavailable")
+
+    monkeypatch.setattr(bridge, "_invoke", native)
+    _reject_hard_links(monkeypatch, errno.EPERM)
+    monkeypatch.setattr(bridge_module.shutil, "copyfileobj", failed_copy)
+    with pytest.raises(BridgeError, match="Could not write the output copy"):
+        bridge.save_copy(str(source), str(target), visible_objects=selection)
+    assert not target.exists()
+    assert source.read_bytes() == b"original"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["source.FCStd"]
+
+
+@pytest.mark.parametrize("selection", [None, ["A"]])
+def test_hard_link_stays_the_fast_path(tmp_path, monkeypatch, selection):
+    from pathlib import Path
+
+    source = tmp_path / "source.FCStd"
+    target = tmp_path / "target.FCStd"
+    source.write_bytes(b"original")
+    bridge = FreecadBridge(allowed_roots=[tmp_path])
+    linked = []
+
+    def native(_method, params, _timeout):
+        Path(params["output_path"]).write_bytes(b"complete-native-copy")
+        return {"object_count": 1}
+
+    def recording_link(source_path, destination_path):
+        linked.append((source_path, destination_path))
+        return original_link(source_path, destination_path)
+
+    original_link = bridge_module.os.link
+    monkeypatch.setattr(bridge, "_invoke", native)
+    monkeypatch.setattr("dcc_mcp_freecad.bridge.os.link", recording_link)
+    result = bridge.save_copy(str(source), str(target), visible_objects=selection)
+    assert len(linked) == 1
+    assert linked[0][1] == str(target)
+    assert target.read_bytes() == b"complete-native-copy"
+    assert result["bytes"] == len(b"complete-native-copy")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["source.FCStd", "target.FCStd"]
