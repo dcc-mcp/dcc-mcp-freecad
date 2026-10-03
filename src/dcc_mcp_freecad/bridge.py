@@ -124,6 +124,64 @@ def _unstage_failure(error: BaseException, staged: Path, final: Path) -> BaseExc
     return error
 
 
+_OUTPUT_EXISTS_MESSAGE = "Output already exists; set overwrite=true to replace it"
+
+
+def _hardlink_unsupported_message(detail: object) -> str:
+    return (
+        "The output filesystem does not support hard links (%s). No-overwrite copy "
+        "publication must publish exclusively so a destination created during the "
+        "native call is never replaced. Retry with overwrite=true to replace the "
+        "destination, or publish to a filesystem with hard-link support." % (detail,)
+    )
+
+
+def _discard_partial(path: Path) -> None:
+    """Remove a publication target this process just created with ``O_EXCL``."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _publish_exclusive(staged: Path, final: Path) -> None:
+    """Publish ``staged`` at ``final`` without replacing an existing file.
+
+    A hard link is the cheapest exclusive publication: it is a single atomic
+    commit, and it cannot clobber a destination that appeared while the native
+    call was running. Volumes without link support (FAT/exFAT, some SMB and
+    FUSE mounts, network shares) are common enough on DCC workstations that
+    losing them would turn a working path into a failure, so an exclusive
+    create plus copy is kept as the fallback. ``O_EXCL`` preserves the same
+    refusal to replace a concurrent destination; only the single-inode commit
+    is given up.
+    """
+    try:
+        os.link(str(staged), str(final))
+        return
+    except FileExistsError:
+        raise BridgeError(_OUTPUT_EXISTS_MESSAGE) from None
+    except OSError as error:
+        link_error = error
+    try:
+        descriptor = os.open(str(final), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError:
+        raise BridgeError(_OUTPUT_EXISTS_MESSAGE) from None
+    except OSError as error:
+        raise BridgeError(_hardlink_unsupported_message(error)) from None
+    try:
+        with os.fdopen(descriptor, "wb") as destination, staged.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+    except OSError as error:
+        _discard_partial(final)
+        raise BridgeError(
+            _hardlink_unsupported_message(
+                "exclusive copy failed with %s after hard links failed with %s"
+                % (error, link_error)
+            )
+        ) from None
+
+
 def _remove_staged_backups(staged: Path) -> None:
     """Remove only FreeCAD backups derived from a unique staged filename."""
     prefix = "%s." % staged.stem.lower()
@@ -608,7 +666,7 @@ class FreecadBridge:
             presentation = {"visible_objects": visible_objects, "view": view}
         replaced_existing = output.exists()
         if replaced_existing and not overwrite:
-            raise BridgeError("Output already exists; set overwrite=true to replace it")
+            raise BridgeError(_OUTPUT_EXISTS_MESSAGE)
         descriptor, temp_name = tempfile.mkstemp(
             prefix=".%s." % output.stem, suffix=output.suffix, dir=str(output.parent)
         )
@@ -644,12 +702,7 @@ class FreecadBridge:
             else:
                 # Publish the complete native file exclusively. A destination
                 # created during the native call must never be overwritten.
-                try:
-                    os.link(str(staged), str(output))
-                except FileExistsError:
-                    raise BridgeError(
-                        "Output already exists; set overwrite=true to replace it"
-                    ) from None
+                _publish_exclusive(staged, output)
             return result
         finally:
             # Cleanup owns only the unique stage and its native backups. A

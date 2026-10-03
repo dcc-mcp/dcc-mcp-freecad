@@ -125,9 +125,14 @@ Typical sequence: `create_document` → `add_primitive` → `transform_object` �
 
 - Requested documents and geometry stay under configured allowed roots.
 - Existing outputs require explicit `overwrite=true`.
-- Every `save_copy` call with `overwrite=false`, plain or presentation, requires
-  sibling hard-link support on the output filesystem. Publication fails if this
-  operation is unavailable. Explicit overwrite uses atomic replacement.
+- Every `save_copy` call with `overwrite=false`, plain or presentation,
+  publishes exclusively: a sibling hard link where the output filesystem
+  supports one, otherwise an exclusive create (`O_CREAT|O_EXCL`) plus copy on
+  volumes without hard-link support (FAT/exFAT, some SMB/FUSE mounts). Both
+  refuse a destination created during the native call; only the hard link is a
+  single atomic inode commit. Publication fails if neither is available —
+  retry with `overwrite=true` or publish to a filesystem with hard-link
+  support. Explicit overwrite uses atomic replacement.
 - FCStd mutations happen on sibling staging copies and replace the original
   only after a successful, non-empty save.
 - Failed mutations leave the original document byte-for-byte unchanged.
@@ -167,8 +172,11 @@ this isolated process because an offscreen host may lack an OpenGL context.
 
 No-overwrite copy publication uses a sibling hard link to publish the complete
 native file without replacing a destination created during the native call;
-the output filesystem must support this operation. Explicit overwrite continues
-to use atomic replacement. These readbacks cover recorded geometry metrics,
+the output filesystem must support this operation. Where it does not, the same
+exclusive publication falls back to an exclusive create plus copy, which keeps
+the refusal but not the single atomic inode commit; a failure names hard links
+and the `overwrite=true` escape hatch. Explicit overwrite continues to use
+atomic replacement. These readbacks cover recorded geometry metrics,
 not full BRep or mesh connectivity equivalence. Source qualification and the
 supported-host GUI persistence gate are recorded in
 [presentation-copy validation](docs/validation/presentation-copy.md).
