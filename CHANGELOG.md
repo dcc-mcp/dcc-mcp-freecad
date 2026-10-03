@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.4.2...v0.5.0) (2026-10-03)
+
+
+### Features
+
+* support isolated FreeCAD native-library backend ([ea2c864](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/ea2c864200bdcc41c4f3ad93c73bb97c8b667834))
+
 ## [0.4.2](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.4.1...v0.4.2) (2026-09-30)
 
 
