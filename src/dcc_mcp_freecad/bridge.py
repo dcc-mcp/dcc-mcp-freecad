@@ -157,6 +157,12 @@ class FreecadBridge:
                 raise ValueError(
                     "python-module requires an explicit interpreter and module directory"
                 )
+            interpreter = Path(executable).expanduser().resolve()
+            if not interpreter.is_file() or not os.access(str(interpreter), os.X_OK):
+                raise ValueError(
+                    "python-module interpreter must be an existing executable; "
+                    "configure DCC_MCP_FREECAD_PYTHON"
+                )
             directory = Path(module_directory).expanduser().resolve()
             if not directory.is_dir() or not any(
                 (directory / name).is_file() for name in ("FreeCAD.so", "FreeCAD.pyd")
@@ -165,7 +171,9 @@ class FreecadBridge:
                     "Module directory must contain the installed native FreeCAD library"
                 )
             self.module_directory = directory
-        self.executable = self._resolve_executable(executable)
+        self.executable = (
+            str(interpreter) if backend == "python-module" else self._resolve_executable(executable)
+        )
         roots = list(allowed_roots or (Path.cwd(),))
         self.allowed_roots = tuple(Path(root).expanduser().resolve() for root in roots)
         self.max_document_bytes = max(1, int(max_document_bytes))

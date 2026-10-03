@@ -37,8 +37,10 @@ versions, different `sys.path`, and different site-packages:
 | Host (FreeCAD side) | `src/dcc_mcp_freecad/freecad_driver.py` and every skill script | **3.10+** — the interpreter FreeCAD is built against and ships (3.11 in both release lines CI exercises) | your FreeCAD installation |
 
 - `dcc-mcp-core` 0.20.36+ in the **wrapper** environment.
-- A FreeCAD version covered by the compatibility matrix below, with a working
-  `FreeCADCmd`/`freecadcmd`.
+- A FreeCAD version covered by the compatibility matrix below, with either a working
+  `FreeCADCmd`/`freecadcmd` or an explicitly configured compatible executable Python
+  interpreter and installed native FreeCAD library for the opt-in `python-module`
+  backend. See [native-library configuration](docs/python-module-backend.md).
 
 Because the two interpreters are separate:
 

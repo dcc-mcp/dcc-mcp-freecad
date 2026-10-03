@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,32 @@ def test_missing_native_library_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="native FreeCAD library"):
         FreecadBridge(
             executable=sys.executable, module_directory=str(tmp_path), backend="python-module"
+        )
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_module_backend_rejects_invalid_interpreter(tmp_path, kind):
+    interpreter = tmp_path / "interpreter"
+    if kind == "directory":
+        interpreter.mkdir()
+    with pytest.raises(ValueError, match="python-module.*DCC_MCP_FREECAD_PYTHON"):
+        FreecadBridge(
+            executable=str(interpreter),
+            module_directory=str(module_dir(tmp_path)),
+            backend="python-module",
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permission")
+def test_module_backend_rejects_nonexecutable_interpreter(tmp_path):
+    interpreter = tmp_path / "interpreter"
+    interpreter.write_bytes(b"synthetic nonexecutable file")
+    interpreter.chmod(0o600)
+    with pytest.raises(ValueError, match="python-module.*DCC_MCP_FREECAD_PYTHON"):
+        FreecadBridge(
+            executable=str(interpreter),
+            module_directory=str(module_dir(tmp_path)),
+            backend="python-module",
         )
 
 
