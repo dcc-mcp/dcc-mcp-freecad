@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.5.0...v0.6.0) (2026-10-03)
+
+
+### Features
+
+* preserve native presentation in FreeCAD document copies ([#26](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/26)) ([fa75a62](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/fa75a625fee5c7e005fe9bb856c6f44a50525b5c))
+
+
+### Bug Fixes
+
+* fall back to an exclusive copy when the output volume has no hard links ([ff5b57a](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/ff5b57a661602301d953aa9537eda66786510461))
+* publish fallback copies with the staged file's mode ([#30](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/30)) ([1fc099e](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/1fc099e529a0eefd0d9e80deceea22444f4ffe05))
+
 ## [0.5.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.4.2...v0.5.0) (2026-10-03)
 
 
