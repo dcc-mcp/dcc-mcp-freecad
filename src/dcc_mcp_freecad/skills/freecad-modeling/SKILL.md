@@ -11,7 +11,7 @@ metadata:
   dcc-mcp:
     dcc: freecad
     layer: domain
-    version: "0.5.0"  # x-release-please-version
+    version: "0.6.0"  # x-release-please-version
     tags: [freecad, cad, parametric-modeling, pipeline]
     depends: [freecad-session]
     search-hint: >-
