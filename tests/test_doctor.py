@@ -11,16 +11,15 @@ def _published_schema_const():
 
 
 def test_report_schema_version_matches_the_published_schema_const():
-    # ``ARTIFACT_SCHEMA_VERSION`` tracks the schema *artifact* revision and moves
-    # independently of the report field. The report field must track the
-    # artifact's ``const``, so a core that drifts it has to break this test
-    # instead of shipping invalid reports.
-    import dcc_mcp_core
-
-    from dcc_mcp_freecad.install_contract import ARTIFACT_SCHEMA_VERSION, SCHEMA_VERSION
+    # The report field must track the artifact's ``const``, so a core that drifts
+    # it has to break this test instead of shipping invalid reports. The schema
+    # *artifact* revision is a separate counter that moves independently and is
+    # deliberately not asserted here: the adapter no longer mirrors it, and
+    # comparing a re-export against Core's own copy of the same constant proved
+    # nothing either way.
+    from dcc_mcp_freecad.install_contract import SCHEMA_VERSION
 
     assert SCHEMA_VERSION == _published_schema_const()
-    assert ARTIFACT_SCHEMA_VERSION == dcc_mcp_core.INSTALL_SOP_SCHEMA_VERSION
 
 
 def _freecad_executable(tmp_path):
