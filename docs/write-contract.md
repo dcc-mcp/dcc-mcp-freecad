@@ -51,7 +51,7 @@ For **every** tool that changes a document or writes a file:
 | `export_geometry` | artefact exists and is non-empty; **and** can be read back into the geometry it came from (solid count and volume for CAD formats; point/facet count and bounding-box containment for meshes) |
 | `save_copy` | copy exists and is non-empty; copy reopens with the same object inventory |
 | `create_document` | the document file exists and is non-empty |
-| `create_sketch` | sketch exists; `TypeId` is `Sketcher::SketchObject`; `Support` names the requested datum plane; the attachment mode persisted |
+| `create_sketch` | sketch exists; `TypeId` is `Sketcher::SketchObject`; `AttachmentSupport` names the requested datum plane; the attachment mode persisted |
 | `add_sketch_geometry` | the geometry count grew by exactly the number of elements the kind expands to; every returned element id is inside the sketch |
 | `add_sketch_constraint` | the constraint count grew by one; the stored type is the one requested; a dimensional constraint's driving value equals the requested value |
 | `get_sketch_info` | read-only: reports geometry, constraints and remaining degrees of freedom |

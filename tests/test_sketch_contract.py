@@ -94,7 +94,7 @@ class _Sketch:
         self.TypeId = type_id
         self.Name = name
         self.Label = name
-        self.Support = ()
+        self.AttachmentSupport = ()
         self.MapMode = "Deactivated"
         self.Geometry = []
         self.Constraints = []
@@ -257,7 +257,7 @@ def _sketch(host, tmp_path, name="Profile"):
     doc, path = _document(host, tmp_path)
     body = doc.addObject("PartDesign::Body", "Body")
     sketch = body.newObject("Sketcher::SketchObject", name)
-    sketch.Support = [(doc.getObject("XY_Plane"), "")]
+    sketch.AttachmentSupport = [(doc.getObject("XY_Plane"), "")]
     sketch.MapMode = "FlatFace"
     return doc, path, sketch
 
@@ -330,13 +330,14 @@ def test_create_sketch_refuses_when_the_attachment_was_dropped(host, tmp_path):
 
     # Drop the attachment from the document's save hook, which runs after every
     # write the driver makes: the sketch object exists and is the right type, so
-    # only reading Support back can see that the plane was never attached.
+    # only reading AttachmentSupport back can see that the plane was never
+    # attached.
     original_save = doc.save
 
     def save():
         for obj in doc.Objects:
             if obj.TypeId == "Sketcher::SketchObject":
-                obj.Support = ()
+                obj.AttachmentSupport = ()
                 obj.MapMode = "Deactivated"
         original_save()
 

@@ -1726,7 +1726,7 @@ def sketch_create(params):
         plane_object = doc.getObject(_PLANES[plane])
         sketch = body.newObject(_SKETCH_TYPE_ID, name)
         if plane_object is not None:
-            sketch.Support = [(plane_object, "")]
+            sketch.AttachmentSupport = [(plane_object, "")]
             sketch.MapMode = "FlatFace"
         _save_document(doc)
         read_back = _ReadBack(tool, version, params)
@@ -1743,7 +1743,9 @@ def sketch_create(params):
             # The attachment is the whole point of the plane parameter: a sketch
             # that accepted the write but stayed unattached would sit at the
             # global XY plane and quietly ignore the requested plane.
-            supported = [item[0].Name for item in (getattr(stored, "Support", None) or ()) if item]
+            supported = [
+                item[0].Name for item in (getattr(stored, "AttachmentSupport", None) or ()) if item
+            ]
             read_back.check(
                 supported == [_PLANES[plane]],
                 "sketch.support",
