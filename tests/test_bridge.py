@@ -499,8 +499,15 @@ def test_real_freecad_sketch_is_constrained_identically_across_versions(tmp_path
 
     A rectangle is four segments plus the constraints that pin them: coincident
     to close the loop, horizontal/vertical to square it, and two dimensions to
-    size it. Driving DOF to zero is the assertion, because a sketch that is not
-    fully constrained is a profile the solver may still move.
+    size it. The counts and the remaining freedom are asserted as exact numbers
+    rather than a range, because the point of the test is that both hosts agree
+    on them.
+
+    The rectangle is deliberately left with two degrees of freedom: what these
+    constraints remove is its shape, and what is left is its position, which the
+    constraint vocabulary here has no way to anchor to the origin. Adding more
+    dimensions to force zero only produces conflicting and redundant constraints,
+    so the profile is asserted as square and sized rather than as immovable.
     """
     bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
     document = tmp_path / "sketch-parity.FCStd"
@@ -537,9 +544,12 @@ def test_real_freecad_sketch_is_constrained_identically_across_versions(tmp_path
     info = bridge.get_sketch_info(str(document), "Profile")
 
     assert info["geometry_count"] == 4, "the rectangle must survive as four segments"
-    assert info["constraint_count"] == 12
-    assert info["dof"] == 0, "a fully driven rectangle leaves no freedom"
-    assert info["fully_constrained"] is True
+    # Four coincident to close the loop, two horizontal, two vertical, two
+    # dimensional: ten constraints, leaving the two degrees of freedom that are
+    # the rectangle's position.
+    assert info["constraint_count"] == 10
+    assert info["dof"] == 2, "a squared and sized rectangle is free only to move"
+    assert info["fully_constrained"] is False
     assert not info["conflicting_constraints"]
     assert not info["redundant_constraints"]
 

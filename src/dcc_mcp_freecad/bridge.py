@@ -632,11 +632,12 @@ class FreecadBridge:
                 raise BridgeError(message, str(code) if code else None)
                 # A refusal travels under its own key: the caller needs to tell a
                 # write that did not stick apart from a write that was refused
-                # before it happened.
+                # before it happened, so it is checked before the generic error.
                 underconstrained = error.get("underconstrained")
                 if isinstance(underconstrained, dict):
                     raise UnderconstrainedSketchError(underconstrained, message)
                 raise BridgeError(message)
+                raise BridgeError(message, str(code) if code else None)
             result = payload.get("result")
             if not isinstance(result, dict):
                 result = {"result": result}

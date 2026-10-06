@@ -1505,6 +1505,25 @@ _DIMENSIONAL_CONSTRAINTS = {
 _CONSTRAINT_KINDS = dict(_GEOMETRIC_CONSTRAINTS)
 _CONSTRAINT_KINDS.update(_DIMENSIONAL_CONSTRAINTS)
 
+# Constraints built from geometry indices alone: they have no point position to
+# take, and handing them one crashes the host rather than raising. Passing
+# ("Horizontal", 0, 0) instead of ("Horizontal", 0) segfaults FreeCAD 1.0.2 while
+# building the constraint and 1.1.4 while adding it, in both cases inside the
+# solver with no Python error to catch and no result file written, so the shape
+# is decided here instead of being left to whatever the request carried.
+# Perpendicular and Tangent tolerate an extra position, but index-only is the
+# correct shape for them too, so they are built the same way.
+_POINT_FREE_CONSTRAINTS = frozenset(
+    {
+        "Horizontal",
+        "Vertical",
+        "Parallel",
+        "Perpendicular",
+        "Tangent",
+        "Equal",
+    }
+)
+
 # "Concentric" is the name callers reach for; FreeCAD spells it a coincident
 # constraint between two centres. It is accepted here and rewritten rather than
 # rejected, because a caller asking for concentric circles has said exactly what
@@ -1681,8 +1700,15 @@ def _validate_element_refs(sketch, references, tool):
 def _constraint_arguments(name, targets, value, tool):
     """Build the positional argument list for one ``Sketcher.Constraint``.
 
-    Each target contributes a geometry index and a point position; a dimensional
-    constraint then takes its driving value last.
+    A target contributes a geometry index, and a point position only where the
+    constraint has one to take. Passing an index and a position to a constraint
+    that expects just an index is not a rejected argument -- on FreeCAD 1.0.2 and
+    1.1.4 it crashes the host process inside the solver, which surfaces as a
+    segfault with no result file instead of a Python error the caller can act on.
+
+    The position is still validated even when it is not appended, so a typo like
+    ``"corner"`` is refused rather than silently dropped; what changes is only
+    whether it reaches the constraint's argument list.
     """
     arguments = []
     for target in targets:
@@ -1693,7 +1719,8 @@ def _constraint_arguments(name, targets, value, tool):
                 "%s: unknown point position %r; expected one of %s"
                 % (tool, position, ", ".join(sorted(_POINT_POS)))
             )
-        arguments.append(_POINT_POS[position])
+        if name not in _POINT_FREE_CONSTRAINTS:
+            arguments.append(_POINT_POS[position])
     if value is not None:
         arguments.append(_finite(value, "value"))
     return arguments
