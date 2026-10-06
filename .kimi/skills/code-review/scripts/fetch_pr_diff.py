@@ -18,6 +18,8 @@
     python fetch_pr_diff.py https://github.com/loonghao/dcc-mcp-core/pull/913
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -26,7 +28,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -109,7 +111,7 @@ def redact(text: str, secret: Optional[str] = None) -> str:
     return re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1***@", text)
 
 
-def http_get(url: str, headers: dict = None, timeout: int = 30) -> dict | str:
+def http_get(url: str, headers: Optional[dict] = None, timeout: int = 30) -> Union[dict, str]:
     """发送 GET 请求，返回解析的 JSON 或原始文本"""
     req = Request(url)
     if headers:
@@ -142,7 +144,7 @@ def http_get(url: str, headers: dict = None, timeout: int = 30) -> dict | str:
 
 # ── 工蜂认证 Token ────────────────────────────────────────────────────────────
 
-def get_gongfeng_token() -> str | None:
+def get_gongfeng_token() -> Optional[str]:
     """
     按优先级获取工蜂 Private Token:
     1. 环境变量 GF_PRIVATE_TOKEN / GF_TOKEN / GITLAB_TOKEN
@@ -171,7 +173,7 @@ def get_gongfeng_token() -> str | None:
     return None
 
 
-def get_github_token() -> str | None:
+def get_github_token() -> Optional[str]:
     """获取 GitHub Token"""
     for env in ("GITHUB_TOKEN", "GH_TOKEN"):
         val = os.environ.get(env, "").strip()
@@ -193,7 +195,7 @@ def get_github_token() -> str | None:
 
 # ── 工蜂 MR diff 获取 ─────────────────────────────────────────────────────────
 
-def fetch_gongfeng_mr(info: dict, token: str | None) -> dict | None:
+def fetch_gongfeng_mr(info: dict, token: Optional[str]) -> Optional[dict]:
     headers = {"Content-Type": "application/json"}
     if token:
         headers["PRIVATE-TOKEN"] = token
@@ -269,7 +271,7 @@ def fetch_gongfeng_mr(info: dict, token: str | None) -> dict | None:
 
 # ── GitHub PR diff 获取 ───────────────────────────────────────────────────────
 
-def fetch_github_pr(info: dict, token: str | None) -> dict | None:
+def fetch_github_pr(info: dict, token: Optional[str]) -> Optional[dict]:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -334,7 +336,7 @@ def fetch_github_pr(info: dict, token: str | None) -> dict | None:
 # ── git clone + diff fallback ─────────────────────────────────────────────────
 
 def git_clone_and_diff(clone_url: str, base_sha: str, head_sha: str,
-                       token: str | None, platform: str) -> str:
+                       token: Optional[str], platform: str) -> str:
     """
     克隆仓库，checkout head_sha，然后 git diff base_sha...head_sha。
     适用于 API 无法获取完整 diff 的场景（大 MR 等）。
