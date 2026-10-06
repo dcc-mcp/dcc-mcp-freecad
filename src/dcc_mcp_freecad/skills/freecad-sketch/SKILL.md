@@ -44,9 +44,14 @@ independent ways the sketch can still move:
 * `dof < 0` — over-constrained; conflicting constraints are listed under
   `conflicting_constraints`.
 
-A fully constrained rectangle needs four lines, four coincident constraints to
+A squared and sized rectangle needs four lines, four coincident constraints to
 close the loop, horizontal and vertical constraints on opposing pairs, and two
-dimensional constraints for its width and height.
+dimensional constraints for its width and height. That pins the rectangle's
+*shape* and leaves it two degrees of freedom: its position. Reaching `dof == 0`
+additionally needs the sketch anchored to the origin, and this skill's constraint
+vocabulary has no anchor constraint, so a rectangle here settles at `dof == 2`.
+Treat `fully_constrained` as false for it and check `dof` with `get_sketch_info`
+rather than assuming the recipe alone reaches zero.
 
 ## Element references
 

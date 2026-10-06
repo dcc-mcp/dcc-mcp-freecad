@@ -105,9 +105,14 @@ The gate takes an `allow_underconstrained` escape valve, and the two call styles
 are what make it a gate rather than a wall. Geometry and constraint calls pass
 `True`: a sketch is built one element at a time and every intermediate state
 legitimately has freedom left, so refusing there would make sketching impossible.
-A feature call (pad, pocket, revolution, groove, loft, sweep, hole) uses the
-default and is refused outright -- that is where an under-constrained profile
-would silently become an irreproducible solid.
+
+The refusing style is currently a seam, not a published behaviour: the only two
+call sites are the geometry and constraint calls, both of which opt out, and no
+feature tool (pad, pocket, revolution, groove, loft, sweep, hole) is shipped yet.
+A caller should therefore not assume an under-constrained sketch is refused
+today -- `get_sketch_info` is what reports `fully_constrained`, and it is the
+sketch's own degree-of-freedom count that a caller can check before building a
+feature on it.
 
 Constraint references are validated against the live geometry list before the
 write, so a reference to an element that does not exist is an error rather than

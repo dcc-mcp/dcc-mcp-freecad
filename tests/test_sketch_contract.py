@@ -58,9 +58,21 @@ class _Constraint:
         self.Second = arguments[2] if len(arguments) > 2 else None
         self.SecondPos = arguments[3] if len(arguments) > 3 else None
         # A dimensional constraint carries its driving value in the last slot,
-        # after the geometry-index/point-position pairs. Non-dimensional
-        # constraints carry no value.
-        self.Value = arguments[-1] if len(arguments) == 3 or len(arguments) == 5 else None
+        # after however many index/position pairs its overload takes. The count
+        # is not fixed at 3 or 5: Radius, Diameter and a single-element Distance
+        # are built from one index plus the value, so deciding by arity alone
+        # would report those as carrying no value at all.
+        dimensional = any(
+            kind == free_cad_name
+            for free_cad_name, _arity in freecad_driver._DIMENSIONAL_CONSTRAINTS.values()
+        )
+        self.Value = arguments[-1] if dimensional and arguments else None
+        # A Distance built from a single element (index, value) has no second
+        # reference at all, and the host records that as GeoUndef (-2000) rather
+        # than as a reference to element 0 -- which would mean "the distance from
+        # this element's first point to itself" and read back as zero length.
+        if dimensional and len(arguments) == 2:
+            self.Second = -2000
 
 
 class _LineSegment:
@@ -511,6 +523,103 @@ def test_add_geometry_rejects_a_non_sketch_object(host, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_every_published_constraint_kind_has_an_argument_shape():
+    """A kind without a shape is a crash waiting on the first caller to use it.
+
+    ``Sketcher.Constraint`` has no single variadic signature, and a shape that
+    matches no overload segfaults the host instead of raising, so a kind added
+    to the vocabulary without a shape here is not a missing optimisation -- it is
+    a published tool that kills the FreeCAD process.
+    """
+    missing = [
+        kind
+        for kind, (free_cad_name, _arity) in sorted(freecad_driver._CONSTRAINT_KINDS.items())
+        if free_cad_name not in freecad_driver._CONSTRAINT_SHAPES
+    ]
+    assert missing == [], "constraint kinds with no argument shape: %s" % missing
+    orphaned = set(freecad_driver._CONSTRAINT_SHAPES) - {
+        free_cad_name for free_cad_name, _arity in freecad_driver._CONSTRAINT_KINDS.values()
+    }
+    assert orphaned == set(), "argument shapes for unknown kinds: %s" % sorted(orphaned)
+
+
+@pytest.mark.parametrize(
+    "kind,targets,value,expected",
+    [
+        # Index-only: no point position, so ("Horizontal", 0) not ("Horizontal", 0, 0).
+        ("horizontal", [{"element": 0}], None, [0]),
+        ("vertical", [{"element": 0}], None, [0]),
+        ("parallel", [{"element": 0}, {"element": 1}], None, [0, 1]),
+        ("equal", [{"element": 0}, {"element": 1}], None, [0, 1]),
+        # Point-taking: an index and a position per target.
+        (
+            "coincident",
+            [{"element": 0, "position": "end"}, {"element": 1, "position": "start"}],
+            None,
+            [0, 2, 1, 1],
+        ),
+        # PointOnObject takes three arguments: the first target's index and
+        # position, then the second target's index.
+        ("point_on_object", [{"element": 0, "position": "end"}, {"element": 1}], None, [0, 2, 1]),
+        # Dimensional on a single element: index then value, no position.
+        ("distance", [{"element": 0, "position": "end"}], 10.0, [0, 10.0]),
+        ("radius", [{"element": 0, "position": "end"}], 5.0, [0, 5.0]),
+        ("diameter", [{"element": 0, "position": "end"}], 5.0, [0, 5.0]),
+        # Dimensional across two point references: positions included.
+        (
+            "distance_x",
+            [{"element": 0, "position": "end"}, {"element": 1, "position": "start"}],
+            80.0,
+            [0, 2, 1, 1, 80.0],
+        ),
+        ("angle", [{"element": 0}, {"element": 1}], 90.0, [0, 0, 1, 0, 90.0]),
+    ],
+)
+def test_constraint_arguments_use_the_overload_the_host_accepts(kind, targets, value, expected):
+    """The argument list must match an overload FreeCAD actually has.
+
+    ``Sketcher.Constraint`` rejects no shape cleanly: a mismatch crashes the host
+    process, so a wrong shape here is a segfault and an empty result file rather
+    than a Python error. These are the shapes enumerated on real FreeCAD 1.0.2
+    and 1.1.4, where Radius, Diameter and PointOnObject segfault given an extra
+    point position.
+    """
+    tool = "sketch.add_constraint"
+    name, _arity = freecad_driver._CONSTRAINT_KINDS[kind]
+    arguments = freecad_driver._constraint_arguments(name, targets, value, tool)
+    assert arguments == expected
+
+
+def test_a_single_target_distance_addresses_the_element_not_a_point_on_itself(host, tmp_path):
+    """A Distance on one element means that element's length.
+
+    Built with a point position it becomes the distance from the element's first
+    point to itself, which the host accepts and reports as zero length rather
+    than rejecting: the driver would return success with the wrong constraint.
+    """
+    _doc, path, _sk = _sketch(host, tmp_path)
+    freecad_driver.sketch_add_geometry(
+        {
+            "document_path": path,
+            "sketch_name": "Profile",
+            "geometry": {"kind": "line", "start": [0, 0], "end": [10, 0]},
+        }
+    )
+    result = freecad_driver.sketch_add_constraint(
+        {
+            "document_path": path,
+            "sketch_name": "Profile",
+            "type": "distance",
+            "targets": [{"element": 0}],
+            "value": 10.0,
+        }
+    )
+    assert result["constraint"]["value"] == 10.0
+    assert result["constraint"]["second"] == -2000, (
+        "a single-target Distance must address the element, not a point on itself"
+    )
+
+
 def test_add_constraint_reports_the_dof_it_removed(host, tmp_path):
     _doc, path, _sk = _sketch(host, tmp_path)
     freecad_driver.sketch_add_geometry(
@@ -942,8 +1051,13 @@ def test_get_info_rejects_a_non_sketch(host, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_the_driver_forwards_the_underconstrained_payload(host, tmp_path):
-    """A refusal travels under its own key, so a caller can branch on it."""
+def test_the_driver_forwards_the_underconstrained_payload(host, tmp_path, monkeypatch):
+    """A refusal travels under its own key, so a caller can branch on it.
+
+    The gate is routed through a sketch request so the payload crosses the real
+    process boundary in ``main()``: that is where the ``underconstrained`` key is
+    chosen over ``write_verification``, which is the part worth testing.
+    """
     request = tmp_path / "request.json"
     result = tmp_path / "result.json"
     doc, path = _document(host, tmp_path)
@@ -953,24 +1067,37 @@ def test_the_driver_forwards_the_underconstrained_payload(host, tmp_path):
     request.write_text(
         json.dumps(
             {
-                # sketch.create is the only sketch entry point that can drive the
-                # gate from a single request; a fresh sketch is under-constrained.
-                "method": "sketch.create",
+                "method": "sketch.add_geometry",
                 "params": {
                     "document_path": str(path),
-                    "name": "Second",
-                    "plane": "xy",
+                    "sketch_name": "Profile",
+                    "geometry": {"kind": "point", "at": [1, 2]},
                 },
             }
         ),
         encoding="utf-8",
     )
-    sys.argv = ["driver", "--pass", str(request), str(result)]
+    # A point is the one geometry that cannot be driven to zero freedom with the
+    # constraints this vocabulary exposes, so the gate genuinely has something to
+    # refuse. monkeypatch restores argv; assigning it here would leak.
+    real_require = freecad_driver._require_fully_constrained
+
+    def strict(sketch, tool, version, params, host_matrix, allow_underconstrained=False):
+        return real_require(
+            sketch, tool, version, params, host_matrix, allow_underconstrained=False
+        )
+
+    monkeypatch.setattr(freecad_driver, "_require_fully_constrained", strict)
+    monkeypatch.setattr(sys, "argv", ["driver", "--pass", str(request), str(result)])
 
     freecad_driver.main()
 
     payload = json.loads(result.read_text(encoding="utf-8"))
-    assert payload["ok"] is True, payload.get("error")
+    assert payload["ok"] is False
+    error = payload["error"]
+    assert "underconstrained" in error, error
+    assert "write_verification" not in error, error
+    assert error["underconstrained"]["check"] == write_contract.SKETCH_UNDERCONSTRAINED
 
 
 def test_a_silenced_host_never_reports_a_sketch_as_constrained(host, tmp_path):

@@ -1505,24 +1505,37 @@ _DIMENSIONAL_CONSTRAINTS = {
 _CONSTRAINT_KINDS = dict(_GEOMETRIC_CONSTRAINTS)
 _CONSTRAINT_KINDS.update(_DIMENSIONAL_CONSTRAINTS)
 
-# Constraints built from geometry indices alone: they have no point position to
-# take, and handing them one crashes the host rather than raising. Passing
-# ("Horizontal", 0, 0) instead of ("Horizontal", 0) segfaults FreeCAD 1.0.2 while
-# building the constraint and 1.1.4 while adding it, in both cases inside the
-# solver with no Python error to catch and no result file written, so the shape
-# is decided here instead of being left to whatever the request carried.
-# Perpendicular and Tangent tolerate an extra position, but index-only is the
-# correct shape for them too, so they are built the same way.
-_POINT_FREE_CONSTRAINTS = frozenset(
-    {
-        "Horizontal",
-        "Vertical",
-        "Parallel",
-        "Perpendicular",
-        "Tangent",
-        "Equal",
-    }
-)
+# How each constraint's positional arguments are assembled, keyed by the
+# FreeCAD spelling. ``Sketcher.Constraint`` is a set of overloads rather than one
+# variadic signature, and a shape that matches no overload is not rejected: on
+# FreeCAD 1.0.2 and 1.1.4 it crashes the host process inside the solver, so a
+# wrong shape surfaces as a segfault with no result file instead of an error the
+# caller could act on. The shape therefore has to be decided here.
+#
+#   "index"  -- one geometry index per target, no point position
+#   "point"  -- an index and a point position per target
+#   "first_point" -- an index and a position for the first target, an index for
+#                    the rest (PointOnObject takes three arguments in total)
+#
+# Dimensional constraints that take a single target (Radius, Diameter, and a
+# Distance that means "this element's length") are index-only; DistanceX,
+# DistanceY and Angle address two point references and so are "point".
+_CONSTRAINT_SHAPES = {
+    "Coincident": "point",
+    "Horizontal": "index",
+    "Vertical": "index",
+    "Parallel": "index",
+    "Tangent": "index",
+    "Perpendicular": "index",
+    "Equal": "index",
+    "PointOnObject": "first_point",
+    "Distance": "index",
+    "DistanceX": "point",
+    "DistanceY": "point",
+    "Radius": "index",
+    "Diameter": "index",
+    "Angle": "point",
+}
 
 # "Concentric" is the name callers reach for; FreeCAD spells it a coincident
 # constraint between two centres. It is accepted here and rewritten rather than
@@ -1700,18 +1713,23 @@ def _validate_element_refs(sketch, references, tool):
 def _constraint_arguments(name, targets, value, tool):
     """Build the positional argument list for one ``Sketcher.Constraint``.
 
-    A target contributes a geometry index, and a point position only where the
-    constraint has one to take. Passing an index and a position to a constraint
-    that expects just an index is not a rejected argument -- on FreeCAD 1.0.2 and
-    1.1.4 it crashes the host process inside the solver, which surfaces as a
-    segfault with no result file instead of a Python error the caller can act on.
+    Which targets contribute a point position is decided by
+    :data:`_CONSTRAINT_SHAPES`, because the wrong shape is not a rejected
+    argument: it crashes the host inside the solver, so the call dies with a
+    segfault and no result file instead of an error a caller can act on.
 
     The position is still validated even when it is not appended, so a typo like
     ``"corner"`` is refused rather than silently dropped; what changes is only
     whether it reaches the constraint's argument list.
     """
+    shape = _CONSTRAINT_SHAPES.get(name)
+    if shape is None:
+        raise ValueError(
+            "%s: constraint %s has no known argument shape; refusing to build it "
+            "rather than passing a shape the host may only reject at the solver" % (tool, name)
+        )
     arguments = []
-    for target in targets:
+    for position_index, target in enumerate(targets):
         arguments.append(target["element"])
         position = target.get("position", "none")
         if position not in _POINT_POS:
@@ -1719,7 +1737,7 @@ def _constraint_arguments(name, targets, value, tool):
                 "%s: unknown point position %r; expected one of %s"
                 % (tool, position, ", ".join(sorted(_POINT_POS)))
             )
-        if name not in _POINT_FREE_CONSTRAINTS:
+        if shape == "point" or (shape == "first_point" and position_index == 0):
             arguments.append(_POINT_POS[position])
     if value is not None:
         arguments.append(_finite(value, "value"))
@@ -1792,7 +1810,11 @@ def sketch_create(params):
             "label": stored.Label,
             "body": body.Name,
             "plane": plane,
-            "attached_plane": _PLANES[plane],
+            # Only set when the plane was actually attached. The datum plane
+            # exists once an Origin does, and a host that has none leaves the
+            # sketch unattached -- reporting the requested plane there would
+            # claim an attachment that never happened.
+            "attached_plane": _PLANES[plane] if plane_object is not None else None,
             "dof": _dof(stored),
             "verified": _verified_checks(read_back),
         }
