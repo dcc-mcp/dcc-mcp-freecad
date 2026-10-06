@@ -56,7 +56,7 @@ freecad="dcc_mcp_freecad:FreecadMcpServer"
 
 [tool.hatch.build.targets.wheel]
 packages=["src/dcc_mcp_freecad"]
-artifacts=["src/dcc_mcp_freecad/skills/**"]
+artifacts=["src/dcc_mcp_freecad/skills/**", "src/dcc_mcp_freecad/templates/**"]
 
 [tool.hatch.build.targets.sdist]
 exclude=["docs/**/*.png", "docs/**/*.svg", "docs/**/*.webp"]

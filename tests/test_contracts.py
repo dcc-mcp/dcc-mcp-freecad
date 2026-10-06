@@ -9,7 +9,7 @@ ROOT = Path(__file__).parents[1]
 SKILLS = ROOT / "src" / "dcc_mcp_freecad" / "skills"
 
 
-SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify")
+SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify", "freecad-drawing")
 
 
 def test_skill_contracts_are_valid():
@@ -25,8 +25,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 18
-    assert len({tool["name"] for tool in tools}) == 18
+    assert len(tools) == 20
+    assert len({tool["name"] for tool in tools}) == 20
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -74,6 +74,11 @@ def test_geometry_bounds_in_the_skill_match_the_driver():
 
 def test_modeling_declares_document_dependency():
     frontmatter = (SKILLS / "freecad-modeling" / "SKILL.md").read_text(encoding="utf-8")
+    assert "depends: [freecad-session]" in frontmatter
+
+
+def test_drawing_declares_document_dependency():
+    frontmatter = (SKILLS / "freecad-drawing" / "SKILL.md").read_text(encoding="utf-8")
     assert "depends: [freecad-session]" in frontmatter
 
 

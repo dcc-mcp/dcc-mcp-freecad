@@ -18,6 +18,10 @@ from dcc_mcp_core.skills_helper import check_dcc_cancelled
 _DOCUMENT_SUFFIX = ".fcstd"
 _IMPORT_SUFFIXES = {".brep", ".brp", ".iges", ".igs", ".obj", ".step", ".stl", ".stp"}
 _EXPORT_SUFFIXES = set(_IMPORT_SUFFIXES)
+_DRAWING_SUFFIXES = {".pdf", ".svg"}
+# A page owns a template object and one view per direction, both named after it,
+# so the caller-supplied name has to leave room for the suffixes.
+_MAX_PAGE_NAME = 48
 _OBJECT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
@@ -593,8 +597,9 @@ class FreecadBridge:
         return result
 
     def capabilities(self) -> dict[str, Any]:
+        status = self.status()
         return {
-            "status": self.status(),
+            "status": status,
             "methods": [
                 "create_document",
                 "inspect_document",
@@ -612,6 +617,8 @@ class FreecadBridge:
                 "linear_pattern",
                 "polar_pattern",
                 "mirror_feature",
+                "create_drawing_page",
+                "export_drawing",
             ],
             "primitives": ["box", "cone", "cylinder", "sphere", "torus"],
             "boolean_operations": ["cut", "intersection", "union"],
@@ -622,6 +629,29 @@ class FreecadBridge:
             "export_extensions": sorted(_EXPORT_SUFFIXES),
             "atomic_document_mutations": True,
             "arbitrary_python": False,
+            # host_limited is the honest answer when a host cannot do 2D
+            # drawing at all, rather than a capability that fails on first use.
+            "drawing": self._drawing_capability(status),
+        }
+
+    def _drawing_capability(self, status):
+        """Report what the host can do for 2D drawing, or ``host_limited``."""
+        from .drawing import BUILTIN_TEMPLATES, EXPORT_SUFFIXES, HOST_LIMITED, VIEWS
+
+        probe = status.get("drawing") if isinstance(status, dict) else None
+        if not isinstance(probe, dict):
+            probe = {}
+        return {
+            "status": probe.get("status", HOST_LIMITED),
+            "reason": probe.get("reason")
+            or (
+                "FreeCAD was not found; set DCC_MCP_FREECAD_EXECUTABLE"
+                if not status.get("ready")
+                else None
+            ),
+            "views": sorted(VIEWS),
+            "templates": sorted(BUILTIN_TEMPLATES),
+            "extensions": sorted(EXPORT_SUFFIXES),
         }
 
     def create_document(
@@ -1084,6 +1114,99 @@ class FreecadBridge:
             },
             timeout_secs,
         )
+
+    def create_drawing_page(
+        self,
+        document_path: str,
+        object_names: Sequence[str],
+        template: Optional[str] = None,
+        views: Optional[Sequence[str]] = None,
+        scale: Optional[float] = None,
+        page_name: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Add a bounded TechDraw page with one view per requested direction.
+
+        The page is a document mutation, so it runs on a staging copy and
+        replaces the original only once the host reports success. An existing
+        page name is refused instead of being replaced: a drawing is something a
+        caller exports, and silently re-creating it would invalidate every
+        export already taken from it.
+        """
+        if not object_names or len(object_names) > 100:
+            raise BridgeError("object_names must contain between 1 and 100 names")
+        names = [self._object_name(name) for name in object_names]
+        if page_name is not None:
+            if not page_name or len(page_name) > _MAX_PAGE_NAME:
+                raise BridgeError("page_name must be between 1 and %d characters" % _MAX_PAGE_NAME)
+            page_name = self._object_name(page_name)
+        request = {
+            "object_names": names,
+            "template": template,
+            "views": list(views) if views is not None else None,
+            "scale": scale,
+            "page_name": page_name,
+        }
+        return self._mutate_document("drawing.create_page", document_path, request, timeout_secs)
+
+    def export_drawing(
+        self,
+        document_path: str,
+        page_name: str,
+        output_path: str,
+        overwrite: bool = False,
+        timeout_secs: float = 600,
+    ) -> dict[str, Any]:
+        """Render one TechDraw page to PDF or SVG and publish the artefact.
+
+        Shares ``export_geometry``'s output rules: same allowed-roots check,
+        same overwrite semantics, and the artefact is staged next to its
+        destination so a failed render never leaves a partial file behind.
+        """
+        document = self._document_path(document_path)
+        page = self._object_name(page_name)
+        output = self._output_path(output_path, _DRAWING_SUFFIXES)
+        replaced_existing = output.exists()
+        if replaced_existing and not overwrite:
+            raise BridgeError(_OUTPUT_EXISTS_MESSAGE)
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=".%s." % output.stem, suffix=output.suffix, dir=str(output.parent)
+        )
+        os.close(descriptor)
+        staged = Path(temp_name)
+        staged.unlink()
+        try:
+            try:
+                result = self._invoke(
+                    "drawing.export",
+                    {
+                        "document_path": str(document),
+                        "page_name": page,
+                        "output_path": str(staged),
+                    },
+                    timeout_secs,
+                )
+            except BaseException as exc:
+                raise _unstage_failure(exc, staged, output) from None
+            if not staged.is_file() or staged.stat().st_size <= 0:
+                raise BridgeError("FreeCAD did not create a durable drawing export")
+            os.replace(str(staged), str(output))
+            result = _replace_staged_path(result, staged, output)
+            result.update(
+                {
+                    "document_path": str(document),
+                    "page_name": page,
+                    "output_path": str(output),
+                    "bytes": output.stat().st_size,
+                    "sha256": _sha256_file(output),
+                    "overwritten": replaced_existing,
+                }
+            )
+            return result
+        finally:
+            if staged.exists():
+                staged.unlink()
+            _remove_staged_backups(staged)
 
 
 def get_bridge() -> FreecadBridge:

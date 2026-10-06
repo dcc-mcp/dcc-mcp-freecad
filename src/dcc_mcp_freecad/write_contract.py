@@ -66,6 +66,8 @@ MUTATING_TOOLS = (
     "model.linear_pattern",
     "model.polar_pattern",
     "model.mirror_feature",
+    "drawing.create_page",
+    "drawing.export",
 )
 
 # Tools that observe state and change nothing. Kept here so the classification

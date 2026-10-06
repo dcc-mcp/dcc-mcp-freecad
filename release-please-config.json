@@ -9,7 +9,8 @@
         {"type": "toml", "path": "pyproject.toml", "jsonpath": "$.project.version"},
         {"type": "generic", "path": "src/dcc_mcp_freecad/__version__.py"},
         {"type": "generic", "path": "src/dcc_mcp_freecad/skills/freecad-session/SKILL.md"},
-        {"type": "generic", "path": "src/dcc_mcp_freecad/skills/freecad-modeling/SKILL.md"}
+        {"type": "generic", "path": "src/dcc_mcp_freecad/skills/freecad-modeling/SKILL.md"},
+        {"type": "generic", "path": "src/dcc_mcp_freecad/skills/freecad-drawing/SKILL.md"}
       ]
     }
   }

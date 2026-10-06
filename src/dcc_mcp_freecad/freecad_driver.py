@@ -7,6 +7,7 @@ import sys
 
 _MATRIX_FILENAME = "compat_matrix.json"
 _CONTRACT_FILENAME = "write_contract.py"
+_DRAWING_FILENAME = "drawing.py"
 _COMPAT_MODULE = None
 _SIBLING_MODULES = {}
 
@@ -64,6 +65,11 @@ def _compat_module():
 def _contract_module():
     """Load the post-write read-back contract that ships next to this driver."""
     return _load_sibling_module(_CONTRACT_FILENAME, "dcc_mcp_freecad_write_contract")
+
+
+def _drawing_module():
+    """Load the TechDraw drawing module that ships next to this driver."""
+    return _load_sibling_module(_DRAWING_FILENAME, "dcc_mcp_freecad_drawing")
 
 
 def _host_version():
@@ -615,6 +621,50 @@ def _save_document(doc):
     doc.save()
 
 
+def _probe_drawing():
+    """Report whether 2D drawing can run here, without starting a GUI.
+
+    The App-side ``TechDraw`` module and the built-in page templates are the two
+    things a page cannot be created without, and both are safe to check in a
+    console process. The GUI library is reported separately: rendering a page
+    needs it, but importing ``TechDrawGui`` to find out would initialise a GUI
+    workbench this probe has no business starting, so only ``FreeCADGui`` itself
+    is imported -- the same import ``presentation.py`` performs before it shows a
+    window.
+
+    The whole probe is guarded: ``system.status`` is the instrument that measures
+    a host, so a capability question can never be the thing that stops it from
+    reporting anything at all.
+    """
+    drawing = _drawing_module()
+    result = {
+        "status": drawing.HOST_LIMITED,
+        "techdraw": False,
+        "gui_library": False,
+        "templates": drawing.builtin_templates(_driver_dir()),
+        "views": sorted(drawing.VIEWS),
+        "extensions": list(drawing.EXPORT_SUFFIXES),
+        "reason": None,
+    }
+    try:
+        import TechDraw  # noqa: F401  (the import is the capability gate)
+
+        result["techdraw"] = True
+        import FreeCADGui  # noqa: F401
+
+        result["gui_library"] = True
+        if not result["templates"]:
+            result["reason"] = (
+                "No built-in drawing template ships next to the packaged driver (%s); "
+                "reinstall dcc-mcp-freecad" % _driver_dir()
+            )
+            return result
+        result["status"] = drawing.AVAILABLE
+    except Exception as error:
+        result["reason"] = "The 2D drawing probe failed on this host: %s" % error
+    return result
+
+
 def system_status(_params):
     import FreeCAD as App
 
@@ -627,6 +677,7 @@ def system_status(_params):
         "python_version": sys.version.split()[0],
         "host_matrix": host_matrix(reported),
         "api_probe": _probe_breaking_changes(reported),
+        "drawing": _probe_drawing(),
     }
 
 
@@ -2074,6 +2125,28 @@ def _pattern_result(params, tool, matrices, wrap, detail):
         _close_document(App, doc)
 
 
+def drawing_create_page(params):
+    """Create a bounded TechDraw page and prove every view is really there.
+
+    App-side only: no GUI is started, so a page can be created on any host that
+    exposes ``TechDraw``, and the caller can still fail fast on a host that does
+    not.
+    """
+    import FreeCAD as App
+
+    tool = "drawing.create_page"
+    version = _host_version()
+    doc = _open_document(App, params["document_path"])
+    try:
+        doc.recompute()
+        read_back = _ReadBack(tool, version, params)
+        result = _drawing_module().create_page(doc, params, read_back, App)
+        result["verified"] = _verified_checks(read_back)
+        return result
+    finally:
+        _close_document(App, doc)
+
+
 def model_linear_pattern(params):
     """Repeat a solid along a direction at a fixed spacing."""
     import FreeCAD as App
@@ -2269,6 +2342,33 @@ def model_mirror_feature(params):
         _close_document(App, doc)
 
 
+def drawing_export(params):
+    """Render one TechDraw page to PDF or SVG and read the artefact back.
+
+    This is the only drawing call that starts the GUI, and it starts it inside
+    the isolated process the bridge already owns -- never as a session that
+    outlives the call.
+    """
+    import FreeCAD as App
+
+    tool = "drawing.export"
+    version = _host_version()
+    # The GUI is started before the document is opened, so FreeCAD attaches a
+    # GUI document to it as it loads. Opening first and starting the GUI second
+    # leaves the page with no view provider to render through, because the main
+    # window does not back-fill documents that were already open.
+    _drawing_module().initialize()
+    doc = _open_document(App, params["document_path"])
+    try:
+        doc.recompute()
+        read_back = _ReadBack(tool, version, params)
+        result = _drawing_module().export_page(doc, params, read_back, App)
+        result["verified"] = _verified_checks(read_back)
+        return result
+    finally:
+        _close_document(App, doc)
+
+
 _METHODS = {
     "system.status": system_status,
     "document.create": document_create,
@@ -2287,6 +2387,8 @@ _METHODS = {
     "model.linear_pattern": model_linear_pattern,
     "model.polar_pattern": model_polar_pattern,
     "model.mirror_feature": model_mirror_feature,
+    "drawing.create_page": drawing_create_page,
+    "drawing.export": drawing_export,
 }
 
 
