@@ -44,7 +44,10 @@ jobs:
 
   # Real-hardware coverage: the `-m "not freecad"` contract job above never
   # exercises FreeCAD itself, so a host API break stays invisible until release.
-  # This job installs a pinned official FreeCAD and runs the one test that does.
+  # This job installs a pinned official FreeCAD and runs the tests that do.
+  # The count asserted below is the number of `-m "freecad and not freecad_gui"`
+  # cases, so adding or removing one of those tests requires updating it; the
+  # guard exists so a collection failure cannot pass as a green run.
   # Installed via AppImage + `--appimage-extract`; the FreeCAD snap is unusable
   # on GitHub runners (it core-dumps).
   freecad-real:
@@ -90,7 +93,7 @@ jobs:
           python -m pytest -m "freecad and not freecad_gui" -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
       - name: Assert the real test executed
         if: always()
-        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 3
+        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 10
       - name: Real native GUI presentation persistence
         run: python -m pytest -m freecad_gui -v --junitxml=freecad-gui-${{ matrix.freecad_version }}.xml
       - name: Assert GUI cases executed without skips
