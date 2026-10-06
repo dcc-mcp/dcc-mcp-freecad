@@ -61,6 +61,11 @@ MUTATING_TOOLS = (
     "model.boolean_operation",
     "model.import_geometry",
     "model.export_geometry",
+    "model.fillet_edges",
+    "model.chamfer_edges",
+    "model.linear_pattern",
+    "model.polar_pattern",
+    "model.mirror_feature",
 )
 
 # Tools that observe state and change nothing. Kept here so the classification

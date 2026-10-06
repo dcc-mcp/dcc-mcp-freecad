@@ -9,8 +9,11 @@ ROOT = Path(__file__).parents[1]
 SKILLS = ROOT / "src" / "dcc_mcp_freecad" / "skills"
 
 
+SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify")
+
+
 def test_skill_contracts_are_valid():
-    for name in ("freecad-session", "freecad-modeling"):
+    for name in SKILL_NAMES:
         report = validate_skill(str(SKILLS / name))
         errors = [issue.message for issue in report.issues if issue.severity == "error"]
         assert errors == [], name
@@ -18,12 +21,12 @@ def test_skill_contracts_are_valid():
 
 def test_all_tools_are_typed_bounded_and_affinity_explicit():
     tools = []
-    for name in ("freecad-session", "freecad-modeling"):
+    for name in SKILL_NAMES:
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 13
-    assert len({tool["name"] for tool in tools}) == 13
+    assert len(tools) == 18
+    assert len({tool["name"] for tool in tools}) == 18
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -38,6 +41,35 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
             "open_world_hint",
             "deferred_hint",
         }
+
+
+def test_geometry_bounds_in_the_skill_match_the_driver():
+    """The typed limits and the enforced limits are the same numbers.
+
+    A schema that advertises 200 edges while the driver accepts 500 is worse
+    than either number alone: the caller is told one contract and held to
+    another. The constants live in the driver because that is what enforces
+    them, and this test is what keeps the advertised copy honest.
+    """
+    driver = (ROOT / "src" / "dcc_mcp_freecad" / "freecad_driver.py").read_text(encoding="utf-8")
+    payload = yaml.safe_load((SKILLS / "freecad-modify" / "tools.yaml").read_text(encoding="utf-8"))
+    tools = dict((tool["name"], tool) for tool in payload["tools"])
+
+    assert "MAX_EDGE_REFS = 200" in driver
+    assert "MAX_PATTERN_INSTANCES = 1000" in driver
+
+    for name in ("fillet_edges", "chamfer_edges"):
+        edge_refs = tools[name]["input_schema"]["properties"]["edge_refs"]
+        assert edge_refs["maxItems"] == 200
+        assert edge_refs["uniqueItems"] is True
+        assert edge_refs["items"]["minimum"] == 1
+
+    for name in ("linear_pattern", "polar_pattern"):
+        assert tools[name]["input_schema"]["properties"]["count"]["maximum"] == 1000
+        assert tools[name]["input_schema"]["properties"]["count"]["minimum"] == 1
+
+    # A polar pattern must be given an angle, but only one way of expressing it.
+    assert len(tools["polar_pattern"]["input_schema"]["oneOf"]) == 2
 
 
 def test_modeling_declares_document_dependency():

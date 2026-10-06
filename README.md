@@ -40,6 +40,10 @@ Re-run the generator after changing the catalog.
   dimensions and placements.
 - Create parametric union, cut, and intersection features.
 - Import or export STEP, IGES, BREP, STL, and OBJ geometry.
+- Fillet and chamfer edges on an existing solid, with a feasibility pre-check
+  that refuses a radius or distance the adjacent faces cannot absorb.
+- Build linear and polar patterns (up to 1000 instances) and mirror a solid
+  across a base plane.
 - Return object links, placements, shape/mesh topology counts, volume, area,
   bounding boxes, file size, and SHA-256 provenance.
 
@@ -136,10 +140,12 @@ dcc-mcp-cli list
 dcc-mcp-cli search --query "FreeCAD create boolean export STEP"
 dcc-mcp-cli load-skill freecad-session --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modeling --dcc-type freecad --instance-id <instance-short>
+dcc-mcp-cli load-skill freecad-modify --dcc-type freecad --instance-id <instance-short>
 ```
 
 Typical sequence: `create_document` → `add_primitive` → `transform_object` →
-`boolean_operation` → `validate_document` → `export_geometry`.
+`boolean_operation` → `fillet_edges` → `linear_pattern` → `validate_document` →
+`export_geometry`.
 
 ## Safety contract
 
