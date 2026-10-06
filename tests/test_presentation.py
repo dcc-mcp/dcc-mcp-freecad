@@ -244,7 +244,7 @@ def test_copy_metadata_failure_is_before_publication(tmp_path, monkeypatch, exis
         raise PermissionError("stage metadata unavailable")
 
     monkeypatch.setattr(bridge, "_invoke", native)
-    monkeypatch.setattr("dcc_mcp_freecad.bridge._sha256_file", unreadable)
+    monkeypatch.setattr("dcc_mcp_freecad.bridge.sha256_file", unreadable)
     with pytest.raises(PermissionError, match="stage metadata"):
         bridge.save_copy(str(source), str(target), overwrite=existing, visible_objects=["A"])
     assert source.read_bytes() == b"original"

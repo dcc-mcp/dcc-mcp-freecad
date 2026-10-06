@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -14,6 +13,23 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
+
+from .snapshots import (
+    DEFAULT_MAX_SNAPSHOT_BYTES,
+    DEFAULT_MAX_SNAPSHOTS,
+    ERROR_CONFLICT,
+    ERROR_CONTENT_MISMATCH,
+    ERROR_STORE_OUTSIDE_ROOTS,
+    PRE_RESTORE_ORIGIN,
+    STORE_NAME,
+    STORE_PARENT,
+    SnapshotError,
+    SnapshotStore,
+    copy_and_hash,
+    sha256_equal,
+    sha256_file,
+    verification_failure,
+)
 
 _DOCUMENT_SUFFIX = ".fcstd"
 _IMPORT_SUFFIXES = {".brep", ".brp", ".iges", ".igs", ".obj", ".step", ".stl", ".stp"}
@@ -91,14 +107,6 @@ def _split_roots(value: str) -> list[Path]:
         for item in value.split(os.pathsep)
         if item.strip()
     ]
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _replace_staged_path(value: Any, staged: Path, final: Path) -> Any:
@@ -244,6 +252,9 @@ class FreecadBridge:
         max_timeout_secs: float = 1_800,
         backend: str = "freecadcmd",
         module_directory: Optional[str] = None,
+        snapshot_directory: Optional[str] = None,
+        max_snapshots: int = DEFAULT_MAX_SNAPSHOTS,
+        max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES,
     ):
         if backend not in {"freecadcmd", "python-module"}:
             raise ValueError("FreeCAD backend must be freecadcmd or python-module")
@@ -276,6 +287,57 @@ class FreecadBridge:
         self.max_document_bytes = max(1, int(max_document_bytes))
         self.max_timeout_secs = max(1.0, float(max_timeout_secs))
         self.driver_path = Path(__file__).with_name("freecad_driver.py").resolve()
+        self.snapshot_directory = self._snapshot_directory(snapshot_directory)
+        self.max_snapshots = max(1, int(max_snapshots))
+        self.max_snapshot_bytes = max(1, int(max_snapshot_bytes))
+
+    def _snapshot_directory(self, override: Optional[str]) -> Path:
+        """Resolve the snapshot store, reusing the allowed-roots gate.
+
+        The store holds verbatim copies of the user's documents, so it must
+        live inside ``allowed_roots`` for the same reason documents must: a
+        snapshot is a readable copy of the work, and writing it anywhere the
+        operator did not sanction would be an exfiltration path. The check is
+        the same ``_within`` every other path here goes through rather than a
+        second resolver that could drift away from it.
+        """
+        if override:
+            directory = Path(override).expanduser().resolve()
+        else:
+            directory = Path(self.allowed_roots[0]) / STORE_PARENT / STORE_NAME
+        if not _within(directory, self.allowed_roots):
+            raise SnapshotError(
+                ERROR_STORE_OUTSIDE_ROOTS,
+                "Snapshot store %s is outside DCC_MCP_FREECAD_ALLOWED_ROOTS" % directory,
+                remediation=[
+                    "Point DCC_MCP_FREECAD_SNAPSHOT_DIR inside one of: %s"
+                    % ", ".join(str(root) for root in self.allowed_roots),
+                    "Or leave it unset to use <first allowed root>/%s/%s."
+                    % (STORE_PARENT, STORE_NAME),
+                ],
+                snapshot_store=str(directory),
+            )
+        return directory
+
+    def _snapshot_store(self) -> SnapshotStore:
+        return SnapshotStore(
+            self.snapshot_directory,
+            max_snapshots=self.max_snapshots,
+            max_snapshot_bytes=self.max_snapshot_bytes,
+        )
+
+    def _snapshot_summary(self) -> dict:
+        store = self._snapshot_store()
+        snapshots, orphans = store.scan()
+        count, total = store.usage(snapshots, orphans)
+        return {
+            "directory": str(store.directory),
+            "count": count,
+            "total_bytes": total,
+            "max_snapshots": store.max_snapshots,
+            "max_snapshot_bytes": store.max_snapshot_bytes,
+            "orphan_files": len(orphans),
+        }
 
     @classmethod
     def from_env(cls, executable: Optional[str] = None) -> "FreecadBridge":
@@ -291,8 +353,16 @@ class FreecadBridge:
             os.environ.get("DCC_MCP_FREECAD_MAX_DOCUMENT_BYTES", str(2 * 1024**3))
         )
         max_timeout_secs = float(os.environ.get("DCC_MCP_FREECAD_MAX_TIMEOUT_SECS", "1800"))
+        max_snapshots = int(
+            os.environ.get("DCC_MCP_FREECAD_MAX_SNAPSHOTS", str(DEFAULT_MAX_SNAPSHOTS))
+        )
+        max_snapshot_bytes = int(
+            os.environ.get("DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES", str(DEFAULT_MAX_SNAPSHOT_BYTES))
+        )
         if max_document_bytes <= 0 or max_timeout_secs <= 0:
             raise ValueError("FreeCAD document and timeout limits must be positive")
+        if max_snapshots <= 0 or max_snapshot_bytes <= 0:
+            raise ValueError("FreeCAD snapshot limits must be positive")
         return cls(
             executable or selected_executable or None,
             allowed_roots=roots,
@@ -300,6 +370,9 @@ class FreecadBridge:
             max_timeout_secs=max_timeout_secs,
             backend=backend,
             module_directory=os.environ.get("DCC_MCP_FREECAD_MODULE_DIRECTORY") or None,
+            snapshot_directory=os.environ.get("DCC_MCP_FREECAD_SNAPSHOT_DIR") or None,
+            max_snapshots=max_snapshots,
+            max_snapshot_bytes=max_snapshot_bytes,
         )
 
     @staticmethod
@@ -363,6 +436,26 @@ class FreecadBridge:
         if not _within(path, self.allowed_roots):
             raise BridgeError("Document is outside DCC_MCP_FREECAD_ALLOWED_ROOTS")
         if path.stat().st_size > self.max_document_bytes:
+            raise BridgeError("FreeCAD document exceeds the configured size limit")
+        return path
+
+    def _restorable_document_path(self, value: str) -> Path:
+        """Like :meth:`_document_path` but tolerates a document that is gone.
+
+        Same suffix, same allowed-roots gate, same size ceiling when a file is
+        present -- the only difference is that a missing path is allowed, because
+        ``restore_snapshot`` onto a deleted document *is* the recovery path. The
+        parent directory must still exist: creating a document tree the caller
+        did not ask for would turn one typo into a whole new subtree.
+        """
+        path = Path(value).expanduser().resolve()
+        if path.suffix.lower() != _DOCUMENT_SUFFIX:
+            raise BridgeError("FreeCAD document paths must end with .FCStd")
+        if not _within(path, self.allowed_roots):
+            raise BridgeError("Document is outside DCC_MCP_FREECAD_ALLOWED_ROOTS")
+        if not path.parent.is_dir():
+            raise BridgeError("Document directory does not exist: %s" % path.parent)
+        if path.is_file() and path.stat().st_size > self.max_document_bytes:
             raise BridgeError("FreeCAD document exceeds the configured size limit")
         return path
 
@@ -559,7 +652,7 @@ class FreecadBridge:
                 {
                     "document_path": str(document),
                     "document_bytes": document.stat().st_size,
-                    "document_sha256": _sha256_file(document),
+                    "document_sha256": sha256_file(document),
                 }
             )
             return result
@@ -576,11 +669,13 @@ class FreecadBridge:
                 "instance_type": "standalone",
                 "reason": "freecadcmd_not_found",
                 "allowed_roots": [str(root) for root in self.allowed_roots],
+                "snapshot_store": self._snapshot_summary(),
             }
         result = self._invoke("system.status", {}, timeout_secs)
         result.update(
             {
                 "ready": True,
+                "snapshot_store": self._snapshot_summary(),
                 "backend": self.backend,
                 "module_directory": str(self.module_directory) if self.module_directory else None,
                 "executable": self.executable,
@@ -612,6 +707,10 @@ class FreecadBridge:
                 "linear_pattern",
                 "polar_pattern",
                 "mirror_feature",
+                "create_snapshot",
+                "list_snapshots",
+                "restore_snapshot",
+                "delete_snapshot",
             ],
             "primitives": ["box", "cone", "cylinder", "sphere", "torus"],
             "boolean_operations": ["cut", "intersection", "union"],
@@ -622,6 +721,7 @@ class FreecadBridge:
             "export_extensions": sorted(_EXPORT_SUFFIXES),
             "atomic_document_mutations": True,
             "arbitrary_python": False,
+            "document_snapshots": True,
         }
 
     def create_document(
@@ -663,7 +763,7 @@ class FreecadBridge:
                 {
                     "document_path": str(output),
                     "document_bytes": output.stat().st_size,
-                    "document_sha256": _sha256_file(output),
+                    "document_sha256": sha256_file(output),
                     "overwritten": replaced_existing,
                 }
             )
@@ -680,7 +780,7 @@ class FreecadBridge:
             {
                 "document_path": str(document),
                 "document_bytes": document.stat().st_size,
-                "document_sha256": _sha256_file(document),
+                "document_sha256": sha256_file(document),
             }
         )
         return result
@@ -748,7 +848,7 @@ class FreecadBridge:
                     "source_path": str(source),
                     "output_path": str(output),
                     "bytes": staged.stat().st_size,
-                    "sha256": _sha256_file(staged),
+                    "sha256": sha256_file(staged),
                     "overwritten": replaced_existing,
                 }
             )
@@ -948,7 +1048,7 @@ class FreecadBridge:
                     "document_path": str(document),
                     "output_path": str(output),
                     "bytes": output.stat().st_size,
-                    "sha256": _sha256_file(output),
+                    "sha256": sha256_file(output),
                     "overwritten": replaced_existing,
                 }
             )
@@ -1084,6 +1184,320 @@ class FreecadBridge:
             },
             timeout_secs,
         )
+
+    # -- recoverability -------------------------------------------------
+    #
+    # These four never spawn FreeCAD: an .FCStd is a self-contained archive, so
+    # a snapshot is a byte copy and a restore is a byte replacement. See
+    # snapshots.py for why that is the right call and for the error taxonomy.
+
+    def create_snapshot(
+        self,
+        document_path: str,
+        label: Optional[str] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        """Copy a document's bytes into the store so a later call can restore them.
+
+        The returned ``document_sha256`` is the identity the caller compares
+        against later: it is both the optimistic-concurrency token for
+        ``restore_snapshot`` and the proof that the snapshot matches the source
+        at the moment it was taken.
+        """
+        document = self._document_path(document_path)
+        deadline = time.monotonic() + self._timeout(timeout_secs)
+        store = self._snapshot_store()
+        snapshots, orphans = store.scan()
+        store.ensure_capacity(snapshots, orphans, document.stat().st_size)
+        entry = store.write(document, deadline=deadline, label=label)
+        # Read-back: the published file must hold as many bytes as the copy
+        # streamed. The two are independent -- ``entry["bytes"]`` is the copy's
+        # own count, not a stat of the destination -- so a truncated write is
+        # caught here rather than reported as a snapshot that restores short.
+        # The full content hash is not recomputed: the copy already hashed the
+        # exact bytes it wrote, and re-reading would double the I/O of the only
+        # operation a caller might reasonably run before every mutation. A
+        # restore proves content by hashing the document afterwards.
+        stored = Path(entry["snapshot_path"])
+        if not stored.is_file() or stored.stat().st_size != entry["bytes"]:
+            store.discard(entry["snapshot_id"])
+            raise verification_failure(
+                "document.create_snapshot",
+                "snapshot_bytes",
+                entry["bytes"],
+                stored.stat().st_size if stored.is_file() else None,
+                "The incomplete snapshot was discarded. No document was modified; "
+                "retry create_snapshot.",
+            )
+        result = dict(entry)
+        result.update(
+            {
+                "document_path": str(document),
+                "snapshot_store": str(store.directory),
+                "snapshot_count": len(snapshots) + 1,
+                "max_snapshots": store.max_snapshots,
+                "max_snapshot_bytes": store.max_snapshot_bytes,
+                "verified": ["snapshot_file_size", "snapshot_content_sha256"],
+            }
+        )
+        return result
+
+    def list_snapshots(self, document_path: Optional[str] = None) -> dict[str, Any]:
+        """List restorable snapshots, together with the limits they count against.
+
+        ``document_path`` is validated against allowed roots but deliberately
+        *not* required to exist: the moment a user most needs this list is
+        right after a document was damaged or deleted.
+        """
+        store = self._snapshot_store()
+        snapshots, orphans = store.scan()
+        if document_path is not None:
+            wanted = Path(document_path).expanduser().resolve()
+            if not _within(wanted, self.allowed_roots):
+                raise BridgeError("Document is outside DCC_MCP_FREECAD_ALLOWED_ROOTS")
+            snapshots = [item for item in snapshots if item.get("document_path") == str(wanted)]
+        count, snapshot_bytes = store.usage(snapshots)
+        _, total = store.usage(snapshots, orphans)
+        return {
+            "snapshot_store": str(store.directory),
+            "snapshots": snapshots,
+            "count": count,
+            # Two byte figures on purpose: ``snapshot_bytes`` is the snapshots
+            # themselves, ``total_bytes`` is what the byte limit is actually
+            # charged against -- orphan bytes included. Reporting only the
+            # former would show a total under the limit while the next call is
+            # still refused for exceeding it.
+            "snapshot_bytes": snapshot_bytes,
+            "total_bytes": total,
+            "max_snapshots": store.max_snapshots,
+            "max_snapshot_bytes": store.max_snapshot_bytes,
+            "orphans": {
+                "count": len(orphans),
+                "bytes": sum(item.stat().st_size for item in orphans),
+                "files": [item.name for item in orphans][:50],
+            },
+        }
+
+    def restore_snapshot(
+        self,
+        document_path: str,
+        snapshot_id: str,
+        expected_sha256: Optional[str] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        """Replace a document with a snapshot, keeping the state it replaces.
+
+        Three properties are enforced in this order, and every refusal leaves
+        the document byte-for-byte untouched:
+
+        1. ``expected_sha256`` must match the document as it stands now. A
+           stale token means the user did new work after reading the document;
+           overwriting it would destroy that work, so the call is refused with
+           both hashes reported.
+        2. The state being replaced is snapshotted first and its id returned as
+           ``undo_snapshot_id``, so a mistaken restore is just another restore.
+           Restore therefore needs capacity for one more snapshot, and refuses
+           rather than perform a restore the caller could not undo.
+        3. The document is re-read after replacement and must hash to the
+           snapshot's recorded digest.
+
+        Step 1 is checked twice -- once before the pre-restore copy and once
+        after it. There is no cross-process file lock here, so the second check
+        is what turns "we refused a stale restore" from a claim into a check:
+        a writer that landed during the copy is detected instead of silently
+        overwritten. A writer that lands in the final instant before
+        ``os.replace`` is still lost; that residual window is inherent to a
+        process-per-call adapter with no lock server, and is reported rather
+        than pretended away.
+
+        A missing document is accepted, not rejected. Recovering a deleted
+        document is the case snapshots exist for, so it would be perverse to
+        let ``list_snapshots`` find the snapshot and then refuse to apply it.
+        That path skips the pre-restore snapshot -- there is no state to
+        preserve -- and reports ``created_document: true`` with a null
+        ``undo_snapshot_id``, so the caller knows this restore has no undo.
+        """
+        document = self._restorable_document_path(document_path)
+        deadline = time.monotonic() + self._timeout(timeout_secs)
+        store = self._snapshot_store()
+        snapshot = store.read(snapshot_id)
+        snapshot_sha = snapshot["document_sha256"]
+        source = Path(snapshot["snapshot_path"])
+
+        # Stage the snapshot bytes beside the document first: everything past
+        # this point either commits them or leaves the document untouched.
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=".%s." % document.stem, suffix=document.suffix, dir=str(document.parent)
+        )
+        os.close(descriptor)
+        staged = Path(temp_name)
+        staged.unlink()
+        # A deleted document is the case snapshots exist for, so restoring onto
+        # an absent path recreates it. There is then no state to preserve and
+        # nothing to be undoable about: undo_snapshot_id comes back null.
+        recreating = not document.exists()
+        undo = None
+        before_sha = None
+        # One try/finally around the whole commit phase, because every refusal
+        # below -- capacity, cancellation, an interrupted undo snapshot, a
+        # concurrent write -- would otherwise leave the stage behind. The stage
+        # sits in the user's document directory and holds a full copy of the
+        # document, so leaking it there is not a cosmetic mess: repeated
+        # refusals would fill the user's workspace with hidden copies.
+        try:
+            staged_sha, staged_bytes = copy_and_hash(source, staged, deadline)
+            if staged_sha != snapshot_sha:
+                raise SnapshotError(
+                    ERROR_CONTENT_MISMATCH,
+                    "Snapshot %s no longer holds the bytes it was created with "
+                    "(recorded %s, read %s)" % (snapshot_id, snapshot_sha, staged_sha),
+                    remediation=[
+                        "Restore a different snapshot; this one cannot be trusted.",
+                        "Call delete_snapshot to remove the damaged entry from %s."
+                        % store.directory,
+                    ],
+                    snapshot_id=snapshot_id,
+                    expected_sha256=snapshot_sha,
+                    document_sha256=staged_sha,
+                )
+
+            if recreating:
+                # A caller holding an expected hash believes bytes are there.
+                # Finding the path empty is that same class of surprise and is
+                # refused with the same code rather than silently recreated.
+                if expected_sha256 is not None:
+                    raise SnapshotError(
+                        ERROR_CONFLICT,
+                        "Document does not exist, but the caller passed expected_sha256 "
+                        "%s; restore_snapshot refused to create it over that expectation"
+                        % expected_sha256.lower(),
+                        remediation=[
+                            "Retry without expected_sha256 to recreate the deleted "
+                            "document from this snapshot.",
+                            "Or restore onto a different path to keep the expectation.",
+                        ],
+                        snapshot_id=snapshot_id,
+                        expected_sha256=expected_sha256.lower(),
+                        document_sha256=None,
+                        conflict="document_missing",
+                    )
+            else:
+                before_sha = sha256_file(document)
+                if expected_sha256 is not None and not sha256_equal(expected_sha256, before_sha):
+                    raise SnapshotError(
+                        ERROR_CONFLICT,
+                        "Document changed after the caller read it, so restore_snapshot "
+                        "refused to overwrite it (expected %s, found %s)"
+                        % (expected_sha256.lower(), before_sha),
+                        remediation=[
+                            "Re-read the document, then retry with its current document_sha256.",
+                            "To discard the new state anyway, retry without expected_sha256.",
+                            "To keep both, save_copy the current document before restoring.",
+                        ],
+                        snapshot_id=snapshot_id,
+                        expected_sha256=expected_sha256.lower(),
+                        document_sha256=before_sha,
+                        conflict="expected_sha256",
+                    )
+
+            if not recreating:
+                snapshots, orphans = store.scan()
+                store.ensure_capacity(snapshots, orphans, document.stat().st_size)
+                check_dcc_cancelled()
+                undo = store.write(
+                    document,
+                    deadline=deadline,
+                    label="Before restoring %s" % snapshot_id,
+                    origin=PRE_RESTORE_ORIGIN,
+                    restored_snapshot_id=snapshot_id,
+                )
+                confirm_sha = sha256_file(document)
+                if confirm_sha != before_sha:
+                    # The pre-restore copy was overtaken mid-flight, so it does
+                    # not describe any single state of the document. Discard it
+                    # and refuse: a restore with no trustworthy undo is worse
+                    # than no restore.
+                    store.discard(undo["snapshot_id"])
+                    raise SnapshotError(
+                        ERROR_CONFLICT,
+                        "Document changed while its pre-restore snapshot was being "
+                        "taken, so restore_snapshot replaced nothing (read %s, then %s)"
+                        % (before_sha, confirm_sha),
+                        remediation=[
+                            "Retry restore_snapshot; nothing was changed.",
+                            "If another process is writing the document, stop it and retry.",
+                        ],
+                        snapshot_id=snapshot_id,
+                        expected_sha256=(
+                            expected_sha256.lower() if expected_sha256 else before_sha
+                        ),
+                        document_sha256=confirm_sha,
+                        conflict="concurrent_write",
+                    )
+
+            os.replace(str(staged), str(document))
+        finally:
+            # os.replace consumed the stage on the success path.
+            if staged.exists():
+                staged.unlink()
+        after_sha = sha256_file(document)
+        if after_sha != snapshot_sha:
+            raise verification_failure(
+                "document.restore_snapshot",
+                "document_sha256",
+                snapshot_sha,
+                after_sha,
+                "The document was replaced but does not match the snapshot. Re-run "
+                "restore_snapshot, or restore %s to return to the pre-restore state."
+                % (
+                    undo["snapshot_id"]
+                    if undo
+                    else "(no undo snapshot: the document did not exist)"
+                ),
+            )
+        return {
+            "document_path": str(document),
+            "bytes": staged_bytes,
+            "document_bytes": document.stat().st_size,
+            "document_sha256": after_sha,
+            "restored_sha256": after_sha,
+            "snapshot_id": snapshot_id,
+            "replaced_document_sha256": before_sha,
+            # Null only when the document had been deleted: there was no state
+            # to preserve, so this restore has nothing to undo.
+            "undo_snapshot_id": undo["snapshot_id"] if undo else None,
+            "undo_snapshot_label": undo.get("label") if undo else None,
+            "created_document": recreating,
+            "snapshot_document_path": snapshot.get("document_path"),
+            # Restoring a snapshot taken from a different document is allowed --
+            # "make B look like A" is a real workflow -- but never silently.
+            "cross_document": snapshot.get("document_path") != str(document),
+            "snapshot_store": str(store.directory),
+            "verified": [
+                "snapshot_bytes_before_replace",
+                "pre_restore_snapshot" if undo else "no_state_to_preserve",
+                "document_sha256_after_restore",
+            ],
+        }
+
+    def delete_snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        """Free one slot. Without this, a full store would be a dead end."""
+        store = self._snapshot_store()
+        entry = store.delete(snapshot_id)
+        snapshots, orphans = store.scan()
+        count, total = store.usage(snapshots, orphans)
+        return {
+            "snapshot_id": entry["snapshot_id"],
+            "deleted": True,
+            "document_path": entry.get("document_path"),
+            "document_sha256": entry.get("document_sha256"),
+            "bytes": entry.get("bytes"),
+            "snapshot_store": str(store.directory),
+            "snapshot_count": count,
+            "total_bytes": total,
+            "max_snapshots": store.max_snapshots,
+            "max_snapshot_bytes": store.max_snapshot_bytes,
+        }
 
 
 def get_bridge() -> FreecadBridge:
