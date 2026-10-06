@@ -231,6 +231,65 @@ def test_object_names_and_update_dimensions_are_validated(tmp_path: Path):
         bridge.update_primitive(str(document), "Body", {})
 
 
+def test_transform_additions_forward_their_parameters(tmp_path: Path):
+    """The three new tools must reach the driver with what the caller asked."""
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"document")
+    bridge = FakeFreecad(tmp_path)
+
+    bridge.scale_object(str(document), "Body", [1, 2, 3], "BodyScaled", around="origin")
+    method, params, _ = bridge.calls[0]
+    assert method == "model.scale_object"
+    assert params["object_name"] == "Body"
+    assert params["scale"] == [1, 2, 3]
+    assert params["result_name"] == "BodyScaled"
+    assert params["around"] == "origin"
+
+    bridge.copy_object(
+        str(document), "Body", "BodyCopy", translation=[10, 0, 0], rotation_degrees=90
+    )
+    method, params, _ = bridge.calls[-2]
+    assert method == "model.copy_object"
+    assert params["new_name"] == "BodyCopy"
+    assert params["translation"] == [10, 0, 0]
+    assert params["rotation_degrees"] == 90
+
+    bridge.mirror_object(
+        str(document), "Body", "BodyMirror", plane="yz", origin=[40, 0, 0], keep_source=False
+    )
+    method, params, _ = bridge.calls[-2]
+    assert method == "model.mirror_object"
+    assert params["result_name"] == "BodyMirror"
+    assert params["plane"] == "yz"
+    assert params["origin"] == [40, 0, 0]
+    assert params["keep_source"] is False
+
+
+def test_new_object_names_are_validated_before_the_host_runs(tmp_path: Path):
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"document")
+    bridge = FakeFreecad(tmp_path)
+
+    with pytest.raises(BridgeError, match="Object names"):
+        bridge.scale_object(str(document), "Body", 2, "bad name")
+    with pytest.raises(BridgeError, match="Object names"):
+        bridge.copy_object(str(document), "Body", "bad name")
+    with pytest.raises(BridgeError, match="Object names"):
+        bridge.mirror_object(str(document), "Body", "bad name", plane="xy")
+
+
+def test_export_geometry_accepts_3mf(tmp_path: Path):
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"document")
+    bridge = FakeFreecad(tmp_path)
+
+    result = bridge.export_geometry(str(document), ["Body"], str(tmp_path / "model.3mf"))
+
+    assert result["format"] == "3mf"
+    # The host writes to a staged path; only the requested extension is stable.
+    assert bridge.calls[-1][1]["output_path"].endswith(".3mf")
+
+
 def test_export_refuses_implicit_overwrite(tmp_path: Path):
     document = tmp_path / "model.FCStd"
     output = tmp_path / "model.step"
@@ -493,6 +552,183 @@ def test_real_freecad_read_back_reaches_the_caller_structured(tmp_path: Path):
     # The mutation was refused, so the document must be exactly as it was.
     inspected = bridge.inspect_document(str(document))
     assert inspected["object_count"] == 0
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_scale_copy_and_mirror(tmp_path: Path):
+    """Scaling, copying and mirroring must move geometry, not just report it.
+
+    Each operation is checked against the source's own measured bounds rather
+    than against a hard-coded number, so the assertions hold on both supported
+    release lines and still fail if the host starts ignoring the request.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "transforms.FCStd"
+    bridge.create_document(str(document))
+    bridge.add_primitive(
+        str(document), "box", "Body", dimensions={"length": 20, "width": 10, "height": 5}
+    )
+    bridge.transform_object(str(document), "Body", translation=[100, 0, 0])
+    source = _named_object(bridge, document, "Body")
+    size = source["shape"]["bounding_box"]["size"]
+    centre = source["shape"]["bounding_box"]["center"]
+    assert size == pytest.approx([20, 10, 5], abs=1e-6)
+
+    scaled = bridge.scale_object(str(document), "Body", 2.0, "BodyScaled")
+    scaled_object = scaled["object"]
+    assert scaled_object["type_id"] == "Part::Feature"
+    assert scaled_object["shape"]["bounding_box"]["size"] == pytest.approx(
+        [value * 2 for value in size], abs=1e-6
+    )
+    # about the centroid leaves the centre where it was
+    assert scaled_object["shape"]["bounding_box"]["center"] == pytest.approx(centre, abs=1e-6)
+
+    stretched = bridge.scale_object(
+        str(document), "Body", [1, 1, 3], "BodyStretched", around="origin"
+    )
+    stretched_object = stretched["object"]
+    assert stretched_object["shape"]["bounding_box"]["size"] == pytest.approx(
+        [size[0], size[1], size[2] * 3], abs=1e-6
+    )
+    assert stretched_object["shape"]["bounding_box"]["center"][2] == pytest.approx(
+        centre[2] * 3, abs=1e-6
+    )
+
+    copied = bridge.copy_object(str(document), "Body", "BodyCopy", translation=[0, 50, 0])
+    copied_object = copied["object"]
+    # A copy of a primitive stays a primitive, so it can still be re-dimensioned.
+    assert copied_object["type_id"] == "Part::Box"
+    assert copied_object["placement"]["translation"] == pytest.approx([0, 50, 0], abs=1e-9)
+    assert copied_object["shape"]["bounding_box"]["size"] == pytest.approx(size, abs=1e-6)
+    # The copy takes the requested placement absolutely, like transform_object.
+    assert copied_object["shape"]["bounding_box"]["center"] == pytest.approx(
+        [size[0] / 2, 50 + size[1] / 2, size[2] / 2], abs=1e-6
+    )
+    assert _named_object(bridge, document, "Body") is not None, "the copy must not consume it"
+
+    mirrored = bridge.mirror_object(
+        str(document), "Body", "BodyMirror", plane="yz", origin=[60, 0, 0]
+    )
+    mirrored_object = mirrored["object"]
+    assert mirrored_object["type_id"] == "Part::Mirroring"
+    assert mirrored_object["shape"]["bounding_box"]["size"] == pytest.approx(size, abs=1e-6)
+    # Reflection of the centre through the plane x = 60.
+    assert mirrored_object["shape"]["bounding_box"]["center"] == pytest.approx(
+        [2 * 60 - centre[0], centre[1], centre[2]], abs=1e-6
+    )
+    assert mirrored["document_validation"] == {"invalid_objects": [], "empty_shape_objects": []}
+
+    # Dropping the source bakes the mirrored geometry instead of keeping a link
+    # that would outlive what it points at.
+    bridge.add_primitive(str(document), "cylinder", "Lone", dimensions={"radius": 4, "height": 12})
+    baked = bridge.mirror_object(
+        str(document), "Lone", "LoneMirror", normal=[1, 0, 0], keep_source=False
+    )
+    assert baked["object"]["type_id"] == "Part::Feature"
+    assert baked["object"]["shape"]["solids"] == 1
+    names = {obj["name"] for obj in bridge.inspect_document(str(document))["objects"]}
+    assert "Lone" not in names and "LoneMirror" in names
+
+    validation = bridge.validate_document(str(document))
+    assert validation["valid"] is True, validation
+
+    # Refusals: a degenerate factor, a taken name, and an ambiguous plane are
+    # rejected before anything is written rather than modelled and then found.
+    before = document.read_bytes()
+    with pytest.raises(BridgeError, match="greater than zero"):
+        bridge.scale_object(str(document), "Body", 0, "Nope")
+    with pytest.raises(BridgeError, match="greater than zero"):
+        bridge.scale_object(str(document), "Body", -2, "Nope")
+    with pytest.raises(BridgeError, match="already exists"):
+        bridge.copy_object(str(document), "Body", "BodyCopy")
+    with pytest.raises(BridgeError, match="exactly one of plane or normal"):
+        bridge.mirror_object(str(document), "Body", "Nope", plane="xy", normal=[0, 0, 1])
+    with pytest.raises(BridgeError, match="dependents"):
+        bridge.mirror_object(str(document), "Body", "Nope", plane="yz", keep_source=False)
+    assert document.read_bytes() == before, "a refused call must not touch the document"
+
+
+def _named_object(bridge, document, name):
+    """Fetch one object's payload out of a real document inspection."""
+    for obj in bridge.inspect_document(str(document))["objects"]:
+        if obj["name"] == name:
+            return obj
+    return None
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_wedge_helix_and_3mf(tmp_path: Path):
+    """The new primitives and the 3MF exporter, measured against the geometry.
+
+    The helix is the one primitive whose parameterisation could plausibly drift
+    between release lines, so its length is compared with the closed-form length
+    of the requested helix rather than with a number copied off one host.
+    """
+    import math
+
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "new-surface.FCStd"
+    bridge.create_document(str(document))
+
+    wedge = bridge.add_primitive(
+        str(document),
+        "wedge",
+        "Ramp",
+        dimensions={
+            "xmin": 0,
+            "ymin": 0,
+            "zmin": 0,
+            "x2min": 2,
+            "z2min": 2,
+            "xmax": 10,
+            "ymax": 10,
+            "zmax": 10,
+            "x2max": 8,
+            "z2max": 8,
+        },
+    )
+    wedge_shape = wedge["object"]["shape"]
+    assert wedge["object"]["type_id"] == "Part::Wedge"
+    assert wedge_shape["solids"] == 1
+    assert wedge_shape["valid"] is True
+    assert wedge_shape["bounding_box"]["size"] == pytest.approx([10, 10, 10], abs=1e-6)
+
+    updated = bridge.update_primitive(str(document), "Ramp", {"xmax": 20})
+    assert updated["object"]["shape"]["bounding_box"]["size"][0] == pytest.approx(20, abs=1e-6)
+
+    pitch, height, radius = 2.5, 9.0, 4.0
+    helix = bridge.add_primitive(
+        str(document),
+        "helix",
+        "Spring",
+        dimensions={"pitch": pitch, "height": height, "radius": radius, "angle": 0},
+    )
+    helix_shape = helix["object"]["shape"]
+    assert helix["object"]["type_id"] == "Part::Helix"
+    assert helix_shape["shape_type"] == "Wire"
+    assert helix_shape["valid"] is True
+    assert helix_shape["bounding_box"]["size"][2] == pytest.approx(height, abs=1e-6)
+    turns = height / pitch
+    expected_length = turns * math.hypot(2 * math.pi * radius, pitch)
+    assert helix_shape["length"] == pytest.approx(expected_length, rel=1e-3), (
+        "the host built a helix of a different length than requested"
+    )
+
+    # 3MF goes through the same tessellation as STL, so it must describe the
+    # same mesh - and it must declare the unit FreeCAD models in.
+    stl = bridge.export_geometry(str(document), ["Ramp"], str(tmp_path / "ramp.stl"))
+    three_mf = bridge.export_geometry(str(document), ["Ramp"], str(tmp_path / "ramp.3mf"))
+    assert three_mf["format"] == "3mf"
+    assert three_mf["unit"] == "millimeter"
+    assert three_mf["bytes"] > 0 and len(three_mf["sha256"]) == 64
+    assert "artifact.unit" in three_mf["verified"]
+    assert three_mf["object_names"] == stl["object_names"]
+    assert three_mf["bytes"] != stl["bytes"], "3MF is a zip container, not a raw STL"
+
+    validation = bridge.validate_document(str(document))
+    assert validation["valid"] is True, validation
 
 
 @pytest.mark.freecad

@@ -38,10 +38,11 @@ Re-run the generator after changing the catalog.
   documents.
 - Render a document view to a PNG headlessly and prove the frame is not a waste
   image before returning it.
-- Add and update boxes, cylinders, spheres, cones, and tori with typed
-  dimensions and placements.
+- Add and update boxes, cylinders, spheres, cones, tori, wedges, and helices
+  with typed dimensions and placements.
+- Scale, copy, and mirror objects into a new object named by the caller.
 - Create parametric union, cut, and intersection features.
-- Import or export STEP, IGES, BREP, STL, and OBJ geometry.
+- Import or export STEP, IGES, BREP, STL, OBJ, and 3MF geometry.
 - Fillet and chamfer edges on an existing solid, with a feasibility pre-check
   that refuses a radius or distance the adjacent faces cannot absorb.
 - Build linear and polar patterns (up to 1000 instances) and mirror a solid
@@ -216,6 +217,15 @@ The parametric path starts with a sketch instead:
 sketch with unconstrained degrees of freedom is never reported as usable for a
 feature — the adapter accepts no arbitrary Python, so there is no way to repair
 a silently under-constrained profile afterwards.
+
+`scale_object`, `copy_object`, and `mirror_object` always write to a **new**
+object named by the caller. FreeCAD accepts a `Shape` assignment on a parametric
+primitive and then ignores it, so an in-place variant would report success while
+the geometry stayed the same. A copy of a primitive keeps its parametric type; a
+scaled result becomes a plain `Part::Feature`; a mirror that keeps its source
+stays a live `Part::Mirroring` linked to it, and one that drops the source bakes
+the geometry and removes it. Every 3MF export is asserted to declare the
+millimetre unit, because a consumer scales the model by that declaration.
 
 ## Safety contract
 

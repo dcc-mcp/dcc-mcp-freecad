@@ -47,7 +47,7 @@ from .snapshots import (
 _DOCUMENT_SUFFIX = ".fcstd"
 _RENDER_SUFFIX = ".png"
 _IMPORT_SUFFIXES = {".brep", ".brp", ".iges", ".igs", ".obj", ".step", ".stl", ".stp"}
-_EXPORT_SUFFIXES = set(_IMPORT_SUFFIXES)
+_EXPORT_SUFFIXES = _IMPORT_SUFFIXES | {".3mf"}
 _OBJECT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 #: Largest PNG the adapter will inline as base64. Rendering is bounded to
@@ -1555,6 +1555,99 @@ class FreecadBridge:
                 "translation": list(translation),
                 "rotation_axis": list(rotation_axis),
                 "rotation_degrees": rotation_degrees,
+            },
+            timeout_secs,
+        )
+
+    def scale_object(
+        self,
+        document_path: str,
+        object_name: str,
+        scale: Any,
+        result_name: str,
+        around: str = "centroid",
+        result_label: Optional[str] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        """Scale an object's shape into a new object named ``result_name``.
+
+        The result is always a new object: FreeCAD accepts a ``Shape``
+        assignment on a parametric primitive and then ignores it, so an in-place
+        scale would report success while the geometry stayed the same.
+        """
+        return self._mutate_document(
+            "model.scale_object",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "result_name": self._object_name(result_name),
+                "scale": scale,
+                "around": around,
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def copy_object(
+        self,
+        document_path: str,
+        object_name: str,
+        new_name: str,
+        translation: Sequence[float] = (0, 0, 0),
+        rotation_axis: Sequence[float] = (0, 0, 1),
+        rotation_degrees: float = 0,
+        label: Optional[str] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        """Duplicate an object under ``new_name``, optionally at a new placement.
+
+        ``new_name`` must be free: overwriting an object inside a document would
+        delete whatever already depends on it, so a collision is refused and the
+        caller removes the old object explicitly if that is what it wants.
+        """
+        return self._mutate_document(
+            "model.copy_object",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "new_name": self._object_name(new_name),
+                "translation": list(translation),
+                "rotation_axis": list(rotation_axis),
+                "rotation_degrees": rotation_degrees,
+                "label": label,
+            },
+            timeout_secs,
+        )
+
+    def mirror_object(
+        self,
+        document_path: str,
+        object_name: str,
+        result_name: str,
+        plane: Optional[str] = None,
+        normal: Optional[Sequence[float]] = None,
+        origin: Optional[Sequence[float]] = None,
+        keep_source: bool = True,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        """Mirror an object about a plane named by ``plane`` or by ``normal``.
+
+        Exactly one of ``plane`` or ``normal`` must be given. ``origin`` is a
+        point on the plane and defaults to the document origin; both are in
+        document coordinates, like ``transform_object``'s translation.
+        """
+        return self._mutate_document(
+            "model.mirror_object",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "result_name": self._object_name(result_name),
+                "plane": plane,
+                "normal": list(normal) if normal is not None else None,
+                "origin": list(origin) if origin is not None else None,
+                "keep_source": bool(keep_source),
+                "result_label": result_label,
             },
             timeout_secs,
         )

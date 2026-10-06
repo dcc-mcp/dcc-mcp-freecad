@@ -81,6 +81,35 @@ def test_geometry_bounds_in_the_skill_match_the_driver():
     assert len(tools["polar_pattern"]["input_schema"]["oneOf"]) == 2
 
 
+def test_declared_primitives_match_the_driver_table():
+    from dcc_mcp_freecad import freecad_driver
+
+    payload = yaml.safe_load(
+        (SKILLS / "freecad-modeling" / "tools.yaml").read_text(encoding="utf-8")
+    )
+    add_primitive = next(tool for tool in payload["tools"] if tool["name"] == "add_primitive")
+
+    assert sorted(add_primitive["input_schema"]["properties"]["primitive"]["enum"]) == sorted(
+        freecad_driver._PRIMITIVE_TYPES
+    )
+
+
+def test_declared_dimensions_cover_every_primitive_property():
+    """A primitive property with no schema entry is a dimension nobody can pass."""
+    from dcc_mcp_freecad import freecad_driver
+
+    payload = yaml.safe_load(
+        (SKILLS / "freecad-modeling" / "tools.yaml").read_text(encoding="utf-8")
+    )
+    needed = set()
+    for mapping in freecad_driver._DIMENSION_PROPERTIES.values():
+        needed.update(mapping)
+    for name in ("add_primitive", "update_primitive"):
+        tool = next(item for item in payload["tools"] if item["name"] == name)
+        declared = set(tool["input_schema"]["properties"]["dimensions"]["properties"])
+        assert needed <= declared, "%s is missing %s" % (name, sorted(needed - declared))
+
+
 def test_modeling_declares_document_dependency():
     frontmatter = (SKILLS / "freecad-modeling" / "SKILL.md").read_text(encoding="utf-8")
     assert "depends: [freecad-session]" in frontmatter
