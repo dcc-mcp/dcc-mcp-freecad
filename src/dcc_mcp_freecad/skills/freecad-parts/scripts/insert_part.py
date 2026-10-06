@@ -44,8 +44,9 @@ def main(document_path=None, part_ref=None, object_name=None, **kwargs):
             **error.context(),
         )
     return bridge_success(
-        result,
         "Inserted standard part %r as %s." % (result.get("part_ref"), object_name),
+        "native_document_readback",
+        result,
     )
 
 
