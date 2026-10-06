@@ -128,10 +128,36 @@ cache external binaries.
 | `DCC_MCP_FREECAD_ALLOWED_ROOTS` | `os.pathsep`-separated document/import/export roots | server working directory |
 | `DCC_MCP_FREECAD_MAX_DOCUMENT_BYTES` | Maximum FCStd input size | 2 GiB |
 | `DCC_MCP_FREECAD_MAX_TIMEOUT_SECS` | Maximum per-call deadline | 1800 seconds |
+| `DCC_MCP_FREECAD_SNAPSHOT_DIR` | Snapshot store; must resolve inside allowed roots | `<first allowed root>/.dcc-mcp-freecad/snapshots` |
+| `DCC_MCP_FREECAD_MAX_SNAPSHOTS` | Maximum stored snapshots | 50 |
+| `DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES` | Maximum total snapshot store size | 1 GiB |
 | `DCC_MCP_FREECAD_PORT` | Fixed adapter port when direct addressing is required | OS-assigned |
 
 The service is a standalone DCC-MCP instance with no GUI PID. Every operation
 launches a clean FreeCADCmd process in safe mode with a temporary user config.
+
+## Recoverability
+
+Every call is a process-level commit, so there is no in-process undo stack to
+rewind. Recoverability is explicit instead: `create_snapshot` copies a
+document's bytes into the snapshot store, and `restore_snapshot` puts them back.
+
+```text
+create_snapshot  {document_path, label?}               -> snapshot_id, document_sha256
+list_snapshots   {document_path?}                      -> snapshots, limits, orphan report
+restore_snapshot {document_path, snapshot_id, expected_sha256?}
+                                                       -> restored_sha256, undo_snapshot_id
+delete_snapshot  {snapshot_id}                         -> frees one slot
+```
+
+Snapshots are byte copies, so they never spawn FreeCAD and keep working when
+the host is unavailable. Passing `expected_sha256` makes a restore refuse
+rather than overwrite work done after the caller read the document, and a
+restore always snapshots the state it replaces — so a mistaken restore is just
+another restore. The store lives inside `DCC_MCP_FREECAD_ALLOWED_ROOTS` and is
+capped; when it is full the call fails with `snapshot_limit_exceeded` and
+cleanup guidance instead of evicting anything. See
+[docs/snapshots.md](docs/snapshots.md).
 
 ## Agent workflow
 
