@@ -39,10 +39,17 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 # Declaration order also fixes the order capabilities are reported in:
 # freecad-modeling declares ``depends: [freecad-session]``, so the session
 # skill that owns the document lifecycle is listed first, freecad-modify
-# depends on both, and freecad-parts is self-contained. ``load_tool_catalog``
-# refuses to run when the directory disagrees with this tuple, so a new skill
-# can never be silently dropped from the capability list.
-SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify", "freecad-parts")
+# depends on both, freecad-parts is self-contained, and freecad-sketch
+# depends on the session skill that owns the document it draws into.
+# ``load_tool_catalog`` refuses to run when the directory disagrees with this
+# tuple, so a new skill can never be silently dropped from the capability list.
+SKILL_NAMES = (
+    "freecad-session",
+    "freecad-modeling",
+    "freecad-modify",
+    "freecad-parts",
+    "freecad-sketch",
+)
 
 # The entry points an agent is already holding when it asks what this adapter
 # can do. They are real tools with real schemas and are still declared under

@@ -51,6 +51,10 @@ For **every** tool that changes a document or writes a file:
 | `export_geometry` | artefact exists and is non-empty; **and** can be read back into the geometry it came from (solid count and volume for CAD formats; point/facet count and bounding-box containment for meshes) |
 | `save_copy` | copy exists and is non-empty; copy reopens with the same object inventory |
 | `create_document` | the document file exists and is non-empty |
+| `create_sketch` | sketch exists; `TypeId` is `Sketcher::SketchObject`; `Support` names the requested datum plane; the attachment mode persisted |
+| `add_sketch_geometry` | the geometry count grew by exactly the number of elements the kind expands to; every returned element id is inside the sketch |
+| `add_sketch_constraint` | the constraint count grew by one; the stored type is the one requested; a dimensional constraint's driving value equals the requested value |
+| `get_sketch_info` | read-only: reports geometry, constraints and remaining degrees of freedom |
 
 Two of these deserve a note.
 
@@ -66,6 +70,48 @@ on the surface it was given, so an exported mesh cannot leave its source's
 bounding box. An export of the wrong object -- or of nothing -- shows up here as
 a box that escaped. This catches "wrote a plausible-looking file" without
 recomputing the source geometry.
+
+## Refusing an under-constrained sketch
+
+A sketch carries a second kind of "reported success" that the rules above do not
+cover: the write lands perfectly and the profile is still wrong, because the
+solver is free to move whatever the constraints did not pin down. The sketch
+reports as created, and the solid built from it is different on every run.
+
+So degrees of freedom are measured, not assumed. `get_sketch_info` reports `dof`
+and `fully_constrained`, and the shared gate refuses to hand an
+under-constrained sketch to a caller that asked for a constrained one:
+
+`dcc_mcp_freecad.write_contract.UnderconstrainedSketchError` carries the same
+structured payload as `WriteVerificationError` and crosses the process boundary
+under its own `underconstrained` key, so a caller can branch on `check` instead
+of parsing prose:
+
+```json
+{
+  "schema_version": 1,
+  "tool": "sketch.feature",
+  "check": "sketch.underconstrained",
+  "expected": "dof == 0",
+  "actual": 3,
+  "host_version": "1.1.4",
+  "host_matrix": {"status": "supported", "range_id": "1.1.x", "matrix_version": "2026-09-29"},
+  "params": {"sketch_name": "Profile"},
+  "remediation": "Add constraints until the remaining degrees of freedom reach zero..."
+}
+```
+
+The gate takes an `allow_underconstrained` escape valve, and the two call styles
+are what make it a gate rather than a wall. Geometry and constraint calls pass
+`True`: a sketch is built one element at a time and every intermediate state
+legitimately has freedom left, so refusing there would make sketching impossible.
+A feature call (pad, pocket, revolution, groove, loft, sweep, hole) uses the
+default and is refused outright -- that is where an under-constrained profile
+would silently become an irreproducible solid.
+
+Constraint references are validated against the live geometry list before the
+write, so a reference to an element that does not exist is an error rather than
+something the solver ignores.
 
 ## Comparing floats
 

@@ -490,6 +490,71 @@ def test_real_freecad_read_back_reaches_the_caller_structured(tmp_path: Path):
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_sketch_is_constrained_identically_across_versions(tmp_path: Path):
+    """A fully constrained sketch must come out the same on every host.
+
+    The same call sequence runs on FreeCAD 1.0.2 and 1.1.4, so anything here that
+    depends on a version-specific spelling fails on one leg and not the other --
+    that is what makes this the parity check rather than a smoke test.
+
+    A rectangle is four segments plus the constraints that pin them: coincident
+    to close the loop, horizontal/vertical to square it, and two dimensions to
+    size it. Driving DOF to zero is the assertion, because a sketch that is not
+    fully constrained is a profile the solver may still move.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "sketch-parity.FCStd"
+    bridge.create_document(str(document))
+
+    created = bridge.create_sketch(str(document), "Profile", plane="xy")
+    assert created["attached_plane"] == "XY_Plane"
+
+    geometry = bridge.add_sketch_geometry(
+        str(document),
+        "Profile",
+        {"kind": "rectangle", "corner": [0, 0], "width": 80, "height": 50},
+    )
+    # A rectangle has no Sketcher primitive, so it expands to four segments.
+    assert geometry["element_ids"] == [0, 1, 2, 3]
+
+    for index in range(4):
+        bridge.add_sketch_constraint(
+            str(document),
+            "Profile",
+            "coincident",
+            [
+                {"element": index, "position": "end"},
+                {"element": (index + 1) % 4, "position": "start"},
+            ],
+        )
+    for index in (0, 2):
+        bridge.add_sketch_constraint(str(document), "Profile", "horizontal", [{"element": index}])
+    for index in (1, 3):
+        bridge.add_sketch_constraint(str(document), "Profile", "vertical", [{"element": index}])
+    bridge.add_sketch_constraint(str(document), "Profile", "distance_x", [{"element": 0}], value=80)
+    bridge.add_sketch_constraint(str(document), "Profile", "distance_y", [{"element": 1}], value=50)
+
+    info = bridge.get_sketch_info(str(document), "Profile")
+
+    assert info["geometry_count"] == 4, "the rectangle must survive as four segments"
+    assert info["constraint_count"] == 12
+    assert info["dof"] == 0, "a fully driven rectangle leaves no freedom"
+    assert info["fully_constrained"] is True
+    assert not info["conflicting_constraints"]
+    assert not info["redundant_constraints"]
+
+    # Topological parity: the counts must be identical on 1.0.2 and 1.1.4, so a
+    # version difference in how the sketch is built shows up here rather than
+    # silently producing a different profile.
+    inspected = bridge.inspect_document(str(document))
+    sketch_object = next(obj for obj in inspected["objects"] if obj["name"] == "Profile")
+    assert sketch_object["shape"]["vertices"] == 4
+    assert sketch_object["shape"]["edges"] == 4
+    assert sketch_object["shape"]["faces"] == 0, "a sketch is a wire, not a face"
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
 def test_real_freecad_document_modeling_and_exchange(tmp_path: Path):
     bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
     document = tmp_path / "production-smoke.FCStd"

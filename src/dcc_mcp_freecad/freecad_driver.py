@@ -1451,6 +1451,584 @@ def _is_unbounded(mesh):
     return False
 
 
+# ---------------------------------------------------------------------------
+# Sketcher: create_sketch, geometry, constraints, sketch info
+#
+# A sketch is the parametric starting point every profile-based feature is built
+# from, so the rules that matter here are the ones that stop a half-specified
+# profile from being reported as finished:
+#
+# * every constraint reference is validated against the live element list before
+#   it is written -- a dangling reference is an error, never a silently ignored
+#   one;
+# * the remaining degrees of freedom are read back from the solver and reported,
+#   and the shared gate refuses to hand an under-constrained sketch to a caller
+#   that asked for a fully constrained one.
+# ---------------------------------------------------------------------------
+
+_SKETCH_TYPE_ID = "Sketcher::SketchObject"
+_BODY_TYPE_ID = "PartDesign::Body"
+
+# The sketch attachment planes. A sketch that is not attached to a plane sits at
+# the global XY plane, which is a fine default but not a choice the caller made.
+_PLANES = {"xy": "XY_Plane", "xz": "XZ_Plane", "yz": "YZ_Plane"}
+
+# PointPos, from FreeCAD's GeoEnum. Identical on 1.0 and 1.1: 0 is the edge
+# itself, 1/2 are a bounded curve's endpoints, 3 is the centre of a circle or
+# arc. Read as names rather than bare integers so a constraint request is
+# legible to whoever writes it.
+_POINT_POS = {"none": 0, "start": 1, "end": 2, "mid": 3}
+
+# Geometric constraints, with the argument shape each one takes. "args" counts
+# the geometry-index/point-position pairs the constraint consumes.
+_GEOMETRIC_CONSTRAINTS = {
+    "coincident": ("Coincident", 2),
+    "horizontal": ("Horizontal", 1),
+    "vertical": ("Vertical", 1),
+    "parallel": ("Parallel", 2),
+    "tangent": ("Tangent", 2),
+    "perpendicular": ("Perpendicular", 2),
+    "equal": ("Equal", 2),
+    "point_on_object": ("PointOnObject", 2),
+}
+
+# Dimensional constraints: the same reference shape plus a driving value.
+_DIMENSIONAL_CONSTRAINTS = {
+    "distance": ("Distance", 1),
+    "distance_x": ("DistanceX", 1),
+    "distance_y": ("DistanceY", 1),
+    "radius": ("Radius", 1),
+    "diameter": ("Diameter", 1),
+    "angle": ("Angle", 2),
+}
+
+_CONSTRAINT_KINDS = dict(_GEOMETRIC_CONSTRAINTS)
+_CONSTRAINT_KINDS.update(_DIMENSIONAL_CONSTRAINTS)
+
+# "Concentric" is the name callers reach for; FreeCAD spells it a coincident
+# constraint between two centres. It is accepted here and rewritten rather than
+# rejected, because a caller asking for concentric circles has said exactly what
+# they want and there is only one way to express it.
+_CONCENTRIC = "coincident"
+
+_GEOMETRY_KINDS = ("rectangle", "circle", "line", "arc", "point")
+
+
+def _finite(value, name):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("%s must be a finite number" % name)
+    return number
+
+
+def _positive_number(value, name):
+    number = _finite(value, name)
+    if number <= 0:
+        raise ValueError("%s must be positive" % name)
+    return number
+
+
+def _point(value, name):
+    """Read a 2D sketch coordinate.
+
+    Sketch geometry is planar, so a caller passes [x, y] and the driver places it
+    on the sketch's own plane at z=0. Three coordinates are rejected rather than
+    silently dropping z: a caller who passed a third coordinate has a different
+    mental model of the plane than this tool has.
+    """
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError("%s must contain exactly two numbers [x, y]" % name)
+    return [_finite(item, name) for item in value]
+
+
+def _vector2(app, value, name):
+    return app.Vector(*_point(value, name), 0.0)
+
+
+def _open_sketch(app, doc, sketch_name, tool):
+    """Resolve a sketch object, refusing anything that is not one."""
+    sketch = doc.getObject(sketch_name)
+    if sketch is None:
+        raise ValueError("%s: sketch does not exist: %s" % (tool, sketch_name))
+    if sketch.TypeId != _SKETCH_TYPE_ID:
+        raise ValueError("%s: %s is not a sketch (TypeId %s)" % (tool, sketch_name, sketch.TypeId))
+    return sketch
+
+
+def _dof(sketch):
+    """Read the remaining degrees of freedom after a fresh solve.
+
+    ``DoF`` reflects the last solver run, so it is stale until the sketch is
+    solved again. Reading it without solving reports the state before the call
+    rather than after it, which is exactly the kind of answer that makes an
+    under-constrained sketch look constrained.
+    """
+    sketch.solve()
+    value = getattr(sketch, "DoF", None)
+    if value is None:
+        raise IncompatibleHostError(
+            "This FreeCAD host does not expose Sketcher::SketchObject.DoF, so the "
+            "degrees of freedom cannot be measured and an under-constrained sketch "
+            "cannot be refused. The host API moved outside the verified "
+            "compatibility matrix."
+        )
+    return int(value)
+
+
+def _require_fully_constrained(
+    sketch, tool, version, params, host_matrix, allow_underconstrained=False
+):
+    """Refuse an under-constrained sketch unless the caller opted out.
+
+    This is the seam the profile-based feature tools (pad, pocket, revolution,
+    groove, loft, sweep, hole) consume: they call it with the default and inherit
+    the refusal, so a feature is never silently built on a sketch the solver is
+    still free to move.
+
+    Geometry and constraint calls pass ``allow_underconstrained=True`` instead,
+    because a sketch is built up one element at a time and every intermediate
+    state legitimately has degrees of freedom left. Refusing there would make
+    sketching impossible rather than safe. The two call styles are what make this
+    a gate rather than a wall.
+    """
+    dof = _dof(sketch)
+    if dof > 0 and not allow_underconstrained:
+        raise _contract_module().UnderconstrainedSketchError(
+            tool=tool,
+            expected="dof == 0",
+            actual=dof,
+            host_version=version,
+            host_matrix=host_matrix,
+            params=params,
+            remediation=(
+                "Add constraints until the remaining degrees of freedom reach zero, "
+                "then retry. A feature built on an under-constrained sketch is "
+                "re-solved differently on every run, so returning a result here "
+                "would be reporting a solid that is not reproducible."
+            ),
+        )
+    return dof
+
+
+def _geometry_payload(part, index, geo):
+    """Describe one sketch element, whatever the host hands back."""
+    entry = {"index": index, "type": type(geo).__name__}
+    for attribute in ("StartPoint", "EndPoint", "Center", "Location", "Radius"):
+        value = getattr(geo, attribute, None)
+        if value is None:
+            continue
+        if hasattr(value, "x"):
+            entry[attribute.lower()] = [value.x, value.y, value.z]
+        else:
+            entry[attribute.lower()] = _finite(value, attribute)
+    if hasattr(geo, "FirstParameter") and hasattr(geo, "LastParameter"):
+        entry["parameter_range"] = [
+            _finite(geo.FirstParameter, "FirstParameter"),
+            _finite(geo.LastParameter, "LastParameter"),
+        ]
+    return entry
+
+
+def _constraint_payload(constraint, index):
+    """Describe one constraint without routing through ``typeToString``.
+
+    The type is read from the constraint's own ``Type`` attribute. On FreeCAD 1.0
+    the C++ ``type2str`` table is missing the entry for ``Coincident``, so every
+    string it produces is shifted by one -- reading a type back through that path
+    reports the wrong constraint. Construction from a string is unaffected on
+    both versions, so the type written is always the type meant.
+    """
+    return {
+        "index": index,
+        "type": str(getattr(constraint, "Type", "")),
+        "first": getattr(constraint, "First", None),
+        "first_pos": getattr(constraint, "FirstPos", None),
+        "second": getattr(constraint, "Second", None),
+        "second_pos": getattr(constraint, "SecondPos", None),
+        "value": getattr(constraint, "Value", None),
+    }
+
+
+def _sketch_inventory(sketch):
+    """The geometry and constraint lists, read back off the sketch."""
+    geometry = list(getattr(sketch, "Geometry", None) or ())
+    constraints = list(getattr(sketch, "Constraints", None) or ())
+    return geometry, constraints
+
+
+def _validate_element_refs(sketch, references, tool):
+    """Reject a constraint that points at an element the sketch does not have.
+
+    The solver raises on an invalid index too, but only once the write is already
+    in flight; validating up front turns a half-applied sketch into a clean
+    refusal that names the offending index.
+    """
+    count = len(list(getattr(sketch, "Geometry", None) or ()))
+    for reference in references:
+        index = reference.get("element")
+        if index is None:
+            raise ValueError("%s: each target requires an 'element' index" % tool)
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise ValueError("%s: element index must be an integer, got %r" % (tool, index))
+        if index < 0 or index >= count:
+            raise ValueError(
+                "%s: element %d does not exist in this sketch (%d geometry "
+                "element(s) present); the constraint was refused instead of being "
+                "silently ignored" % (tool, index, count)
+            )
+
+
+def _constraint_arguments(name, targets, value, tool):
+    """Build the positional argument list for one ``Sketcher.Constraint``.
+
+    Each target contributes a geometry index and a point position; a dimensional
+    constraint then takes its driving value last.
+    """
+    arguments = []
+    for target in targets:
+        arguments.append(target["element"])
+        position = target.get("position", "none")
+        if position not in _POINT_POS:
+            raise ValueError(
+                "%s: unknown point position %r; expected one of %s"
+                % (tool, position, ", ".join(sorted(_POINT_POS)))
+            )
+        arguments.append(_POINT_POS[position])
+    if value is not None:
+        arguments.append(_finite(value, "value"))
+    return arguments
+
+
+def sketch_create(params):
+    import FreeCAD as App
+
+    tool = "sketch.create"
+    version = _host_version()
+    name = _required(params, "name", tool)
+    plane = params.get("plane") or "xy"
+    if plane not in _PLANES:
+        raise ValueError(
+            "%s: unsupported plane %r; expected one of %s"
+            % (tool, plane, ", ".join(sorted(_PLANES)))
+        )
+    body_name = params.get("body_name") or "Body"
+    doc = _open_document(App, params["document_path"])
+    try:
+        if doc.getObject(name) is not None:
+            raise ValueError("%s: object already exists: %s" % (tool, name))
+        body = doc.getObject(body_name)
+        if body is None:
+            body = doc.addObject(_BODY_TYPE_ID, body_name)
+        # A datum plane only exists once an Origin does, and creating a
+        # PartDesign::Body is what makes FreeCAD create one headless. The plane
+        # is referenced by Name: its Label is localised, so resolving by label
+        # silently finds nothing on a non-English host.
+        plane_object = doc.getObject(_PLANES[plane])
+        sketch = body.newObject(_SKETCH_TYPE_ID, name)
+        if plane_object is not None:
+            sketch.Support = [(plane_object, "")]
+            sketch.MapMode = "FlatFace"
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(name)
+        read_back.exists("sketch", name, stored)
+        read_back.check(
+            stored.TypeId == _SKETCH_TYPE_ID,
+            "sketch.type_id",
+            _SKETCH_TYPE_ID,
+            stored.TypeId,
+            "The object was created as a different type than requested.",
+        )
+        if plane_object is not None:
+            # The attachment is the whole point of the plane parameter: a sketch
+            # that accepted the write but stayed unattached would sit at the
+            # global XY plane and quietly ignore the requested plane.
+            supported = [item[0].Name for item in (getattr(stored, "Support", None) or ()) if item]
+            read_back.check(
+                supported == [_PLANES[plane]],
+                "sketch.support",
+                [_PLANES[plane]],
+                supported,
+                "The sketch was created without the requested attachment plane.",
+            )
+            read_back.check(
+                stored.MapMode == "FlatFace",
+                "sketch.map_mode",
+                "FlatFace",
+                stored.MapMode,
+                "The sketch attachment mode did not persist.",
+            )
+        return {
+            "name": stored.Name,
+            "label": stored.Label,
+            "body": body.Name,
+            "plane": plane,
+            "attached_plane": _PLANES[plane],
+            "dof": _dof(stored),
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def _build_geometry(app, part, kind, spec, tool):
+    """Turn one geometry request into a list of Part geometry objects.
+
+    A request maps to more than one element exactly once: a rectangle is four
+    line segments, because Sketcher has no rectangle primitive. Every other kind
+    is one element, so the returned list length is the number of element ids the
+    caller should expect.
+    """
+    if kind == "line":
+        return [
+            part.LineSegment(
+                _vector2(app, spec["start"], "start"), _vector2(app, spec["end"], "end")
+            )
+        ]
+    if kind == "point":
+        return [part.Point(_vector2(app, spec["at"], "at"))]
+    if kind == "circle":
+        return [
+            part.Circle(
+                _vector2(app, spec["center"], "center"),
+                app.Vector(0, 0, 1),
+                _positive_number(spec["radius"], "radius"),
+            )
+        ]
+    if kind == "arc":
+        center = _vector2(app, spec["center"], "center")
+        radius = _positive_number(spec["radius"], "radius")
+        start = _finite(spec["start_angle"], "start_angle")
+        end = _finite(spec["end_angle"], "end_angle")
+        if end == start:
+            raise ValueError("%s: start_angle and end_angle must differ" % tool)
+        circle = part.Circle(center, app.Vector(0, 0, 1), radius)
+        # ArcOfCircle takes its range as parameters of the underlying circle,
+        # which for a circle of this radius are radians of arc length: the
+        # requested degrees convert through the radius.
+        return [part.ArcOfCircle(circle, math.radians(start), math.radians(end))]
+    if kind == "rectangle":
+        x0, y0 = _point(spec["corner"], "corner")
+        width = _positive_number(spec["width"], "width")
+        height = _positive_number(spec["height"], "height")
+        corners = (
+            (x0, y0),
+            (x0 + width, y0),
+            (x0 + width, y0 + height),
+            (x0, y0 + height),
+        )
+        return [
+            part.LineSegment(app.Vector(*corners[i], 0.0), app.Vector(*corners[(i + 1) % 4], 0.0))
+            for i in range(4)
+        ]
+    raise ValueError("%s: unsupported geometry kind %r" % (tool, kind))
+
+
+def _geometry_spec(params, tool):
+    """Read the discriminated geometry request."""
+    spec = params.get("geometry")
+    if not isinstance(spec, dict):
+        raise ValueError("%s.geometry must be an object with a 'kind'" % tool)
+    kind = spec.get("kind")
+    if kind not in _GEOMETRY_KINDS:
+        raise ValueError(
+            "%s: unsupported geometry kind %r; expected one of %s"
+            % (tool, kind, ", ".join(_GEOMETRY_KINDS))
+        )
+    return kind, spec
+
+
+def sketch_add_geometry(params):
+    import FreeCAD as App
+    import Part
+
+    tool = "sketch.add_geometry"
+    version = _host_version()
+    sketch_name = _required(params, "sketch_name", tool)
+    kind, spec = _geometry_spec(params, tool)
+    doc = _open_document(App, params["document_path"])
+    try:
+        sketch = _open_sketch(App, doc, sketch_name, tool)
+        geometry = _build_geometry(App, Part, kind, spec, tool)
+        before = len(_sketch_inventory(sketch)[0])
+        # A single geometry returns an int, a list returns a tuple: normalised so
+        # the caller always gets a list of ids regardless of how many elements the
+        # kind expanded to.
+        added = sketch.addGeometry(geometry if len(geometry) > 1 else geometry[0])
+        ids = list(added) if isinstance(added, (list, tuple)) else [added]
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        after = len(_sketch_inventory(sketch)[0])
+        read_back.check(
+            after == before + len(geometry),
+            "geometry.count",
+            before + len(geometry),
+            after,
+            "The sketch accepted the call but the geometry is not there, so the "
+            "elements the caller was given ids for do not exist.",
+        )
+        read_back.check(
+            len(ids) == len(geometry),
+            "geometry.ids",
+            len(geometry),
+            len(ids),
+            "The host returned a different number of element ids than were added.",
+        )
+        for element_id in ids:
+            read_back.check(
+                0 <= element_id < after,
+                "geometry.id_range",
+                "0 <= id < %d" % after,
+                element_id,
+                "The host returned an element id outside the sketch's geometry.",
+            )
+        return {
+            "sketch": sketch.Name,
+            "kind": kind,
+            "element_ids": ids,
+            "geometry": [
+                _geometry_payload(Part, element_id, _sketch_inventory(sketch)[0][element_id])
+                for element_id in ids
+            ],
+            "dof": _require_fully_constrained(
+                sketch,
+                tool,
+                version,
+                params,
+                _host_matrix_digest(version),
+                allow_underconstrained=True,
+            ),
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def sketch_add_constraint(params):
+    import FreeCAD as App
+    import Sketcher
+
+    tool = "sketch.add_constraint"
+    version = _host_version()
+    sketch_name = _required(params, "sketch_name", tool)
+    kind = _required(params, "type", tool)
+    if kind == "concentric":
+        kind = _CONCENTRIC
+    if kind not in _CONSTRAINT_KINDS:
+        raise ValueError(
+            "%s: unsupported constraint type %r; expected one of %s"
+            % (tool, kind, ", ".join(sorted(_CONSTRAINT_KINDS)))
+        )
+    name, arity = _CONSTRAINT_KINDS[kind]
+    targets = params.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("%s.targets must be a non-empty list of element references" % tool)
+    if len(targets) != arity:
+        raise ValueError(
+            "%s: constraint %s takes exactly %d target(s), got %d"
+            % (tool, kind, arity, len(targets))
+        )
+    is_dimensional = kind in _DIMENSIONAL_CONSTRAINTS
+    value = params.get("value")
+    if is_dimensional and value is None:
+        raise ValueError("%s: constraint %s requires a 'value'" % (tool, kind))
+    if not is_dimensional and value is not None:
+        raise ValueError("%s: constraint %s does not take a 'value'" % (tool, kind))
+    doc = _open_document(App, params["document_path"])
+    try:
+        sketch = _open_sketch(App, doc, sketch_name, tool)
+        # Validated before the write: a reference to an element that does not
+        # exist must never reach the solver, where it would be an index error
+        # raised from inside a half-applied constraint list.
+        _validate_element_refs(sketch, targets, tool)
+        before = len(_sketch_inventory(sketch)[1])
+        before_dof = _dof(sketch)
+        arguments = _constraint_arguments(name, targets, value, tool)
+        constraint = Sketcher.Constraint(name, *arguments)
+        added = sketch.addConstraint(constraint)
+        constraint_id = added if isinstance(added, int) else list(added)[0]
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        after = len(_sketch_inventory(sketch)[1])
+        read_back.check(
+            after == before + 1,
+            "constraint.count",
+            before + 1,
+            after,
+            "The sketch accepted the call but no constraint was stored, so the "
+            "geometry stays under-constrained and reports as constrained.",
+        )
+        stored = _sketch_inventory(sketch)[1][constraint_id]
+        read_back.check(
+            str(getattr(stored, "Type", "")) == name,
+            "constraint.type",
+            name,
+            str(getattr(stored, "Type", "")),
+            "The stored constraint is not the type that was requested.",
+        )
+        if value is not None:
+            read_back.numbers(
+                "constraint.value",
+                _finite(value, "value"),
+                getattr(stored, "Value", None),
+                "The stored driving value differs from the requested one, so the "
+                "sketch is dimensioned differently than asked.",
+            )
+        after_dof = _require_fully_constrained(
+            sketch,
+            tool,
+            version,
+            params,
+            _host_matrix_digest(version),
+            allow_underconstrained=True,
+        )
+        return {
+            "sketch": sketch.Name,
+            "constraint_id": constraint_id,
+            "type": kind,
+            "dof": after_dof,
+            "dof_delta": before_dof - after_dof,
+            "constraint": _constraint_payload(stored, constraint_id),
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def sketch_get_info(params):
+    """Report a sketch's geometry, constraints and remaining degrees of freedom.
+
+    Read-only by design: an agent has to be able to ask "is this done?" without
+    changing the answer. The DOF reported here is the same number the shared gate
+    refuses on, so a caller can check before it commits to a feature.
+    """
+    import FreeCAD as App
+
+    tool = "sketch.get_info"
+    sketch_name = _required(params, "sketch_name", tool)
+    doc = _open_document(App, params["document_path"])
+    try:
+        sketch = _open_sketch(App, doc, sketch_name, tool)
+        dof = _dof(sketch)
+        geometry, constraints = _sketch_inventory(sketch)
+        return {
+            "sketch": sketch.Name,
+            "label": sketch.Label,
+            "dof": dof,
+            "fully_constrained": dof == 0,
+            "geometry_count": len(geometry),
+            "geometry": [_geometry_payload(None, index, geo) for index, geo in enumerate(geometry)],
+            "constraint_count": len(constraints),
+            "constraints": [
+                _constraint_payload(item, index) for index, item in enumerate(constraints)
+            ],
+            "conflicting_constraints": list(getattr(sketch, "ConflictingConstraints", None) or ()),
+            "redundant_constraints": list(getattr(sketch, "RedundantConstraints", None) or ()),
+        }
+    finally:
+        _close_document(App, doc)
+
+
 def model_export_geometry(params):
     import FreeCAD as App
 
@@ -2384,6 +2962,10 @@ _METHODS = {
     "model.polar_pattern": model_polar_pattern,
     "model.mirror_feature": model_mirror_feature,
     "model.insert_part": model_insert_part,
+    "sketch.create": sketch_create,
+    "sketch.add_geometry": sketch_add_geometry,
+    "sketch.add_constraint": sketch_add_constraint,
+    "sketch.get_info": sketch_get_info,
 }
 
 
@@ -2413,10 +2995,17 @@ def main():
             payload["error"]["code"] = code
         # A read-back mismatch carries expected/actual across the process
         # boundary verbatim, so the caller can act on the numbers instead of
-        # re-reading a sentence.
+        # re-reading a sentence. An under-constrained refusal travels the same
+        # way, under its own key so a caller can tell a write that did not stick
+        # from a write that was refused before it happened.
         verification = getattr(exc, "payload", None)
         if isinstance(verification, dict):
-            payload["error"]["write_verification"] = verification
+            key = (
+                "underconstrained"
+                if verification.get("check") == _contract_module().SKETCH_UNDERCONSTRAINED
+                else "write_verification"
+            )
+            payload["error"][key] = verification
     with open(result_path, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False)
 

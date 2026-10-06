@@ -1,0 +1,121 @@
+tools:
+  - name: create_sketch
+    description: Attach a new empty sketch to a datum plane inside a PartDesign body.
+    source_file: scripts/create_sketch.py
+    input_schema:
+      type: object
+      required: [document_path, name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        name: {type: string, minLength: 1, maxLength: 64}
+        plane: {type: string, enum: [xy, xz, yz], default: xy}
+        body_name: {type: string, minLength: 1, maxLength: 64, default: Body}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/bracket.FCStd", name: Profile, plane: xy}
+    next-tools: {on-success: [get_sketch_info], on-failure: [inspect_document]}
+
+  - name: add_sketch_geometry
+    description: Add line, rectangle, circle, arc, or point geometry to an existing sketch.
+    source_file: scripts/add_sketch_geometry.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, geometry]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64}
+        geometry:
+          type: object
+          required: [kind]
+          properties:
+            kind: {type: string, enum: [arc, circle, line, point, rectangle]}
+            start: {type: array, minItems: 2, maxItems: 2, items: {type: number}}
+            end: {type: array, minItems: 2, maxItems: 2, items: {type: number}}
+            at: {type: array, minItems: 2, maxItems: 2, items: {type: number}}
+            center: {type: array, minItems: 2, maxItems: 2, items: {type: number}}
+            corner: {type: array, minItems: 2, maxItems: 2, items: {type: number}}
+            width: {type: number, exclusiveMinimum: 0}
+            height: {type: number, exclusiveMinimum: 0}
+            radius: {type: number, exclusiveMinimum: 0}
+            start_angle: {type: number}
+            end_angle: {type: number}
+          additionalProperties: false
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/bracket.FCStd", sketch_name: Profile, geometry: {kind: rectangle, corner: [0, 0], width: 80, height: 50}}
+      - arguments: {document_path: "projects/bracket.FCStd", sketch_name: Profile, geometry: {kind: circle, center: [40, 25], radius: 8}}
+    next-tools: {on-success: [get_sketch_info], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: add_sketch_constraint
+    description: Constrain sketch elements geometrically or dimensionally; reports the degrees of freedom removed.
+    source_file: scripts/add_sketch_constraint.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, type, targets]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64}
+        type:
+          type: string
+          enum: [angle, coincident, concentric, diameter, distance, distance_x, distance_y, equal, horizontal, parallel, perpendicular, point_on_object, radius, tangent, vertical]
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: object
+            required: [element]
+            properties:
+              element: {type: integer, minimum: 0}
+              position: {type: string, enum: [end, mid, none, start], default: none}
+            additionalProperties: false
+        value: {type: number}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/bracket.FCStd", sketch_name: Profile, type: coincident, targets: [{element: 0, position: end}, {element: 1, position: start}]}
+      - arguments: {document_path: "projects/bracket.FCStd", sketch_name: Profile, type: distance_x, targets: [{element: 0}], value: 80}
+    next-tools: {on-success: [get_sketch_info], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: get_sketch_info
+    description: Report a sketch's geometry, constraints, remaining degrees of freedom, and whether it is fully constrained.
+    source_file: scripts/get_sketch_info.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+    call_examples:
+      - arguments: {document_path: "projects/bracket.FCStd", sketch_name: Profile}

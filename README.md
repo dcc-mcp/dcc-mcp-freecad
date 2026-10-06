@@ -170,6 +170,7 @@ dcc-mcp-cli load-skill freecad-session --dcc-type freecad --instance-id <instanc
 dcc-mcp-cli load-skill freecad-modeling --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modify --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-parts --dcc-type freecad --instance-id <instance-short>
+dcc-mcp-cli load-skill freecad-sketch --dcc-type freecad --instance-id <instance-short>
 ```
 
 Typical sequence: `create_document` → `add_primitive` → `transform_object` →
@@ -195,6 +196,12 @@ containing `..`, absolute paths, backslashes, URL schemes, and anything that
 resolves outside a library root (including through a symlink) are refused
 before a file is read, each with a stable error code. Follow an insert with
 `validate_document`.
+
+For a constrained 2D profile: `create_document` → `create_sketch` →
+`add_sketch_geometry` → `add_sketch_constraint` → `get_sketch_info`. Constraints
+are validated before they are written and the remaining degrees of freedom are
+reported after every change; `get_sketch_info` returns `dof` and
+`fully_constrained`.
 
 ## Safety contract
 

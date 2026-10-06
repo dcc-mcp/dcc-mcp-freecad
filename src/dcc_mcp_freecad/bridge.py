@@ -91,6 +91,40 @@ class WriteVerificationError(BridgeError):
         return self.payload.get("host_version")
 
 
+class UnderconstrainedSketchError(BridgeError):
+    """A sketch still had degrees of freedom where the tool required none.
+
+    A ``BridgeError`` subclass so existing ``except BridgeError`` handlers keep
+    working. Carries the structured payload (``tool``, ``check``, ``expected``,
+    ``actual``, ``host_version``, ``host_matrix``, ``params``) so a caller can
+    branch on :attr:`check` instead of parsing the message.
+    """
+
+    def __init__(self, payload: Mapping[str, Any], message: str):
+        super().__init__(message)
+        self.payload = dict(payload)
+
+    @property
+    def tool(self) -> Any:
+        return self.payload.get("tool")
+
+    @property
+    def check(self) -> Any:
+        return self.payload.get("check")
+
+    @property
+    def expected(self) -> Any:
+        return self.payload.get("expected")
+
+    @property
+    def actual(self) -> Any:
+        return self.payload.get("actual")
+
+    @property
+    def host_version(self) -> Any:
+        return self.payload.get("host_version")
+
+
 def _within(path: Path, roots: Sequence[Path]) -> bool:
     candidate = os.path.normcase(str(path))
     for root in roots:
@@ -596,6 +630,13 @@ class FreecadBridge:
                     raise WriteVerificationError(verification, message)
                 code = error.get("code")
                 raise BridgeError(message, str(code) if code else None)
+                # A refusal travels under its own key: the caller needs to tell a
+                # write that did not stick apart from a write that was refused
+                # before it happened.
+                underconstrained = error.get("underconstrained")
+                if isinstance(underconstrained, dict):
+                    raise UnderconstrainedSketchError(underconstrained, message)
+                raise BridgeError(message)
             result = payload.get("result")
             if not isinstance(result, dict):
                 result = {"result": result}
@@ -1136,6 +1177,62 @@ class FreecadBridge:
             timeout_secs,
         )
 
+    def create_sketch(
+        self,
+        document_path: str,
+        name: str,
+        plane: str = "xy",
+        body_name: str = "Body",
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        self._object_name(name)
+        self._object_name(body_name)
+        if plane not in ("xy", "xz", "yz"):
+            raise BridgeError("plane must be one of xy, xz, yz")
+        return self._mutate_document(
+            "sketch.create",
+            document_path,
+            {"name": name, "plane": plane, "body_name": body_name},
+            timeout_secs,
+        )
+
+    def add_sketch_geometry(
+        self,
+        document_path: str,
+        sketch_name: str,
+        geometry: Mapping[str, Any],
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        if not isinstance(geometry, Mapping):
+            raise BridgeError("geometry must be an object with a 'kind'")
+        return self._mutate_document(
+            "sketch.add_geometry",
+            document_path,
+            {"sketch_name": self._object_name(sketch_name), "geometry": dict(geometry)},
+            timeout_secs,
+        )
+
+    def add_sketch_constraint(
+        self,
+        document_path: str,
+        sketch_name: str,
+        constraint_type: str,
+        targets: Sequence[Mapping[str, Any]],
+        value: Optional[float] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "sketch.add_constraint",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "type": constraint_type,
+                "targets": [dict(item) for item in targets],
+                "value": value,
+            },
+            timeout_secs,
+        )
+
     def chamfer_edges(
         self,
         document_path: str,
@@ -1237,6 +1334,19 @@ class FreecadBridge:
                 "result_name": self._object_name(result_name),
                 "result_label": result_label,
             },
+            timeout_secs,
+        )
+
+    def get_sketch_info(
+        self,
+        document_path: str,
+        sketch_name: str,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        document = self._document_path(document_path)
+        return self._invoke(
+            "sketch.get_info",
+            {"document_path": str(document), "sketch_name": self._object_name(sketch_name)},
             timeout_secs,
         )
 

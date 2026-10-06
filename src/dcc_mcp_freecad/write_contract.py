@@ -67,6 +67,9 @@ MUTATING_TOOLS = (
     "model.polar_pattern",
     "model.mirror_feature",
     "model.insert_part",
+    "sketch.create",
+    "sketch.add_geometry",
+    "sketch.add_constraint",
 )
 
 # Tools that observe state and change nothing. Kept here so the classification
@@ -75,6 +78,7 @@ READ_ONLY_TOOLS = (
     "system.status",
     "document.inspect",
     "document.validate",
+    "sketch.get_info",
 )
 
 # Read-only tools that run in the adapter process instead of the FreeCAD host.
@@ -83,6 +87,11 @@ READ_ONLY_TOOLS = (
 # because they must keep answering when no FreeCAD host is installed: a caller
 # can browse the parts library before it has a document to insert into.
 SERVICE_READ_ONLY_TOOLS = ("parts.list",)
+
+# A sketch that still has degrees of freedom is not a profile a feature can be
+# built from deterministically: the solver is free to move the remaining
+# geometry, so the same sketch yields different solids on different runs.
+SKETCH_UNDERCONSTRAINED = "sketch.underconstrained"
 
 TOOL_CLASSIFICATION_ERROR = (
     "every driver method must be listed in write_contract.MUTATING_TOOLS or "
@@ -184,6 +193,30 @@ def format_message(payload):
     return message
 
 
+def format_underconstrained_message(payload):
+    """Render the sentence for an under-constrained sketch.
+
+    Deliberately names the remaining degrees of freedom and the host version:
+    DOF is the number the caller has to drive to zero, and without the version
+    the report cannot be reproduced.
+    """
+    tool = payload.get("tool") or "unknown tool"
+    message = "%s refused an under-constrained sketch: %s degree(s) of freedom remain" % (
+        tool,
+        payload.get("actual"),
+    )
+    version = payload.get("host_version")
+    if version:
+        message += "; host FreeCAD %s" % version
+    matrix = payload.get("host_matrix") or {}
+    if matrix.get("status"):
+        message += " (matrix status: %s)" % matrix["status"]
+    remediation = payload.get("remediation")
+    if remediation:
+        message += ". %s" % remediation
+    return message
+
+
 class WriteVerificationError(RuntimeError):
     """A mutating tool reported success but the read-back disagreed.
 
@@ -253,4 +286,74 @@ class WriteVerificationError(RuntimeError):
             params=payload.get("params"),
             remediation=payload.get("remediation"),
             message=format_message(payload),
+        )
+
+
+class UnderconstrainedSketchError(RuntimeError):
+    """A sketch still has degrees of freedom where none are allowed.
+
+    Raised by the shared ``require_fully_constrained`` gate. It carries the same
+    structured :attr:`payload` shape as :class:`WriteVerificationError` so the
+    driver boundary forwards it identically and a caller branches on ``check``
+    instead of parsing prose -- the difference is the failure it describes: here
+    the write is refused *before* it happens, because building a feature on an
+    under-constrained sketch would silently produce a different solid each run.
+    """
+
+    def __init__(
+        self,
+        tool,
+        expected=None,
+        actual=None,
+        host_version=None,
+        host_matrix=None,
+        params=None,
+        remediation=None,
+        message=None,
+    ):
+        self.payload = {
+            "schema_version": SCHEMA_VERSION,
+            "tool": tool,
+            "check": SKETCH_UNDERCONSTRAINED,
+            "expected": jsonable(expected),
+            "actual": jsonable(actual),
+            "host_version": host_version,
+            "host_matrix": jsonable(host_matrix),
+            "params": jsonable(params),
+            "remediation": remediation,
+        }
+        super().__init__(message or format_underconstrained_message(self.payload))
+
+    @property
+    def tool(self):
+        return self.payload.get("tool")
+
+    @property
+    def check(self):
+        return self.payload.get("check")
+
+    @property
+    def expected(self):
+        return self.payload.get("expected")
+
+    @property
+    def actual(self):
+        return self.payload.get("actual")
+
+    @property
+    def host_version(self):
+        return self.payload.get("host_version")
+
+    @classmethod
+    def from_payload(cls, payload):
+        """Rebuild the error on the caller's side of a process boundary."""
+        return cls(
+            tool=payload.get("tool"),
+            expected=payload.get("expected"),
+            actual=payload.get("actual"),
+            host_version=payload.get("host_version"),
+            host_matrix=payload.get("host_matrix"),
+            params=payload.get("params"),
+            remediation=payload.get("remediation"),
+            message=format_underconstrained_message(payload),
         )
