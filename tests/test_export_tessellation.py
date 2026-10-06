@@ -78,6 +78,10 @@ def curved_document(tmp_path_factory):
     below is about tessellation rather than creation, so the geometry is made
     once for the module and each test pays only for its own exports.
     """
+    # The bridge refuses any path outside allowed_roots, and a test's `tmp_path`
+    # is a sibling of this root rather than a child of it, so exports have to be
+    # written under `root` too. Returning the root keeps every caller inside the
+    # sandbox instead of depending on that detail being obvious.
     root = tmp_path_factory.mktemp("export-tessellation")
     bridge = FreecadBridge(_real_freecad(), allowed_roots=[root])
     document = root / "curved.FCStd"
@@ -100,7 +104,14 @@ def curved_document(tmp_path_factory):
         "ApexCone",
         dimensions={"radius1": 0, "radius2": 10, "height": 24},
     )
-    return bridge, document
+    return bridge, document, root
+
+
+def _out_dir(root: Path, name: str) -> Path:
+    """A per-test output directory inside the bridge's sandbox."""
+    path = root / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _export(
@@ -134,19 +145,31 @@ def _assert_bounded_mesh(output: Path, result: dict) -> int:
 
 
 @pytest.mark.parametrize("object_name", ["CurvedSphere", "CurvedTorus", "CurvedCone"])
-def test_curved_surfaces_tessellate_into_bounded_meshes(curved_document, tmp_path, object_name):
+def test_curved_surfaces_tessellate_into_bounded_meshes(curved_document, object_name):
     """A curved solid must export real geometry, not a legal file with nothing in it.
 
     This is the regression for upstream #96 and #121: both report an export that
     fails or empties out on curved geometry, and both are invisible to a suite
     that only ever exports boxes and cylinders.
     """
-    bridge, document = curved_document
-    output = tmp_path / ("%s.stl" % object_name)
+    bridge, document, root = curved_document
+    output = _out_dir(root, "curved") / ("%s.stl" % object_name)
 
     result = _export(bridge, document, output, object_name)
 
     _assert_bounded_mesh(output, result)
+
+
+def _assert_not_a_sandbox_rejection(error: BridgeError) -> None:
+    """Reject the one failure a refusal must never be confused with.
+
+    A path outside ``allowed_roots`` is refused before FreeCAD is ever reached,
+    so a test that accepts any ``BridgeError`` as "the host said no" would pass
+    on a sandbox mistake without exercising tessellation at all.
+    """
+    assert "ALLOWED_ROOTS" not in str(error), (
+        "the export never reached FreeCAD, so this proves nothing: %s" % error
+    )
 
 
 def _export_or_refusal(bridge, document, output, **deflections):
@@ -162,12 +185,13 @@ def _export_or_refusal(bridge, document, output, **deflections):
         return _export(bridge, document, output, "CurvedSphere", **deflections)
     except BridgeTimeoutError:
         raise
-    except BridgeError:
+    except BridgeError as error:
+        _assert_not_a_sandbox_rejection(error)
         assert not output.exists(), "a refused export must not leave a file"
         return None
 
 
-def test_linear_deflection_bounds_stay_bounded_and_move_the_mesh(curved_document, tmp_path):
+def test_linear_deflection_bounds_stay_bounded_and_move_the_mesh(curved_document):
     """The requested linear deflection must reach the tessellator.
 
     A deflection that is accepted and then ignored leaves the caller with a mesh
@@ -176,10 +200,11 @@ def test_linear_deflection_bounds_stay_bounded_and_move_the_mesh(curved_document
     coming back empty -- while the upper bound is allowed to be refused, because
     a deflection wider than the solid itself is a legitimate thing to reject.
     """
-    bridge, document = curved_document
-    fine = tmp_path / "linear-fine.stl"
-    default = tmp_path / "linear-default.stl"
-    extreme = tmp_path / "linear-extreme.stl"
+    bridge, document, root = curved_document
+    out = _out_dir(root, "linear")
+    fine = out / "linear-fine.stl"
+    default = out / "linear-default.stl"
+    extreme = out / "linear-extreme.stl"
 
     fine_result = _export(bridge, document, fine, "CurvedSphere", linear_deflection=0.001)
     default_result = _export(bridge, document, default, "CurvedSphere", linear_deflection=0.1)
@@ -200,17 +225,18 @@ def test_linear_deflection_bounds_stay_bounded_and_move_the_mesh(curved_document
         )
 
 
-def test_angular_deflection_bounds_stay_bounded_and_move_the_mesh(curved_document, tmp_path):
+def test_angular_deflection_bounds_stay_bounded_and_move_the_mesh(curved_document):
     """The requested angular deflection must reach the tessellator.
 
     The same property as the linear bound, swept over the documented 0-180 degree
     range, with the same split: the fine end must produce a real mesh, the upper
     bound may be refused but must never come back degenerate.
     """
-    bridge, document = curved_document
-    fine = tmp_path / "angular-fine.stl"
-    default = tmp_path / "angular-default.stl"
-    extreme = tmp_path / "angular-extreme.stl"
+    bridge, document, root = curved_document
+    out = _out_dir(root, "angular")
+    fine = out / "angular-fine.stl"
+    default = out / "angular-default.stl"
+    extreme = out / "angular-extreme.stl"
 
     fine_result = _export(bridge, document, fine, "CurvedSphere", angular_deflection_degrees=1.0)
     default_result = _export(
@@ -246,7 +272,7 @@ def _stl_payload_sha256(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def test_repeated_curved_export_is_byte_stable(curved_document, tmp_path):
+def test_repeated_curved_export_is_byte_stable(curved_document):
     """The same request must produce the same artefact twice.
 
     An export that only "did not raise" is what the upstream reports complain
@@ -254,9 +280,10 @@ def test_repeated_curved_export_is_byte_stable(curved_document, tmp_path):
     diff in a pipeline. A host that re-tessellates differently between two
     identical calls is unusable for that, and no postcondition catches it.
     """
-    bridge, document = curved_document
-    first = tmp_path / "stable-first.stl"
-    second = tmp_path / "stable-second.stl"
+    bridge, document, root = curved_document
+    out = _out_dir(root, "stable")
+    first = out / "stable-first.stl"
+    second = out / "stable-second.stl"
 
     first_result = _export(bridge, document, first, "CurvedTorus")
     second_result = _export(bridge, document, second, "CurvedTorus")
@@ -274,7 +301,7 @@ def test_repeated_curved_export_is_byte_stable(curved_document, tmp_path):
     )
 
 
-def test_an_unbounded_tessellation_is_refused_not_written_as_a_shell(curved_document, tmp_path):
+def test_an_unbounded_tessellation_is_refused_not_written_as_a_shell(curved_document):
     """A degenerate request must fail loudly, never as a legal empty file.
 
     Both deflections at their documented maximum remove every tessellation
@@ -282,8 +309,8 @@ def test_an_unbounded_tessellation_is_refused_not_written_as_a_shell(curved_docu
     does with that, the one outcome the contract forbids is a written file that
     carries no geometry.
     """
-    bridge, document = curved_document
-    output = tmp_path / "degenerate.stl"
+    bridge, document, root = curved_document
+    output = _out_dir(root, "degenerate") / "degenerate.stl"
 
     try:
         result = _export(
@@ -294,8 +321,9 @@ def test_an_unbounded_tessellation_is_refused_not_written_as_a_shell(curved_docu
             linear_deflection=99.9,
             angular_deflection_degrees=179.9,
         )
-    except BridgeError:
+    except BridgeError as error:
         # Refused, and the bridge must not leave the fragment behind.
+        _assert_not_a_sandbox_rejection(error)
         assert not output.exists(), "a refused export must not leave a file"
         return
 
