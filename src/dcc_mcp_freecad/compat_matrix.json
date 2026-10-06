@@ -2,7 +2,7 @@
   "schema_version": 1,
   "host": "freecad",
   "matrix_version": "2026-09-29",
-  "notes": "Single source of truth for FreeCAD host support. Read by dcc_mcp_freecad.compat (service side) and by freecad_driver.py (inside FreeCAD's interpreter). A version outside `supported_ranges` is rejected explicitly; it is never silently downgraded.",
+  "notes": "Single source of truth for FreeCAD host support. Read by dcc_mcp_freecad.compat (service side) and by freecad_driver.py (inside FreeCAD's interpreter). A version outside `supported_ranges` is rejected explicitly; it is never silently downgraded. Each breaking change names the tools it limits in `affected_tools`; an `unused` break names none, because the adapter never calls the moved API. get_capabilities reads that list, so the capability declaration and the guard cannot disagree.",
   "executable_names": [
     "FreeCADCmd",
     "freecadcmd"
@@ -45,6 +45,7 @@
       },
       "symptom": "Sketch constraints set through the old property name are dropped; the document recomputes as if the constraint never existed, so the tool reports success while the geometry stays wrong.",
       "adapter_usage": "unused",
+      "affected_tools": [],
       "enforcement": "guard",
       "remediation": "Use `Midplane` on FreeCAD 1.1+; keep the `Symmetric` spelling only on 1.0.x."
     },
@@ -67,6 +68,7 @@
       },
       "symptom": "Reading the count returns nothing instead of a number, so sketch bookkeeping silently reports zero external references.",
       "adapter_usage": "unused",
+      "affected_tools": [],
       "enforcement": "guard",
       "remediation": "Read `len(ExternalGeometry)` on FreeCAD 1.1+."
     },
@@ -85,6 +87,7 @@
       },
       "symptom": "Tessellation honours deflection differently, so an STL/OBJ export can succeed with an empty or degenerate mesh instead of failing.",
       "adapter_usage": "guarded",
+      "affected_tools": ["export_geometry"],
       "enforcement": "postcondition",
       "remediation": "The adapter asserts the tessellated mesh is non-empty and bounded before exporting: an empty mesh, or one whose bounding box is missing or not finite, raises an explicit error naming the host version instead of writing a plausible-looking file."
     }
