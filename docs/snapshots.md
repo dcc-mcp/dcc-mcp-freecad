@@ -31,9 +31,9 @@ the current host version could not open.
 | Tool | Input | Output |
 | --- | --- | --- |
 | `create_snapshot` | `document_path`, `label?` | `snapshot_id`, `document_sha256`, `bytes`, `created_at` |
-| `list_snapshots` | `document_path?` | `snapshots`, `count`, `total_bytes`, limits, `orphans` |
-| `restore_snapshot` | `document_path`, `snapshot_id`, `expected_sha256?` | `restored_sha256`, `replaced_document_sha256`, `undo_snapshot_id` |
-| `delete_snapshot` | `snapshot_id` | remaining `snapshot_count` / `total_bytes` |
+| `list_snapshots` | `document_path?` | `snapshots`, `count`, `snapshot_bytes`, `total_bytes`, limits, `orphans` |
+| `restore_snapshot` | `document_path`, `snapshot_id`, `expected_sha256?` | `restored_sha256`, `replaced_document_sha256`, `undo_snapshot_id`, `created_document` |
+| `delete_snapshot` | `snapshot_id` | remaining `snapshot_count` / `snapshot_bytes` |
 
 `label` is free text recorded in the sidecar; it is not an identity. Two
 snapshots of identical content taken at different times get distinct ids.
@@ -80,6 +80,24 @@ rather than pretended away.
 
 Omitting `expected_sha256` restores unconditionally.
 
+### Restoring a deleted document
+
+If the document is gone, `restore_snapshot` recreates it from the snapshot.
+Recovering a deleted document is the case snapshots exist for, so refusing it
+would mean `list_snapshots` can find the snapshot but nothing can apply it.
+
+That path has no state to preserve, so it takes no pre-restore snapshot:
+`undo_snapshot_id` and `replaced_document_sha256` are null and
+`created_document` is `true`. It also needs no free capacity, so a full store
+never blocks recovery. The parent directory must still exist — creating a
+directory tree the caller did not name would turn one typo into a whole new
+subtree.
+
+Passing `expected_sha256` with a missing document is refused as
+`snapshot_conflict` with `conflict: document_missing`: a caller holding an
+expected hash believes bytes are there, and finding the path empty is that same
+class of surprise. Retry without the token to recreate it deliberately.
+
 ## A restore is itself undoable
 
 `restore_snapshot` snapshots the state it is about to replace and returns that
@@ -122,12 +140,29 @@ have no complete metadata, so `delete_snapshot` cannot remove them by id;
 `list_snapshots` reports them under `orphans` and the remediation names the
 directory.
 
+`list_snapshots` returns two byte figures on purpose: `snapshot_bytes` is the
+snapshots themselves, and `total_bytes` is what
+`DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES` is actually charged against — orphan bytes
+included. Reporting only the former would show a total under the limit while
+the next call is still refused for exceeding it.
+
+### Cleanup of the intermediate stage
+
+`restore_snapshot` stages the snapshot bytes beside the document before
+committing them. That stage is a full-size copy living in the user's document
+directory, so a single `try/finally` removes it on every exit from the commit
+phase — capacity refusal, cancellation, an interrupted undo snapshot, a
+concurrent write, a tampered snapshot. The path is not a corner case: because a
+restore always reserves room for one undo snapshot, "refused for capacity" is a
+route this design creates itself, and without the guard repeated refusals would
+repeatedly leak hidden copies into the user's workspace.
+
 ## Error codes
 
 | Code | Meaning |
 | --- | --- |
 | `snapshot_limit_exceeded` | Store is at a configured limit; nothing was evicted |
-| `snapshot_conflict` | `expected_sha256` was stale, or the document changed mid-copy |
+| `snapshot_conflict` | `expected_sha256` was stale, the document changed mid-copy, or an expected hash was passed for a missing document |
 | `snapshot_not_found` | Unknown or malformed id (including traversal attempts) |
 | `snapshot_content_mismatch` | Stored bytes no longer match the recorded SHA-256 |
 | `snapshot_copy_timeout` | The copy exceeded the call deadline |

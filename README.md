@@ -154,10 +154,11 @@ Snapshots are byte copies, so they never spawn FreeCAD and keep working when
 the host is unavailable. Passing `expected_sha256` makes a restore refuse
 rather than overwrite work done after the caller read the document, and a
 restore always snapshots the state it replaces — so a mistaken restore is just
-another restore. The store lives inside `DCC_MCP_FREECAD_ALLOWED_ROOTS` and is
-capped; when it is full the call fails with `snapshot_limit_exceeded` and
-cleanup guidance instead of evicting anything. See
-[docs/snapshots.md](docs/snapshots.md).
+another restore. A deleted document is recreated from a snapshot rather than
+refused, with `undo_snapshot_id` null because there was no state to preserve.
+The store lives inside `DCC_MCP_FREECAD_ALLOWED_ROOTS` and is capped; when it
+is full the call fails with `snapshot_limit_exceeded` and cleanup guidance
+instead of evicting anything. See [docs/snapshots.md](docs/snapshots.md).
 
 ## Agent workflow
 

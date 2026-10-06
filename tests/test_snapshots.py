@@ -24,6 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from dcc_mcp_freecad import bridge as bridge_module  # noqa: E402
 from dcc_mcp_freecad import snapshots as snapshots_module  # noqa: E402
 from dcc_mcp_freecad.bridge import FreecadBridge  # noqa: E402
 from dcc_mcp_freecad.snapshots import (  # noqa: E402
@@ -60,6 +61,16 @@ def write_document(root: Path, name: str = "part.FCStd", payload: bytes = DOCUME
     document = root / name
     document.write_bytes(payload)
     return document
+
+
+def _leftover_names(root: Path) -> set:
+    """Top-level names in the user's document root, store included.
+
+    A leaked restore stage is a hidden full-size copy sitting next to the
+    user's document, so the assertion is about what is visible in *their*
+    directory rather than about the store's internals.
+    """
+    return {path.name for path in root.iterdir()}
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +203,7 @@ def test_restore_snapshots_what_it_replaces_so_it_can_be_undone(workspace):
     assert result["undo_snapshot_id"]
     assert result["undo_snapshot_id"] != snapshot["snapshot_id"]
     undo = bridge.list_snapshots()["snapshots"]
-    undo_entry = next(
-        item for item in undo if item["snapshot_id"] == result["undo_snapshot_id"]
-    )
+    undo_entry = next(item for item in undo if item["snapshot_id"] == result["undo_snapshot_id"])
     assert undo_entry["document_sha256"] == modified_sha
     assert undo_entry["origin"] == "pre_restore"
     assert undo_entry["restored_snapshot_id"] == snapshot["snapshot_id"]
@@ -264,9 +273,7 @@ def test_restore_accepts_the_current_expected_sha256(workspace):
     snapshot = bridge.create_snapshot(str(document))
     document.write_bytes(MODIFIED_BYTES)
 
-    result = bridge.restore_snapshot(
-        str(document), snapshot["snapshot_id"], sha256_file(document)
-    )
+    result = bridge.restore_snapshot(str(document), snapshot["snapshot_id"], sha256_file(document))
 
     assert result["document_sha256"] == snapshot["document_sha256"]
 
@@ -390,6 +397,157 @@ def test_restore_refuses_when_there_is_no_capacity_for_the_undo_snapshot(workspa
 
     assert caught.value.error_code == ERROR_LIMIT_EXCEEDED
     assert document.read_bytes() == MODIFIED_BYTES
+    # The restore stage lives in the user's document directory and holds a full
+    # copy of the document, so a refusal must not leave it behind -- and this
+    # refusal is on the path the design creates itself (restore always needs
+    # room for one undo snapshot), so repeated refusals would leak repeatedly.
+    assert _leftover_names(root) == {"part.FCStd", ".dcc-mcp-freecad"}
+
+
+def test_every_refusal_path_leaves_no_stage_in_the_document_directory(
+    workspace, monkeypatch: pytest.MonkeyPatch
+):
+    """One guard must cover all of them, not three hand-placed unlinks."""
+    root, _ = workspace
+    document = write_document(root)
+
+    def refusal(exc: Exception):
+        def raise_now(*_args, **_kwargs):
+            raise exc
+
+        return raise_now
+
+    cases = {
+        "capacity": (
+            lambda bridge: monkeypatch.setattr(
+                snapshots_module.SnapshotStore,
+                "ensure_capacity",
+                refusal(SnapshotError(ERROR_LIMIT_EXCEEDED, "full")),
+            ),
+            {},
+        ),
+        "cancelled": (
+            lambda bridge: monkeypatch.setattr(
+                bridge_module, "check_dcc_cancelled", refusal(RuntimeError("cancelled"))
+            ),
+            {},
+        ),
+        "undo_snapshot_failed": (
+            lambda bridge: monkeypatch.setattr(
+                snapshots_module.SnapshotStore,
+                "write",
+                refusal(OSError("disk full")),
+            ),
+            {},
+        ),
+        "tampered_snapshot": (lambda bridge: None, {"tamper": True}),
+        "stale_expected_sha256": (lambda bridge: None, {"stale": True}),
+    }
+
+    for name, (arm, options) in cases.items():
+        bridge = make_bridge(root)
+        snapshot = bridge.create_snapshot(str(document))
+        document.write_bytes(MODIFIED_BYTES)
+        if options.get("tamper"):
+            Path(snapshot["snapshot_path"]).write_bytes(b"corrupted in the store")
+        arm(bridge)
+        expected = "0" * 64 if options.get("stale") else None
+
+        with pytest.raises((SnapshotError, RuntimeError, OSError)):
+            bridge.restore_snapshot(str(document), snapshot["snapshot_id"], expected)
+
+        assert document.read_bytes() == MODIFIED_BYTES, name
+        assert _leftover_names(root) == {"part.FCStd", ".dcc-mcp-freecad"}, name
+        monkeypatch.undo()
+        # Reset for the next arm: the snapshot store persists across cases.
+        for entry in bridge.list_snapshots()["snapshots"]:
+            bridge.delete_snapshot(entry["snapshot_id"])
+
+
+def test_restore_recreates_a_deleted_document(workspace):
+    """Recovering a deleted document is the case snapshots exist for."""
+    root, _ = workspace
+    bridge = make_bridge(root)
+    document = write_document(root)
+    original_sha = sha256_file(document)
+    snapshot = bridge.create_snapshot(str(document))
+    document.unlink()
+
+    result = bridge.restore_snapshot(str(document), snapshot["snapshot_id"])
+
+    assert result["created_document"] is True
+    # There was no state to preserve, so this restore has no undo - reported,
+    # not silently implied by a null id.
+    assert result["undo_snapshot_id"] is None
+    assert result["replaced_document_sha256"] is None
+    assert document.read_bytes() == DOCUMENT_BYTES
+    assert result["document_sha256"] == original_sha
+    assert "no_state_to_preserve" in result["verified"]
+
+
+def test_restoring_a_deleted_document_needs_no_store_capacity(workspace):
+    """No undo snapshot is taken, so a full store must not block recovery."""
+    root, _ = workspace
+    bridge = make_bridge(root, max_snapshots=1)
+    document = write_document(root)
+    snapshot = bridge.create_snapshot(str(document))
+    document.unlink()
+
+    bridge.restore_snapshot(str(document), snapshot["snapshot_id"])
+
+    assert document.read_bytes() == DOCUMENT_BYTES
+    assert bridge.list_snapshots()["count"] == 1
+
+
+def test_restoring_a_deleted_document_refuses_a_stale_expected_sha256(workspace):
+    """A caller holding an expected hash believes bytes are there."""
+    root, _ = workspace
+    bridge = make_bridge(root)
+    document = write_document(root)
+    snapshot = bridge.create_snapshot(str(document))
+    document.unlink()
+
+    with pytest.raises(SnapshotError) as caught:
+        bridge.restore_snapshot(str(document), snapshot["snapshot_id"], "0" * 64)
+
+    assert caught.value.error_code == ERROR_CONFLICT
+    assert caught.value.details["conflict"] == "document_missing"
+    assert not document.exists()
+    assert _leftover_names(root) == {"part.FCStd", ".dcc-mcp-freecad"} or {
+        ".dcc-mcp-freecad"
+    } == _leftover_names(root)
+
+
+def test_restore_refuses_a_missing_parent_directory(workspace):
+    root, _ = workspace
+    bridge = make_bridge(root)
+    document = write_document(root)
+    bridge.create_snapshot(str(document))
+
+    with pytest.raises(Exception) as caught:
+        bridge.restore_snapshot(
+            str(root / "nope" / "part.FCStd"),
+            bridge.list_snapshots()["snapshots"][0]["snapshot_id"],
+        )
+
+    assert "does not exist" in str(caught.value)
+
+
+def test_listing_reports_bytes_on_the_same_basis_as_the_limit(workspace):
+    """total_bytes must include orphans, or a refusal looks like a lie."""
+    root, _ = workspace
+    bridge = make_bridge(root, max_snapshot_bytes=len(DOCUMENT_BYTES) + 8)
+    document = write_document(root)
+    bridge.create_snapshot(str(document))
+    (bridge.snapshot_directory / "junk.bin").write_bytes(b"0123456789abcdef")
+
+    listing = bridge.list_snapshots()
+
+    assert listing["snapshot_bytes"] == len(DOCUMENT_BYTES)
+    # The byte limit is charged against orphans too, so the figure the caller
+    # compares to max_snapshot_bytes has to count them.
+    assert listing["total_bytes"] == len(DOCUMENT_BYTES) + 16
+    assert listing["total_bytes"] > listing["max_snapshot_bytes"]
 
 
 def test_delete_snapshot_frees_capacity(workspace):

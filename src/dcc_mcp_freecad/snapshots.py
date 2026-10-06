@@ -447,7 +447,11 @@ class SnapshotStore:
             os.replace(str(staged), str(target))
             entry = dict(metadata)
             entry["snapshot_path"] = str(target)
-            entry["bytes"] = target.stat().st_size
+            # ``bytes`` stays the count the copy streamed, NOT a re-stat of the
+            # published file. Reading it back would make the caller's size
+            # check a tautology -- a file comparing against itself -- instead
+            # of a read-back that can fail. Listing still reports the real
+            # on-disk size, so the two only diverge if the bytes did not land.
             return entry
         except BaseException:
             _unlink(staged)

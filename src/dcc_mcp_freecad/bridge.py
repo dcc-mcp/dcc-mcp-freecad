@@ -439,6 +439,26 @@ class FreecadBridge:
             raise BridgeError("FreeCAD document exceeds the configured size limit")
         return path
 
+    def _restorable_document_path(self, value: str) -> Path:
+        """Like :meth:`_document_path` but tolerates a document that is gone.
+
+        Same suffix, same allowed-roots gate, same size ceiling when a file is
+        present -- the only difference is that a missing path is allowed, because
+        ``restore_snapshot`` onto a deleted document *is* the recovery path. The
+        parent directory must still exist: creating a document tree the caller
+        did not ask for would turn one typo into a whole new subtree.
+        """
+        path = Path(value).expanduser().resolve()
+        if path.suffix.lower() != _DOCUMENT_SUFFIX:
+            raise BridgeError("FreeCAD document paths must end with .FCStd")
+        if not _within(path, self.allowed_roots):
+            raise BridgeError("Document is outside DCC_MCP_FREECAD_ALLOWED_ROOTS")
+        if not path.parent.is_dir():
+            raise BridgeError("Document directory does not exist: %s" % path.parent)
+        if path.is_file() and path.stat().st_size > self.max_document_bytes:
+            raise BridgeError("FreeCAD document exceeds the configured size limit")
+        return path
+
     def _output_path(self, value: str, suffixes: set[str]) -> Path:
         path = Path(value).expanduser().resolve()
         if path.suffix.lower() not in suffixes:
@@ -1164,6 +1184,7 @@ class FreecadBridge:
             },
             timeout_secs,
         )
+
     # -- recoverability -------------------------------------------------
     #
     # These four never spawn FreeCAD: an .FCStd is a self-contained archive, so
@@ -1189,11 +1210,14 @@ class FreecadBridge:
         snapshots, orphans = store.scan()
         store.ensure_capacity(snapshots, orphans, document.stat().st_size)
         entry = store.write(document, deadline=deadline, label=label)
-        # Read-back: the entry must exist at the size the copy produced. The
-        # full content hash is not recomputed here -- the copy already hashed
-        # the exact bytes it wrote, and re-reading would double the I/O of the
-        # only operation a caller might reasonably run before every mutation.
-        # A restore proves content by hashing the document afterwards.
+        # Read-back: the published file must hold as many bytes as the copy
+        # streamed. The two are independent -- ``entry["bytes"]`` is the copy's
+        # own count, not a stat of the destination -- so a truncated write is
+        # caught here rather than reported as a snapshot that restores short.
+        # The full content hash is not recomputed: the copy already hashed the
+        # exact bytes it wrote, and re-reading would double the I/O of the only
+        # operation a caller might reasonably run before every mutation. A
+        # restore proves content by hashing the document afterwards.
         stored = Path(entry["snapshot_path"])
         if not stored.is_file() or stored.stat().st_size != entry["bytes"]:
             store.discard(entry["snapshot_id"])
@@ -1232,11 +1256,18 @@ class FreecadBridge:
             if not _within(wanted, self.allowed_roots):
                 raise BridgeError("Document is outside DCC_MCP_FREECAD_ALLOWED_ROOTS")
             snapshots = [item for item in snapshots if item.get("document_path") == str(wanted)]
-        count, total = store.usage(snapshots)
+        count, snapshot_bytes = store.usage(snapshots)
+        _, total = store.usage(snapshots, orphans)
         return {
             "snapshot_store": str(store.directory),
             "snapshots": snapshots,
             "count": count,
+            # Two byte figures on purpose: ``snapshot_bytes`` is the snapshots
+            # themselves, ``total_bytes`` is what the byte limit is actually
+            # charged against -- orphan bytes included. Reporting only the
+            # former would show a total under the limit while the next call is
+            # still refused for exceeding it.
+            "snapshot_bytes": snapshot_bytes,
             "total_bytes": total,
             "max_snapshots": store.max_snapshots,
             "max_snapshot_bytes": store.max_snapshot_bytes,
@@ -1278,8 +1309,15 @@ class FreecadBridge:
         ``os.replace`` is still lost; that residual window is inherent to a
         process-per-call adapter with no lock server, and is reported rather
         than pretended away.
+
+        A missing document is accepted, not rejected. Recovering a deleted
+        document is the case snapshots exist for, so it would be perverse to
+        let ``list_snapshots`` find the snapshot and then refuse to apply it.
+        That path skips the pre-restore snapshot -- there is no state to
+        preserve -- and reports ``created_document: true`` with a null
+        ``undo_snapshot_id``, so the caller knows this restore has no undo.
         """
-        document = self._document_path(document_path)
+        document = self._restorable_document_path(document_path)
         deadline = time.monotonic() + self._timeout(timeout_secs)
         store = self._snapshot_store()
         snapshot = store.read(snapshot_id)
@@ -1294,80 +1332,114 @@ class FreecadBridge:
         os.close(descriptor)
         staged = Path(temp_name)
         staged.unlink()
+        # A deleted document is the case snapshots exist for, so restoring onto
+        # an absent path recreates it. There is then no state to preserve and
+        # nothing to be undoable about: undo_snapshot_id comes back null.
+        recreating = not document.exists()
+        undo = None
+        before_sha = None
+        # One try/finally around the whole commit phase, because every refusal
+        # below -- capacity, cancellation, an interrupted undo snapshot, a
+        # concurrent write -- would otherwise leave the stage behind. The stage
+        # sits in the user's document directory and holds a full copy of the
+        # document, so leaking it there is not a cosmetic mess: repeated
+        # refusals would fill the user's workspace with hidden copies.
         try:
             staged_sha, staged_bytes = copy_and_hash(source, staged, deadline)
-        except BaseException:
+            if staged_sha != snapshot_sha:
+                raise SnapshotError(
+                    ERROR_CONTENT_MISMATCH,
+                    "Snapshot %s no longer holds the bytes it was created with "
+                    "(recorded %s, read %s)" % (snapshot_id, snapshot_sha, staged_sha),
+                    remediation=[
+                        "Restore a different snapshot; this one cannot be trusted.",
+                        "Call delete_snapshot to remove the damaged entry from %s."
+                        % store.directory,
+                    ],
+                    snapshot_id=snapshot_id,
+                    expected_sha256=snapshot_sha,
+                    document_sha256=staged_sha,
+                )
+
+            if recreating:
+                # A caller holding an expected hash believes bytes are there.
+                # Finding the path empty is that same class of surprise and is
+                # refused with the same code rather than silently recreated.
+                if expected_sha256 is not None:
+                    raise SnapshotError(
+                        ERROR_CONFLICT,
+                        "Document does not exist, but the caller passed expected_sha256 "
+                        "%s; restore_snapshot refused to create it over that expectation"
+                        % expected_sha256.lower(),
+                        remediation=[
+                            "Retry without expected_sha256 to recreate the deleted "
+                            "document from this snapshot.",
+                            "Or restore onto a different path to keep the expectation.",
+                        ],
+                        snapshot_id=snapshot_id,
+                        expected_sha256=expected_sha256.lower(),
+                        document_sha256=None,
+                        conflict="document_missing",
+                    )
+            else:
+                before_sha = sha256_file(document)
+                if expected_sha256 is not None and not sha256_equal(expected_sha256, before_sha):
+                    raise SnapshotError(
+                        ERROR_CONFLICT,
+                        "Document changed after the caller read it, so restore_snapshot "
+                        "refused to overwrite it (expected %s, found %s)"
+                        % (expected_sha256.lower(), before_sha),
+                        remediation=[
+                            "Re-read the document, then retry with its current document_sha256.",
+                            "To discard the new state anyway, retry without expected_sha256.",
+                            "To keep both, save_copy the current document before restoring.",
+                        ],
+                        snapshot_id=snapshot_id,
+                        expected_sha256=expected_sha256.lower(),
+                        document_sha256=before_sha,
+                        conflict="expected_sha256",
+                    )
+
+            if not recreating:
+                snapshots, orphans = store.scan()
+                store.ensure_capacity(snapshots, orphans, document.stat().st_size)
+                check_dcc_cancelled()
+                undo = store.write(
+                    document,
+                    deadline=deadline,
+                    label="Before restoring %s" % snapshot_id,
+                    origin=PRE_RESTORE_ORIGIN,
+                    restored_snapshot_id=snapshot_id,
+                )
+                confirm_sha = sha256_file(document)
+                if confirm_sha != before_sha:
+                    # The pre-restore copy was overtaken mid-flight, so it does
+                    # not describe any single state of the document. Discard it
+                    # and refuse: a restore with no trustworthy undo is worse
+                    # than no restore.
+                    store.discard(undo["snapshot_id"])
+                    raise SnapshotError(
+                        ERROR_CONFLICT,
+                        "Document changed while its pre-restore snapshot was being "
+                        "taken, so restore_snapshot replaced nothing (read %s, then %s)"
+                        % (before_sha, confirm_sha),
+                        remediation=[
+                            "Retry restore_snapshot; nothing was changed.",
+                            "If another process is writing the document, stop it and retry.",
+                        ],
+                        snapshot_id=snapshot_id,
+                        expected_sha256=(
+                            expected_sha256.lower() if expected_sha256 else before_sha
+                        ),
+                        document_sha256=confirm_sha,
+                        conflict="concurrent_write",
+                    )
+
+            os.replace(str(staged), str(document))
+        finally:
+            # os.replace consumed the stage on the success path.
             if staged.exists():
                 staged.unlink()
-            raise
-        if staged_sha != snapshot_sha:
-            staged.unlink()
-            raise SnapshotError(
-                ERROR_CONTENT_MISMATCH,
-                "Snapshot %s no longer holds the bytes it was created with (recorded %s, "
-                "read %s)" % (snapshot_id, snapshot_sha, staged_sha),
-                remediation=[
-                    "Restore a different snapshot; this one cannot be trusted.",
-                    "Call delete_snapshot to remove the damaged entry from %s."
-                    % store.directory,
-                ],
-                snapshot_id=snapshot_id,
-                expected_sha256=snapshot_sha,
-                document_sha256=staged_sha,
-            )
-
-        before_sha = sha256_file(document)
-        if expected_sha256 is not None and not sha256_equal(expected_sha256, before_sha):
-            staged.unlink()
-            raise SnapshotError(
-                ERROR_CONFLICT,
-                "Document changed after the caller read it, so restore_snapshot refused "
-                "to overwrite it (expected %s, found %s)"
-                % (expected_sha256.lower(), before_sha),
-                remediation=[
-                    "Re-read the document, then retry with its current document_sha256.",
-                    "To discard the new state anyway, retry without expected_sha256.",
-                    "To keep both, save_copy the current document before restoring.",
-                ],
-                snapshot_id=snapshot_id,
-                expected_sha256=expected_sha256.lower(),
-                document_sha256=before_sha,
-                conflict="expected_sha256",
-            )
-
-        snapshots, orphans = store.scan()
-        store.ensure_capacity(snapshots, orphans, document.stat().st_size)
-        check_dcc_cancelled()
-        undo = store.write(
-            document,
-            deadline=deadline,
-            label="Before restoring %s" % snapshot_id,
-            origin=PRE_RESTORE_ORIGIN,
-            restored_snapshot_id=snapshot_id,
-        )
-        confirm_sha = sha256_file(document)
-        if confirm_sha != before_sha:
-            # The pre-restore copy was overtaken mid-flight, so it does not
-            # describe any single state of the document. Discard it and refuse:
-            # a restore with no trustworthy undo is worse than no restore.
-            store.discard(undo["snapshot_id"])
-            staged.unlink()
-            raise SnapshotError(
-                ERROR_CONFLICT,
-                "Document changed while its pre-restore snapshot was being taken, so "
-                "restore_snapshot replaced nothing (read %s, then %s)"
-                % (before_sha, confirm_sha),
-                remediation=[
-                    "Retry restore_snapshot; nothing was changed.",
-                    "If another process is writing the document, stop it and retry.",
-                ],
-                snapshot_id=snapshot_id,
-                expected_sha256=expected_sha256.lower() if expected_sha256 else before_sha,
-                document_sha256=confirm_sha,
-                conflict="concurrent_write",
-            )
-
-        os.replace(str(staged), str(document))
         after_sha = sha256_file(document)
         if after_sha != snapshot_sha:
             raise verification_failure(
@@ -1377,7 +1449,11 @@ class FreecadBridge:
                 after_sha,
                 "The document was replaced but does not match the snapshot. Re-run "
                 "restore_snapshot, or restore %s to return to the pre-restore state."
-                % undo["snapshot_id"],
+                % (
+                    undo["snapshot_id"]
+                    if undo
+                    else "(no undo snapshot: the document did not exist)"
+                ),
             )
         return {
             "document_path": str(document),
@@ -1387,8 +1463,11 @@ class FreecadBridge:
             "restored_sha256": after_sha,
             "snapshot_id": snapshot_id,
             "replaced_document_sha256": before_sha,
-            "undo_snapshot_id": undo["snapshot_id"],
-            "undo_snapshot_label": undo.get("label"),
+            # Null only when the document had been deleted: there was no state
+            # to preserve, so this restore has nothing to undo.
+            "undo_snapshot_id": undo["snapshot_id"] if undo else None,
+            "undo_snapshot_label": undo.get("label") if undo else None,
+            "created_document": recreating,
             "snapshot_document_path": snapshot.get("document_path"),
             # Restoring a snapshot taken from a different document is allowed --
             # "make B look like A" is a real workflow -- but never silently.
@@ -1396,7 +1475,7 @@ class FreecadBridge:
             "snapshot_store": str(store.directory),
             "verified": [
                 "snapshot_bytes_before_replace",
-                "pre_restore_snapshot",
+                "pre_restore_snapshot" if undo else "no_state_to_preserve",
                 "document_sha256_after_restore",
             ],
         }
