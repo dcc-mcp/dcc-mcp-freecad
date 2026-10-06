@@ -44,6 +44,8 @@ Re-run the generator after changing the catalog.
   that refuses a radius or distance the adjacent faces cannot absorb.
 - Build linear and polar patterns (up to 1000 instances) and mirror a solid
   across a base plane.
+- Create bounded TechDraw 2D drawing pages (isometric, front, top, right) and
+  export them to PDF or SVG.
 - Return object links, placements, shape/mesh topology counts, volume, area,
   bounding boxes, file size, and SHA-256 provenance.
 
@@ -141,11 +143,16 @@ dcc-mcp-cli search --query "FreeCAD create boolean export STEP"
 dcc-mcp-cli load-skill freecad-session --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modeling --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modify --dcc-type freecad --instance-id <instance-short>
+dcc-mcp-cli load-skill freecad-drawing --dcc-type freecad --instance-id <instance-short>
 ```
 
 Typical sequence: `create_document` → `add_primitive` → `transform_object` →
 `boolean_operation` → `fillet_edges` → `linear_pattern` → `validate_document` →
 `export_geometry`.
+
+To document the geometry as a 2D drawing, continue with
+`create_drawing_page` → `export_drawing`. See
+[2D drawing pages](docs/drawing.md).
 
 ## Safety contract
 
@@ -164,6 +171,9 @@ Typical sequence: `create_document` → `add_primitive` → `transform_object` �
 - Failed mutations leave the original document byte-for-byte unchanged.
 - Object names, dimensional fields, placements, formats, tessellation, result
   size, process output, and deadlines are bounded.
+- Drawing pages are bounded too: at most 100 sources and 8 views per page, and a
+  page name short enough that its template and view objects stay inside FreeCAD's
+  own name limit.
 - Cancellation and timeouts terminate the owned FreeCADCmd process.
 - Cascade removal is explicit and reports every removed dependent.
 

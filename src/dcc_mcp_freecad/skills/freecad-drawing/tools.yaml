@@ -1,0 +1,72 @@
+tools:
+  - name: create_drawing_page
+    description: Add a bounded TechDraw page with one isometric, front, top, or right view per requested direction and an auto-fitted or explicit scale.
+    source_file: scripts/create_drawing_page.py
+    input_schema:
+      type: object
+      required: [document_path, object_names]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_names: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}}
+        template:
+          type: string
+          minLength: 1
+          maxLength: 512
+          default: A4_Landscape
+          description: Built-in template name (A4_Landscape or A4_Portrait) or a path to an .svg template file under the allowed roots. A template with no usable width/height is refused.
+        views:
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          items: {type: string, enum: [isometric, front, top, right]}
+          default: [isometric, front, top, right]
+          description: Projection directions, laid out left to right, top row first.
+        scale:
+          type: number
+          exclusiveMinimum: 0
+          description: Explicit drawing scale. Omit to auto-fit the largest standard scale every view fits into; the scale actually used is returned.
+        page_name:
+          type: string
+          minLength: 1
+          maxLength: 48
+          pattern: '^[A-Za-z_][A-Za-z0-9_]{0,47}$'
+          description: Name for the page object. Defaults to the first free Page<n>. An existing name is refused.
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", object_names: [BodyWithPort], views: [isometric, front, top]}
+      - arguments: {document_path: "projects/enclosure.FCStd", object_names: [BodyWithPort], page_name: DrawingPage, scale: 0.5, template: A4_Portrait}
+    next-tools: {on-success: [inspect_document, export_drawing], on-failure: [inspect_document]}
+
+  - name: export_drawing
+    description: Render one TechDraw page to PDF or SVG, proving the artefact is non-empty and parses back to the expected page.
+    source_file: scripts/export_drawing.py
+    input_schema:
+      type: object
+      required: [document_path, page_name, output_path]
+      properties:
+        document_path: {type: string, minLength: 1}
+        page_name: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+        output_path: {type: string, minLength: 1, description: Destination ending in .pdf or .svg, under the allowed roots.}
+        overwrite: {type: boolean, default: false}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 600}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", page_name: Page1, output_path: "build/enclosure.pdf"}
+      - arguments: {document_path: "projects/enclosure.FCStd", page_name: Page1, output_path: "build/enclosure.svg", overwrite: true}
+    next-tools: {on-success: [inspect_document], on-failure: [inspect_document, get_status]}

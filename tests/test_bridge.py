@@ -56,7 +56,13 @@ class FakeFreecad(FreecadBridge):
         if method == "model.export_geometry":
             Path(params["output_path"]).write_bytes(b"geometry")
             return {"format": Path(params["output_path"]).suffix[1:]}
-        if method.startswith("model.") or method == "document.remove_object":
+        if method == "drawing.export":
+            Path(params["output_path"]).write_bytes(b"%PDF-1.4 fake drawing")
+            return {"format": Path(params["output_path"]).suffix[1:], "pages": 1}
+        if method.startswith("model.") or method in (
+            "document.remove_object",
+            "drawing.create_page",
+        ):
             document = Path(params["document_path"])
             document.write_bytes(document.read_bytes() + b"-mutated")
             document.with_name("%s.20260811-020000.FCBak" % document.stem).write_bytes(b"backup")
@@ -444,6 +450,117 @@ def test_a_failed_fallback_leaves_no_fragment_on_a_read_only_stage(
 
     assert not output.exists(), "a failed publication must not leave a fragment"
     assert source.read_bytes() == b"known-good"
+
+
+def test_capabilities_report_2d_drawing_as_host_limited_without_a_host_probe(tmp_path: Path):
+    """A host that cannot do 2D drawing must say so before the first call.
+
+    The fake host answers nothing about drawing, which is exactly what an older
+    or GUI-less FreeCAD looks like across the process boundary.
+    """
+    capabilities = FakeFreecad(tmp_path).capabilities()
+
+    assert "create_drawing_page" in capabilities["methods"]
+    assert "export_drawing" in capabilities["methods"]
+    assert capabilities["drawing"]["status"] == "host_limited"
+    assert capabilities["drawing"]["views"] == ["front", "isometric", "right", "top"]
+    assert capabilities["drawing"]["templates"] == ["A4_Landscape", "A4_Portrait"]
+    assert capabilities["drawing"]["extensions"] == [".pdf", ".svg"]
+
+
+def test_capabilities_pass_a_ready_drawing_probe_through(tmp_path: Path):
+    bridge = FakeFreecad(tmp_path)
+    original = bridge._invoke
+
+    def native(method, params, _timeout):
+        result = original(method, params, _timeout)
+        if method == "system.status":
+            result["drawing"] = {"status": "available", "reason": None}
+        return result
+
+    bridge._invoke = native
+
+    assert bridge.capabilities()["drawing"]["status"] == "available"
+
+
+def test_capabilities_report_host_limited_when_freecad_is_missing(tmp_path: Path):
+    bridge = FakeFreecad(tmp_path)
+    bridge.executable = None
+    bridge.execute = None
+
+    capabilities = bridge.capabilities()
+
+    assert capabilities["status"]["ready"] is False
+    assert capabilities["drawing"]["status"] == "host_limited"
+    assert capabilities["drawing"]["reason"]
+
+
+def test_create_drawing_page_bounds_its_selection(tmp_path: Path):
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+
+    with pytest.raises(BridgeError, match="between 1 and 100"):
+        bridge.create_drawing_page(str(document), [])
+    with pytest.raises(BridgeError, match="Object names must start with a letter"):
+        bridge.create_drawing_page(str(document), ["9Bad"])
+
+
+def test_create_drawing_page_bounds_its_page_name(tmp_path: Path):
+    """The page name also names its template and views, so it is shorter still."""
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+
+    with pytest.raises(BridgeError, match="page_name must be between 1 and 48"):
+        bridge.create_drawing_page(str(document), ["Body"], page_name="P" * 49)
+    with pytest.raises(BridgeError, match="Object names must start with a letter"):
+        bridge.create_drawing_page(str(document), ["Body"], page_name="9Page")
+
+
+def test_export_drawing_shares_the_geometry_output_contract(tmp_path: Path):
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+    output = tmp_path / "drawing.pdf"
+
+    with pytest.raises(BridgeError, match="Unsupported output extension"):
+        bridge.export_drawing(str(document), "Page1", str(tmp_path / "drawing.png"))
+
+    result = bridge.export_drawing(str(document), "Page1", str(output))
+    assert result["bytes"] == output.stat().st_size
+    assert len(result["sha256"]) == 64
+    assert result["overwritten"] is False
+
+    with pytest.raises(BridgeError, match="already exists"):
+        bridge.export_drawing(str(document), "Page1", str(output))
+
+    again = bridge.export_drawing(str(document), "Page1", str(output), overwrite=True)
+    assert again["overwritten"] is True
+
+
+def test_export_drawing_stays_inside_the_allowed_roots(tmp_path: Path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    document = allowed / "model.FCStd"
+    document.write_bytes(b"known-good")
+    outside = tmp_path / "outside.pdf"
+
+    with pytest.raises(BridgeError, match="outside"):
+        FakeFreecad(allowed).export_drawing(str(document), "Page1", str(outside))
+
+
+def test_export_drawing_accepts_pdf_and_svg_only(tmp_path: Path):
+    """The extension gate is what keeps a rendered artefact off a stray path."""
+    document = tmp_path / "model.FCStd"
+    document.write_bytes(b"known-good")
+    bridge = FakeFreecad(tmp_path)
+
+    for name in ("drawing.pdf", "drawing.svg"):
+        assert bridge.export_drawing(str(document), "Page1", str(tmp_path / name))["format"]
+    for name in ("drawing.dxf", "drawing"):
+        with pytest.raises(BridgeError, match="Unsupported output extension"):
+            bridge.export_drawing(str(document), "Page1", str(tmp_path / name))
 
 
 def _real_freecad() -> str:

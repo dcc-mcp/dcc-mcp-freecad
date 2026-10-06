@@ -51,6 +51,8 @@ For **every** tool that changes a document or writes a file:
 | `export_geometry` | artefact exists and is non-empty; **and** can be read back into the geometry it came from (solid count and volume for CAD formats; point/facet count and bounding-box containment for meshes) |
 | `save_copy` | copy exists and is non-empty; copy reopens with the same object inventory |
 | `create_document` | the document file exists and is non-empty |
+| `create_drawing_page` | page exists with the right `TypeId` and is wired to its template; the page lists exactly the views that were added; every view has the requested `TypeId`, sources, projection direction, scale and page position; and each view has actually projected something |
+| `export_drawing` | artefact exists and is non-empty; **and** parses back into the page it came from (a PDF declares exactly one page; an SVG parses with an `svg` root element) |
 
 Two of these deserve a note.
 
@@ -66,6 +68,12 @@ on the surface it was given, so an exported mesh cannot leave its source's
 bounding box. An export of the wrong object -- or of nothing -- shows up here as
 a box that escaped. This catches "wrote a plausible-looking file" without
 recomputing the source geometry.
+
+**Parsing the artefact, not just stat-ing it.** A drawing export is the one
+family of tools here whose output is a file no later call reads back into the
+model, so `artifact.non_empty` alone would let a blank render through. The PDF
+page count and the SVG root element are cheap to parse and are the difference
+between "a file was written" and "the page was drawn".
 
 ## Comparing floats
 
