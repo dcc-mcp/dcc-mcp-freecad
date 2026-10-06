@@ -19,7 +19,7 @@ import pytest
 from e2e_support.artifacts import Evidence, digest
 from e2e_support.cleanup import close_owned
 from e2e_support.client import session_flow
-from e2e_support.failure import validate_failure
+from e2e_support.failure import native_output_summary, validate_failure
 from e2e_support.rejection import native_shape_rejection
 
 from dcc_mcp_freecad import bridge as bridge_module
@@ -75,11 +75,12 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
     monkeypatch.delenv("DCC_MCP_SKILL_PATHS", raising=False)
     children = []
     native_rejections = []
+    native_output = []
     original_invoke = FreecadBridge._invoke
 
     def observed_invoke(bridge, method, params, timeout_secs=120):
         try:
-            return original_invoke(bridge, method, params, timeout_secs)
+            result = original_invoke(bridge, method, params, timeout_secs)
         except WriteVerificationError as error:
             native_rejections.append(
                 {
@@ -90,6 +91,14 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
                 }
             )
             raise
+        native_output.append(
+            {
+                "child_number": len(children),
+                "method": method,
+                "streams": native_output_summary(result),
+            }
+        )
+        return result
 
     monkeypatch.setattr(FreecadBridge, "_invoke", observed_invoke)
     admission = {"open": True}
@@ -290,6 +299,10 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
         normal = bool(terminal) and all(
             t["returncode"] == 0 and not t["cleanup_termination"] for t in terminal
         )
+        if not error_type and not normal:
+            evidence.stage = "native-terminal-check"
+        elif not error_type and not all(cleanup.values()):
+            evidence.stage = "owned-cleanup-check"
         report.update(
             status="PASS"
             if report["status"] == "PASS" and not error_type and normal and all(cleanup.values())
@@ -298,6 +311,7 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
             error_type=error_type,
             cleanup=cleanup,
             native_children=terminal,
+            native_output_diagnostics=native_output,
         )
         evidence.report(report)
     assert report["status"] == "PASS", (

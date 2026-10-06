@@ -10,6 +10,46 @@ from e2e_support.pixels import colored_geometry
 from e2e_support.rejection import native_shape_rejection
 
 
+def test_native_output_classification_preserves_input_and_omits_private_text():
+    import json
+
+    from e2e_support.failure import native_output_summary
+
+    result = {
+        "stdout": "unrecognized private message /private/project.FCStd user@example.invalid",
+        "stderr": (
+            "Program received signal SIGSEGV, Segmentation fault.\n"
+            "#0 0x123 in QWidget::~QWidget from /private/host/libQt6Widgets.so+0x55\n"
+        ),
+        "stderr_truncated": True,
+    }
+    before = deepcopy(result)
+    output = native_output_summary(result)
+    assert result == before
+    assert output[0]["markers"] == output[0]["components"] == []
+    assert output[1]["markers"] == ["freecad_sigsegv"]
+    assert output[1]["components"] == ["libQt6Widgets.so", "QWidget::~QWidget"]
+    assert output[1]["truncated"] is True
+    assert output[0]["characters"] == len(result["stdout"])
+    for private in ("private", "example.invalid", "0x123", "0x55", "project.FCStd"):
+        assert private not in json.dumps(output)
+
+
+@pytest.mark.parametrize("returncode", [1, -11])
+def test_nonzero_native_exit_remains_nonzero_without_known_diagnostic_marker(returncode):
+    from e2e_support.cleanup import close_owned
+    from e2e_support.failure import native_output_summary
+
+    handle = SimpleNamespace(signal_shutdown=lambda: None, shutdown=lambda: None)
+    server = SimpleNamespace(stop=lambda: None, is_running=False)
+    process = SimpleNamespace(poll=lambda: returncode, wait=lambda timeout: returncode)
+    summary = native_output_summary({"stderr": "unknown native failure"})
+    assert summary[1]["markers"] == []
+    _, terminal = close_owned(server, handle, [("document.save_copy", process)])
+    assert terminal[0]["returncode"] == returncode
+    assert terminal[0]["cleanup_termination"] is False
+
+
 def image(kind, width=128, height=128, blue=(51, 140, 204)):
     output = bytearray([255, 255, 255, 255] * (width * height))
     for y in range(height):
