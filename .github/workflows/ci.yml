@@ -116,11 +116,13 @@ jobs:
         if: always()
         run: python3 .github/scripts/verify-freecad-run.py freecad-gui-${{ matrix.freecad_version }}.xml 38
       - name: Install pinned SDK and software-rendered display
+        if: ${{ !cancelled() }}
         run: |
           python -m pip install "dcc-mcp-core==0.20.41" "mcp==1.30.0" "httpx==0.28.1"
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y xvfb xauth libgl1 libxkbcommon-x11-0 libxcb-xinerama0 libxcb-cursor0
       - name: Real MCP discovery, modeling, appearance and native PNG
+        if: ${{ !cancelled() }}
         env:
           QT_QPA_PLATFORM: xcb
           LIBGL_ALWAYS_SOFTWARE: "1"

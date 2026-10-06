@@ -19,7 +19,12 @@ import pytest
 from e2e_support.artifacts import Evidence, digest
 from e2e_support.cleanup import close_owned
 from e2e_support.client import session_flow
-from e2e_support.failure import native_output_summary, validate_failure
+from e2e_support.failure import (
+    native_exception_output,
+    native_output_summary,
+    observed_result_directory,
+    validate_failure,
+)
 from e2e_support.rejection import native_shape_rejection
 
 from dcc_mcp_freecad import bridge as bridge_module
@@ -76,18 +81,28 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
     children = []
     native_rejections = []
     native_output = []
+    native_results = []
+    pending_results = {}
     original_invoke = FreecadBridge._invoke
 
     def observed_invoke(bridge, method, params, timeout_secs=120):
         try:
             result = original_invoke(bridge, method, params, timeout_secs)
-        except WriteVerificationError as error:
-            native_rejections.append(
+        except BaseException as error:
+            if isinstance(error, WriteVerificationError):
+                native_rejections.append(
+                    {
+                        "error_type": type(error).__name__,
+                        "method": method,
+                        "payload": deepcopy(error.payload),
+                        "message": str(error),
+                    }
+                )
+            native_output.append(
                 {
-                    "error_type": type(error).__name__,
+                    "child_number": len(children),
                     "method": method,
-                    "payload": deepcopy(error.payload),
-                    "message": str(error),
+                    "streams": native_exception_output(error, original_invoke.__code__),
                 }
             )
             raise
@@ -111,11 +126,18 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
         request = json.loads(Path(command[-2]).read_text(encoding="utf-8"))
         process = original_process_module.Popen(command, **kwargs)
         children.append((request["method"], process))
+        pending_results[str(Path(command[-1]).parent)] = (len(children), request["method"], process)
         return process
 
     process_module = SimpleNamespace(**vars(original_process_module))
     process_module.Popen = recorded_popen
     monkeypatch.setattr(bridge_module, "subprocess", process_module)
+    original_temp_module = bridge_module.tempfile
+    temp_module = SimpleNamespace(**vars(original_temp_module))
+    temp_module.TemporaryDirectory = lambda *args, **kwargs: observed_result_directory(
+        original_temp_module.TemporaryDirectory, pending_results, native_results, *args, **kwargs
+    )
+    monkeypatch.setattr(bridge_module, "tempfile", temp_module)
     report = {
         "status": "FAIL",
         "host_version": version,
@@ -299,19 +321,30 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
         normal = bool(terminal) and all(
             t["returncode"] == 0 and not t["cleanup_termination"] for t in terminal
         )
+        diagnostics_ok = len(native_results) == len(children) and all(
+            row["returncode"] is not None and row["result"]["state"] in {"ok", "error"}
+            for row in native_results
+        )
         if not error_type and not normal:
             evidence.stage = "native-terminal-check"
         elif not error_type and not all(cleanup.values()):
             evidence.stage = "owned-cleanup-check"
+        elif not error_type and not diagnostics_ok:
+            evidence.stage = "native-diagnostic-check"
         report.update(
             status="PASS"
-            if report["status"] == "PASS" and not error_type and normal and all(cleanup.values())
+            if report["status"] == "PASS"
+            and not error_type
+            and normal
+            and all(cleanup.values())
+            and diagnostics_ok
             else "FAIL",
             failed_stage=evidence.stage,
             error_type=error_type,
             cleanup=cleanup,
             native_children=terminal,
             native_output_diagnostics=native_output,
+            native_result_observations=native_results,
         )
         evidence.report(report)
     assert report["status"] == "PASS", (

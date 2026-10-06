@@ -10,6 +10,170 @@ from e2e_support.pixels import colored_geometry
 from e2e_support.rejection import native_shape_rejection
 
 
+def test_failed_bridge_observation_uses_only_its_already_captured_strings():
+    import json
+
+    from e2e_support.failure import native_exception_output
+
+    original = RuntimeError("private original operation failure")
+
+    def invoke():
+        stdout = "private banner /private/workspace"  # noqa: F841
+        stderr = (  # noqa: F841
+            "Program received signal SIGSEGV, Segmentation fault.\n"
+            "#0 0x123 in Gui::MainWindow::closeEvent(QCloseEvent*) "
+            "from /private/user/libFreeCADGui.so+0x456\n"
+        )
+        raise original
+
+    try:
+        invoke()
+    except RuntimeError as error:
+        trace = error.__traceback__
+        summary = native_exception_output(error, invoke.__code__)
+        assert native_exception_output(error, image.__code__) == []
+        assert error is original and error.__traceback__ is trace
+        assert str(error) == "private original operation failure"
+    assert summary[1]["markers"] == ["freecad_sigsegv"]
+    assert summary[1]["backtrace"] == [
+        {"library": "libFreeCADGui.so", "symbol": "Gui::MainWindow::closeEvent"}
+    ]
+    for hidden in ("private", "workspace", "0x123", "0x456", "QCloseEvent*"):
+        assert hidden not in json.dumps(summary)
+
+
+def test_backtrace_omits_unrecognized_symbols_libraries_arguments_and_addresses():
+    import json
+
+    from e2e_support.failure import public_backtrace
+
+    text = (
+        "#0 0x123 in SecretProject::Customer() from /private/libFreeCADGui.so+0x9\n"
+        "#1 0x456 in Gui::MainWindow::event(private_argument) from /private/secret.so+0x9\n"
+        "#2 0x789 in QWidget::event(private_argument) from /private/libQt6Widgets.so.6+0x9\n"
+    )
+    value = public_backtrace(text)
+    assert value == [
+        {"library": "libFreeCADGui.so", "symbol": None},
+        {"library": "libQt6Widgets.so", "symbol": "QWidget::event"},
+    ]
+    assert "private" not in json.dumps(value) and "SecretProject" not in json.dumps(value)
+    assert len(public_backtrace(text * 100)) == 32
+
+
+def test_truncated_failed_frame_keeps_original_error_and_marks_bounded_output():
+    from e2e_support.failure import native_exception_output
+
+    original = RuntimeError("original native failure")
+
+    def invoke():
+        stdout = "o" * 65537  # noqa: F841
+        stderr = "e" * 65537  # noqa: F841
+        raise original
+
+    try:
+        invoke()
+    except RuntimeError as error:
+        trace = error.__traceback__
+        summary = native_exception_output(error, invoke.__code__)
+        assert error is original and error.__traceback__ is trace
+        assert str(error) == "original native failure"
+        frame = trace.tb_next.tb_frame
+        assert len(frame.f_locals["stdout"]) == len(frame.f_locals["stderr"]) == 65537
+    assert [item["characters"] for item in summary] == [65536, 65536]
+    assert all(item["truncated"] for item in summary)
+
+
+@pytest.mark.parametrize(
+    "kind", ["absent", "invalid_json", "oversized", "invalid_shape", "ok", "error"]
+)
+def test_native_result_metadata_is_bounded_and_omits_messages(tmp_path, kind):
+    import json
+
+    from e2e_support.failure import native_result_summary
+
+    path = tmp_path / "result.json"
+    if kind == "invalid_json":
+        path.write_text("{")
+    elif kind == "oversized":
+        path.write_text("x" * (1024 * 1024 + 1))
+    elif kind == "invalid_shape":
+        path.write_text('{"ok": 1}')
+    elif kind in ("ok", "error"):
+        path.write_text(
+            json.dumps(
+                {
+                    "ok": kind == "ok",
+                    "result": {"private": "/private/model"},
+                    "error": {
+                        "type": "ValueError",
+                        "message": "private primary error",
+                        "gui_cleanup_error": {
+                            "type": "RuntimeError",
+                            "message": "Native GUI refused to close its main window",
+                        },
+                    },
+                }
+            )
+        )
+    value = native_result_summary(path)
+    assert value["state"] == kind
+    if kind == "error":
+        assert value["primary"] == {"type": "ValueError", "cleanup_marker": None}
+        assert value["cleanup"] == {"type": "RuntimeError", "cleanup_marker": "close_refused"}
+    assert "private" not in json.dumps(value)
+
+
+@pytest.mark.parametrize("read_failure", [False, True])
+def test_result_observation_keeps_primary_exception_and_original_directory_cleanup(
+    tmp_path, monkeypatch, read_failure
+):
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from e2e_support import failure
+
+    pending, records = {}, []
+    primary = RuntimeError("original failure")
+    if read_failure:
+
+        def fail_read(path):
+            raise OSError("private read failure")
+
+        monkeypatch.setattr(failure, "native_result_summary", fail_read)
+    with pytest.raises(RuntimeError) as caught:
+        with failure.observed_result_directory(
+            tempfile.TemporaryDirectory, pending, records, dir=str(tmp_path)
+        ) as directory:
+            root = Path(directory)
+            pending[directory] = (1, "document.save_copy", SimpleNamespace(returncode=1))
+            (root / "result.json").write_text(json.dumps({"ok": True, "result": {}}))
+            raise primary
+    assert caught.value is primary and not root.exists() and not pending
+    assert records[0]["returncode"] == 1
+    assert records[0]["result"]["state"] == ("observation_error" if read_failure else "ok")
+    assert "private" not in str(records)
+
+
+def test_result_observation_never_reads_files_or_polls_an_unfinished_child(tmp_path, monkeypatch):
+    import tempfile
+
+    from e2e_support import failure
+
+    def forbidden(*args):
+        raise AssertionError("active process observation is forbidden")
+
+    monkeypatch.setattr(failure, "native_result_summary", forbidden)
+    pending, records = {}, []
+    process = SimpleNamespace(returncode=None, poll=forbidden, wait=forbidden)
+    with failure.observed_result_directory(
+        tempfile.TemporaryDirectory, pending, records, dir=str(tmp_path)
+    ) as directory:
+        pending[directory] = (1, "document.save_copy", process)
+    assert records[0]["result"] == {"state": "not_terminal"}
+
+
 def test_native_output_classification_preserves_input_and_omits_private_text():
     import json
 
