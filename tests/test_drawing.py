@@ -332,6 +332,16 @@ class _Object:
         object.__setattr__(self, key, value)
 
     def addView(self, view):
+        """Model ``DrawPage::addView``, which re-centres a new ownerless view.
+
+        Real FreeCAD puts every view with no parent in the middle of the page and
+        drops its ScaleType back to Automatic. The adapter has to apply its own
+        layout over that, so the fake imposes it too: without this, every view
+        in a multi-view page would silently stack on top of every other one.
+        """
+        view.X = 148.5
+        view.Y = 105.0
+        view.ScaleType = "Automatic"
         self.Views.append(view)
 
 
@@ -546,6 +556,26 @@ def test_create_page_reports_the_checks_it_ran(host, tmp_path):
         "view.front.position",
         "view.front.projected",
     ):
+        assert check in result["verified"], check
+
+
+def test_create_page_overrides_the_host_re_centring_of_a_new_view(host, tmp_path):
+    """Every view in a page has to land where it was laid out, not stacked.
+
+    ``DrawPage::addView`` re-centres a view that has no owner and drops its
+    ScaleType, so a naive "set X and Y, then add the view" produces a page where
+    all the views sit on top of each other in the middle.
+    """
+    _doc, path = _with_body(host, tmp_path)
+
+    result = freecad_driver.drawing_create_page(
+        {"document_path": path, "object_names": ["Body"], "views": ["front", "top", "right"]}
+    )
+
+    positions = [(item["x_mm"], item["y_mm"]) for item in result["views"]]
+    assert len(set(positions)) == 3, "the host re-centring was not overridden"
+    assert all(scale == result["scale"] for scale in (item["scale"] for item in result["views"]))
+    for check in ("view.front.position", "view.top.position", "view.right.position"):
         assert check in result["verified"], check
 
 

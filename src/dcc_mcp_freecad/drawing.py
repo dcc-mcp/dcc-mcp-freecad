@@ -511,9 +511,18 @@ def create_page(doc, params, read_back, app):
         view.XDirection = app.Vector(*x_direction)
         view.ScaleType = "Custom"
         view.Scale = scale
+        page.addView(view)
+        # Position and scale are applied again *after* the view joins the page.
+        # DrawPage::addView re-centres every new view that has no owner, and
+        # drops ScaleType back to "Automatic" when the view does not fit the
+        # page as first added. Neither is a rejection of the request -- both are
+        # the host imposing its own layout -- so they are applied over rather
+        # than refused. The read-back below is what proves they then stuck.
+        view.LockPosition = True
+        view.ScaleType = "Custom"
+        view.Scale = scale
         view.X = centers[index][0]
         view.Y = centers[index][1]
-        page.addView(view)
         created.append((view_name, name, direction, x_direction, centers[index]))
     # Saved before any read-back: a page that only exists in memory is not a
     # page the caller can export from a later process.
