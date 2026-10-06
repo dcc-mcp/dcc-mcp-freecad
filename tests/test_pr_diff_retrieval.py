@@ -104,10 +104,20 @@ def test_http_get_catches_timeouts_and_json_errors():
 
 
 def _py37_syntax_errors(path):
+    """返回该文件在 py3.7 语法下的错误列表；无法判定时返回 None。
+
+    `ast.parse(feature_version=...)` 是 **Python 3.8 才加入** 的参数，
+    在 3.7 上调它会抛 TypeError —— 用它做 3.7 门禁时，门禁自己先在 3.7 上炸了。
+    3.7 上没有等价的语法门，此时降级为"仅解析 + PEP 604 检查"（见另一条用例），
+    不伪造结论。
+    """
     import ast
+    import inspect
+
+    if "feature_version" not in inspect.signature(ast.parse).parameters:
+        return None
 
     try:
-        # feature_version 用的是 CPython 自己的语法门，对语法兼容性是权威判定
         ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 7))
         return []
     except SyntaxError as exc:
@@ -116,7 +126,14 @@ def _py37_syntax_errors(path):
 
 @pytest.mark.parametrize("name", ["fetch_pr_diff.py", "collect_pr_context.py", "analyze.py"])
 def test_skill_scripts_parse_as_python_37(name):
-    assert _py37_syntax_errors(SKILL_SCRIPTS / name) == []
+    errors = _py37_syntax_errors(SKILL_SCRIPTS / name)
+    if errors is None:
+        # 运行在 3.7 上：该解释器本就只接受 3.7 语法，普通 parse 即是 3.7 门禁
+        import ast
+
+        ast.parse((SKILL_SCRIPTS / name).read_text(encoding="utf-8"))
+        return
+    assert errors == []
 
 
 def test_skill_scripts_avoid_pep604_unions():
