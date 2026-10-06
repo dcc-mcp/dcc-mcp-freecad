@@ -2345,6 +2345,11 @@ def drawing_export(params):
 
     tool = "drawing.export"
     version = _host_version()
+    # The GUI is started before the document is opened, so FreeCAD attaches a
+    # GUI document to it as it loads. Opening first and starting the GUI second
+    # leaves the page with no view provider to render through, because the main
+    # window does not back-fill documents that were already open.
+    _drawing_module().initialize()
     doc = _open_document(App, params["document_path"])
     try:
         doc.recompute()

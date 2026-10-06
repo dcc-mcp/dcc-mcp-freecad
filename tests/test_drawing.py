@@ -293,8 +293,9 @@ class _BoundBox:
 
 
 class _Shape:
-    def __init__(self, box=None, null=False):
+    def __init__(self, box=None, null=False, edges=4):
         self.BoundBox = box if box is not None else _BoundBox()
+        self.Edges = [object()] * edges
         self._null = null
 
     def isNull(self):
@@ -402,14 +403,25 @@ class _App:
 class FakeTechDraw(types.ModuleType):
     def __init__(self):
         super().__init__("TechDraw")
-        # What a projected view returns. Empty models the bug class: the view
-        # object was created and saved, and nothing was ever projected into it.
-        self.projection = '<g id="view"><path d="M0 0 L10 0"/></g>'
+        # Edges the hidden line removal finds for a projected shape. Zero models
+        # the bug class: the view object was created and saved, and nothing was
+        # ever projected into it.
+        self.projected_edges = 4
         self.rendered = []
 
-    def viewPartAsSvg(self, view):
-        self.rendered.append(view.Name)
-        return self.projection
+    def project(self, shape, direction):
+        self.rendered.append(tuple(direction))
+        return [_Shape(edges=self.projected_edges) for _ in range(4)]
+
+
+class FakePart(types.ModuleType):
+    def __init__(self):
+        super().__init__("Part")
+        self.compounds = 0
+
+    def makeCompound(self, shapes):
+        self.compounds += 1
+        return _Shape()
 
 
 class FakeGui(types.ModuleType):
@@ -476,6 +488,7 @@ def host(monkeypatch):
     monkeypatch.setitem(sys.modules, "FreeCADGui", gui)
     monkeypatch.setitem(sys.modules, "TechDraw", techdraw)
     monkeypatch.setitem(sys.modules, "TechDrawGui", techdraw_gui)
+    monkeypatch.setitem(sys.modules, "Part", FakePart())
     monkeypatch.setattr(freecad_driver, "host_matrix", lambda version: {"status": "supported"})
     return types.SimpleNamespace(
         app=app,
@@ -621,7 +634,7 @@ def test_create_page_refuses_a_view_that_projected_nothing(host, tmp_path):
     like to every other check.
     """
     _doc, path = _with_body(host, tmp_path)
-    host.techdraw.projection = ""
+    host.techdraw.projected_edges = 0
 
     with pytest.raises(write_contract.WriteVerificationError) as excinfo:
         freecad_driver.drawing_create_page(
@@ -630,7 +643,8 @@ def test_create_page_refuses_a_view_that_projected_nothing(host, tmp_path):
 
     error = _mismatch(excinfo)
     assert error.check == "view.front.projected"
-    assert error.expected == "a non-empty SVG projection"
+    assert error.expected == "at least one projected edge"
+    assert error.actual == 0
 
 
 def test_create_page_refuses_a_page_that_lost_its_template(host, tmp_path):
@@ -871,6 +885,42 @@ def test_export_page_refuses_an_unsupported_extension(host, tmp_path):
         freecad_driver.drawing_export(
             {"document_path": path, "page_name": "Page1", "output_path": str(tmp_path / "d.png")}
         )
+
+
+def test_export_starts_the_gui_before_it_opens_the_document(host, tmp_path):
+    """The GUI has to be up before the document is opened, not after.
+
+    FreeCAD attaches a GUI document while a file loads; starting the main
+    window afterwards does not back-fill documents that were already open, so
+    the page ends up with no view provider and the render has nothing to render
+    through.
+    """
+    doc, path = _with_body(host, tmp_path)
+    freecad_driver.drawing_create_page(
+        {"document_path": path, "object_names": ["Body"], "views": ["front"]}
+    )
+    host.gui.documents[doc.Name] = types.SimpleNamespace(activeView=lambda: None)
+    host.app.GuiUp = False
+    host.gui.main_window_calls = 0
+    opened_with_gui = []
+    original = host.app.openDocument
+
+    def openDocument(document_path):
+        opened_with_gui.append(host.app.GuiUp)
+        return original(document_path)
+
+    host.app.openDocument = openDocument
+
+    freecad_driver.drawing_export(
+        {
+            "document_path": path,
+            "page_name": "Page1",
+            "output_path": str(tmp_path / "drawing.pdf"),
+        }
+    )
+
+    assert opened_with_gui == [True], "the document must be opened with the GUI already up"
+    assert host.gui.main_window_calls == 1
 
 
 def test_export_page_does_not_save_the_document(host, tmp_path):

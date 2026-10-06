@@ -461,6 +461,7 @@ def create_page(doc, params, read_back, app):
     process. Returns the page description; every assertion that proves the page
     is really there is made by the caller through ``read_back``.
     """
+    import Part
     import TechDraw  # noqa: F401  (import is the capability gate)
 
     page_name = params.get("page_name") or _unique_name(doc, "Page")
@@ -481,6 +482,9 @@ def create_page(doc, params, read_back, app):
                 % name
             )
         sources.append(obj)
+    # One compound of every source, so the projection read-back costs one hidden
+    # line removal per view instead of one per source per view.
+    compound = Part.makeCompound([obj.Shape for obj in sources])
     box = source_box(sources)
     if box is None:
         raise ValueError("Drawing sources have no projectable geometry")
@@ -592,12 +596,22 @@ def create_page(doc, params, read_back, app):
             [getattr(stored, "X", None), getattr(stored, "Y", None)],
             "The view was saved at a different page position.",
         )
-        projected = TechDraw.viewPartAsSvg(stored)
+        # Projection is checked on the source geometry, not on the view's own
+        # rendered cache. ``TechDraw.viewPartAsSvg`` would be the obvious call,
+        # but it dereferences the view's geometry object without a null check on
+        # FreeCAD 1.0.x, where that object is not built in a console process --
+        # so the read-back segfaults the host instead of reporting anything.
+        # ``TechDraw.project`` is the same hidden line removal taken straight
+        # from the shape and the view direction, and has no view cache to be
+        # missing.
+        projected_edges = sum(
+            len(item.Edges) for item in TechDraw.project(compound, app.Vector(*direction))
+        )
         read_back.check(
-            bool(projected) and "<" in str(projected),
+            projected_edges > 0,
             "view.%s.projected" % name,
-            "a non-empty SVG projection",
-            "" if not projected else "%d characters" % len(str(projected)),
+            "at least one projected edge",
+            projected_edges,
             "The view projected no geometry, so the page would render empty.",
         )
     return {
