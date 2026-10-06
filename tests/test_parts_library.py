@@ -110,6 +110,56 @@ def test_multiple_roots_are_resolved_and_deduplicated(library: Path, tmp_path: P
     assert parsed == [library.resolve(), second.resolve()]
 
 
+@pytest.mark.parametrize("separator", [":", ";"])
+def test_a_remote_root_is_refused_whatever_the_platform_separator_is(
+    library: Path, separator: str, monkeypatch
+):
+    """A URL root must be recognised under both separator spellings.
+
+    POSIX separates entries with ``:``, which is also the character that opens
+    a URL scheme, so a plain split cut ``https://example.com`` into two
+    scheme-less halves and reported it as a missing local directory. The
+    platform the tests happen to run on is therefore not enough to cover this:
+    both separators are pinned here so a POSIX runner cannot regress it.
+    """
+    monkeypatch.setattr(os, "pathsep", separator)
+    with pytest.raises(parts_library.PartLibraryError) as excinfo:
+        parts_library.parse_library_roots(
+            separator.join([str(library), "https://example.com/parts"])
+        )
+
+    assert excinfo.value.code == parts_library.REMOTE_UNSUPPORTED
+
+
+@pytest.mark.parametrize("separator", [":", ";"])
+def test_local_roots_split_the_same_way_under_either_separator(
+    tmp_path: Path, separator: str, monkeypatch
+):
+    """The URL-aware split must not break ordinary multi-root configuration."""
+    first = tmp_path / "first-library"
+    second = tmp_path / "second-library"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(os, "pathsep", separator)
+
+    parsed = parts_library.parse_library_roots(
+        separator.join([str(first), str(second), str(first)])
+    )
+
+    assert parsed == [first.resolve(), second.resolve()]
+
+
+@pytest.mark.parametrize("separator", [":", ";"])
+def test_a_windows_drive_root_survives_the_split(tmp_path: Path, separator: str, monkeypatch):
+    """``C:\\parts`` is one root: a drive letter is not a URL scheme."""
+    monkeypatch.setattr(os, "pathsep", separator)
+
+    assert parts_library._split_roots(separator.join([r"C:\parts", r"D:\lib"])) == [
+        r"C:\parts",
+        r"D:\lib",
+    ]
+
+
 def test_environment_is_the_source_of_truth(library: Path, monkeypatch):
     monkeypatch.setenv(parts_library.ENV_LIBRARY_ROOTS, str(library))
 

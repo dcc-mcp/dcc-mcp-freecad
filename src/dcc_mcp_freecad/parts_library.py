@@ -123,11 +123,19 @@ class PartLibraryError(RuntimeError):
 def _realpath(value: str) -> str:
     """Collapse ``value`` to its real path, following symlinks.
 
+    Uses :meth:`pathlib.Path.resolve` rather than :func:`os.path.realpath`
+    because on Windows the latter is only an alias for :func:`os.path.abspath`
+    until Python 3.8 -- CPython 3.7's ``ntpath`` has no real ``realpath``, so it
+    leaves a symlink pointing out of the library unresolved and the containment
+    check passes on the link's own path. ``Path.resolve()`` goes through
+    ``_getfinalpathname`` on 3.7 and behaves the same as ``realpath`` on POSIX
+    and on later Windows versions.
+
     A module-level indirection so the symlink-escape test can simulate a link
     pointing out of the library on platforms where creating one needs
     privileges the test runner does not have.
     """
-    return os.path.realpath(value)
+    return str(Path(value).resolve())
 
 
 def _contains(root: str, candidate: str) -> bool:
@@ -147,7 +155,26 @@ def _contains(root: str, candidate: str) -> bool:
 
 
 def _split_roots(value: Optional[str]) -> List[str]:
-    return [item.strip() for item in str(value or "").split(os.pathsep) if item.strip()]
+    """Split an ``os.pathsep``-joined root list without cutting URLs in half.
+
+    POSIX separates entries with ``:``, which is also the character that
+    introduces a URL scheme, so a naive split turns ``https://example.com``
+    into ``https`` and ``//example.com``. Neither fragment matches the scheme
+    pattern, so a remote root was reported as a missing local directory instead
+    of being refused as remote. The URL alternative is matched first so a
+    remote entry survives the split intact and is refused with the right code.
+    """
+    separator = re.escape(os.pathsep)
+    scheme = r"[A-Za-z][A-Za-z0-9+.\-]*://"
+    drive = r"[A-Za-z]:[\\/]"
+    # A URL root is one token so ':' (the POSIX separator) does not cut
+    # 'https://example.com' into two scheme-less fragments, and a Windows drive
+    # root keeps its own ':' because a drive letter is not a URL scheme.
+    url = scheme + r"[^" + separator + r"]*"
+    rooted = drive + r"[^" + separator + r"]*"
+    plain = r"(?!" + scheme + r")(?!" + drive + r")[^" + separator + r"]+"
+    pattern = re.compile(url + r"|" + rooted + r"|" + plain)
+    return [item.strip() for item in pattern.findall(str(value or "")) if item.strip()]
 
 
 def _unique_roots(roots: Sequence[Path]) -> List[Path]:
