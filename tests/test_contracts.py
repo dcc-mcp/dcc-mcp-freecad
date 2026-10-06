@@ -122,12 +122,14 @@ def _host_status():
 
 
 def _served_capabilities(skills_dir=None):
+    from dcc_mcp_freecad import parts_library
     from dcc_mcp_freecad.bridge import _EXPORT_SUFFIXES, _IMPORT_SUFFIXES
 
     return capabilities.build_capabilities(
         host_status=_host_status(),
         import_extensions=_IMPORT_SUFFIXES,
         export_extensions=_EXPORT_SUFFIXES,
+        parts={"part_extensions": sorted(parts_library.PART_SUFFIXES)},
         skills_dir=skills_dir,
     )
 
@@ -137,9 +139,27 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 22
+    assert len(payload["tools"]) == len(catalog) == 24
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
+
+
+def test_advertised_limits_match_what_the_driver_enforces():
+    """The limits get_capabilities reports are the limits the driver refuses on.
+
+    These are the keys a caller reads before it decides how to batch work, so a
+    number that disagrees with the driver sends the caller into a rejection it
+    was told it could not hit. They are derived from the same schemas the
+    driver is held to, and derived independently of the driver constants so a
+    change on either side has to show up here.
+    """
+    driver = (ROOT / "src" / "dcc_mcp_freecad" / "freecad_driver.py").read_text(encoding="utf-8")
+    payload = _served_capabilities()
+
+    assert "MAX_EDGE_REFS = %d" % payload["max_edge_refs"] in driver
+    assert "MAX_PATTERN_INSTANCES = %d" % payload["max_pattern_instances"] in driver
+    assert payload["mirror_planes"] == ["xy", "xz", "yz"]
+    assert payload["document_snapshots"] is True
 
 
 def test_capabilities_are_derived_from_the_catalog_not_restated(tmp_path: Path):
@@ -192,7 +212,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 22
+    assert len(catalog) == 24
 
 
 def _replace(path: Path, old: str, new: str) -> None:
@@ -233,12 +253,39 @@ _DRIFT_CASES = [
         ),
     ),
     (
-        "a read-only tool routes into a writing tool",
+        "the advertised edge-ref limit stops matching the driver's limit",
+        "capability",
+        lambda skills: _replace(
+            skills / "freecad-modify" / "tools.yaml",
+            "maxItems: 200",
+            "maxItems: 199",
+        ),
+    ),
+    (
+        "the advertised pattern limit stops matching the driver's limit",
+        "capability",
+        lambda skills: _replace(
+            skills / "freecad-modify" / "tools.yaml",
+            "maximum: 1000",
+            "maximum: 500",
+        ),
+    ),
+    (
+        "a mirror plane disappears from the advertised set",
+        "capability",
+        lambda skills: _replace(
+            skills / "freecad-modify" / "tools.yaml",
+            "enum: [xy, xz, yz]",
+            "enum: [xy, xz]",
+        ),
+    ),
+    (
+        "a read-only tool's failure chain routes into a writing tool",
         "read_only",
         lambda skills: _replace(
             skills / "freecad-session" / "tools.yaml",
             "next-tools: {on-failure: [inspect_document, get_status]}",
-            "next-tools: {on-failure: [inspect_document, get_status], on-success: [remove_object]}",
+            "next-tools: {on-failure: [inspect_document, get_status, remove_object]}",
         ),
     ),
     (

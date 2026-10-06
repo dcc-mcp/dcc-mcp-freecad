@@ -31,9 +31,15 @@ _ACCEPTED_KINDS = (
     inspect.Parameter.KEYWORD_ONLY,
 )
 
-# scripts/*.py all funnel into ``bridge_main("<method>", "<message>")``, so the
-# method a tool actually executes is readable from its source file.
-_BRIDGE_METHOD = re.compile(r'bridge_main\(\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+# scripts/*.py all funnel into one of three shapes that name the bridge method
+# they dispatch to -- ``bridge_main(...)`` for the document tools,
+# ``snapshot_main(...)`` for the snapshot tools (which differ only in how they
+# turn a refusal into a result), and a plain ``get_bridge().<method>(...)``
+# call for the parts tools, which format their own successes and refusals --
+# so the method a tool actually executes is readable from its source file.
+_BRIDGE_METHOD = re.compile(
+    r'(?:(?:bridge|snapshot)_main\(\s*"|get_bridge\(\)\.)([A-Za-z_][A-Za-z0-9_]*)'
+)
 
 
 def copy_skills(destination: Path) -> Path:
@@ -110,8 +116,16 @@ def read_only_path_problems(catalog: Sequence[Mapping[str, Any]]) -> List[str]:
     Two locks in one pass. A ``next-tools`` target that tools.yaml does not
     declare is the declaration bug in its purest form - a name the catalog has
     never heard of - so it is reported for every tool, read-only or not. And a
-    read-only tool whose success or failure chain routes into a writing tool is
-    a read-only claim that does not survive the chain it recommends.
+    read-only tool whose *remediation* chain routes into a writing tool is a
+    read-only claim that does not survive the branch where it failed.
+
+    Only ``on-failure`` is checked. A read-only discovery tool naming the
+    writer that consumes its result (``list_parts`` -> ``insert_part``) is the
+    intended workflow rather than a broken claim: the read-only tool still does
+    no writing, and the caller is being handed the next step. What must never
+    happen is a tool that reports a problem sending the caller into a write to
+    recover from it, because there the read-only hint is what told the caller
+    no write was coming.
     """
     by_name = {str(tool["name"]): tool for tool in catalog}
     problems: List[str] = []
@@ -128,7 +142,7 @@ def read_only_path_problems(catalog: Sequence[Mapping[str, Any]]) -> List[str]:
                     )
                     continue
                 routed = by_name[target].get("annotations") or {}
-                if read_only and not routed.get("read_only_hint"):
+                if read_only and phase != "on-success" and not routed.get("read_only_hint"):
                     problems.append(
                         "%s: read_only_hint=true but next-tools %s routes into writing tool %s"
                         % (name, phase, target)
@@ -165,7 +179,9 @@ def declaration_problems(
             continue
         match = _BRIDGE_METHOD.search(source.read_text(encoding="utf-8"))
         if match is None:
-            problems.append("%s: %s declares no bridge_main method" % (name, source.name))
+            problems.append(
+                "%s: %s declares no bridge or snapshot entry method" % (name, source.name)
+            )
             continue
         method_name = match.group(1)
         method = getattr(FreecadBridge, method_name, None)

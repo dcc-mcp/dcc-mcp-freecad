@@ -693,11 +693,17 @@ class FreecadBridge:
         # Every declaration below is derived from skills/*/tools.yaml and from
         # the suffix sets enforced by _input_path / _output_path, so the
         # capability list and the schemas the tools actually enforce cannot
-        # drift apart. See dcc_mcp_freecad.capabilities.
+        # drift apart. The parts block describes the running process rather
+        # than a tool schema, so the bridge computes it and passes it in.
+        # See dcc_mcp_freecad.capabilities.
         return build_capabilities(
             host_status=self.status(),
             import_extensions=_IMPORT_SUFFIXES,
             export_extensions=_EXPORT_SUFFIXES,
+            parts={
+                "part_extensions": sorted(parts_library.PART_SUFFIXES),
+                "parts_library": self._parts_library_capability(),
+            },
         )
 
     def _parts_library_capability(self) -> dict[str, Any]:

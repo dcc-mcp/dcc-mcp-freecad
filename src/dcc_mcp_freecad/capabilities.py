@@ -38,11 +38,11 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 
 # Declaration order also fixes the order capabilities are reported in:
 # freecad-modeling declares ``depends: [freecad-session]``, so the session
-# skill that owns the document lifecycle is listed first, and freecad-modify
-# depends on both. ``load_tool_catalog`` refuses to run when the directory
-# disagrees with this tuple, so a new skill can never be silently dropped from
-# the capability list.
-SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify")
+# skill that owns the document lifecycle is listed first, freecad-modify
+# depends on both, and freecad-parts is self-contained. ``load_tool_catalog``
+# refuses to run when the directory disagrees with this tuple, so a new skill
+# can never be silently dropped from the capability list.
+SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify", "freecad-parts")
 
 # The entry points an agent is already holding when it asks what this adapter
 # can do. They are real tools with real schemas and are still declared under
@@ -54,6 +54,16 @@ INTROSPECTION_TOOLS = ("get_status", "get_capabilities")
 # code that enforces it, so changing that code has to bring this along.
 ATOMIC_DOCUMENT_MUTATIONS = True  # FreecadBridge._mutate_document stages, then os.replace.
 ARBITRARY_PYTHON = False  # freecad_driver._METHODS whitelist; the driver never eval/exec.
+DOCUMENT_SNAPSHOTS = True  # FreecadBridge create/list/restore/delete_snapshot via SnapshotStore.
+
+# Where the driver's enforced limits are declared. Each entry names the tools
+# that take the property and the schema keyword that carries the bound, so the
+# advertised number and the number the driver rejects on cannot drift apart.
+DERIVED_BOUNDS = (
+    ("max_edge_refs", ("fillet_edges", "chamfer_edges"), "edge_refs", "maxItems"),
+    ("max_pattern_instances", ("linear_pattern", "polar_pattern"), "count", "maximum"),
+)
+MIRROR_PLANES_TOOL = ("mirror_feature", "plane")
 
 # Fields of a tool declaration that are compared field by field by
 # :func:`capability_drift`. ``input_schema`` carries ``required``,
@@ -66,6 +76,12 @@ COMPARED_TOOL_FIELDS = (
     "execution",
     "timeout_hint_secs",
 )
+
+
+# Sentinel for "the bound could not be read, so comparing it is meaningless".
+# A bound of ``None`` is a real possibility only if the schema loses the
+# keyword, which is already reported as its own drift line.
+_MISSING = object()
 
 
 class CapabilityError(RuntimeError):
@@ -131,6 +147,39 @@ def _enum_for(
     return list(declared["enum"])
 
 
+def _bound_for(
+    catalog: Sequence[Mapping[str, Any]],
+    tool_names: Sequence[str],
+    property_name: str,
+    keyword: str,
+) -> Any:
+    """Read a numeric bound out of every tool that declares the property.
+
+    The bound is what the driver enforces at call time, so it is read from the
+    schema the caller is held to rather than restated here. It is collected from
+    *every* tool that takes the property, and they must agree: a limit that two
+    tools advertise differently is a limit the caller cannot reason about, and
+    silently taking the first would let one of them drift.
+    """
+    values = set()
+    for tool_name in tool_names:
+        schema = _tool_by_name(catalog, tool_name).get("input_schema") or {}
+        declared = (schema.get("properties") or {}).get(property_name)
+        if not isinstance(declared, dict) or keyword not in declared:
+            raise CapabilityError(
+                "tools.yaml no longer declares %s for %s.%s, so capabilities cannot "
+                "be derived; declare it or update the capability derivation"
+                % (keyword, tool_name, property_name)
+            )
+        values.add(declared[keyword])
+    if len(values) != 1:
+        raise CapabilityError(
+            "%s disagree on %s.%s (%s), so capabilities cannot be derived"
+            % (", ".join(tool_names), property_name, keyword, sorted(values))
+        )
+    return values.pop()
+
+
 def host_limits(host_status: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Project the host's applicable matrix breaks onto the tools they limit.
 
@@ -172,9 +221,17 @@ def build_capabilities(
     host_status: Optional[Mapping[str, Any]] = None,
     import_extensions: Sequence[str] = (),
     export_extensions: Sequence[str] = (),
+    parts: Optional[Mapping[str, Any]] = None,
     skills_dir: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Derive the whole ``get_capabilities`` payload from the tool catalog."""
+    """Derive the whole ``get_capabilities`` payload from the tool catalog.
+
+    ``parts`` carries the standard-parts declarations that describe the host
+    process rather than a tool schema: which suffixes the library accepts and
+    how the library is configured right now. It is passed in rather than
+    imported so this module stays free of a dependency on the parts library and
+    the bridge keeps ownership of the runtime half of the report.
+    """
     catalog = load_tool_catalog(skills_dir)
     limits = host_limits(host_status)
     tools = []
@@ -197,7 +254,7 @@ def build_capabilities(
                 "host_limited": list(limits["tools"].get(tool["name"], ())),
             }
         )
-    return {
+    payload = {
         "status": dict(host_status or {}),
         "tools": tools,
         "methods": [tool["name"] for tool in tools if tool["name"] not in INTROSPECTION_TOOLS],
@@ -207,8 +264,16 @@ def build_capabilities(
         "export_extensions": sorted(export_extensions),
         "atomic_document_mutations": ATOMIC_DOCUMENT_MUTATIONS,
         "arbitrary_python": ARBITRARY_PYTHON,
+        "document_snapshots": DOCUMENT_SNAPSHOTS,
         "host_limited": limits,
     }
+    tool_name, property_name = MIRROR_PLANES_TOOL
+    payload["mirror_planes"] = _enum_for(catalog, tool_name, property_name)
+    for key, tool_names, property_name, keyword in DERIVED_BOUNDS:
+        payload[key] = _bound_for(catalog, tool_names, property_name, keyword)
+    for key, value in (parts or {}).items():
+        payload[key] = value
+    return payload
 
 
 def _served_tool_index(payload: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
@@ -283,6 +348,7 @@ def capability_drift(
     for key, tool_name, property_name in (
         ("primitives", "add_primitive", "primitive"),
         ("boolean_operations", "boolean_operation", "operation"),
+        ("mirror_planes",) + tuple(MIRROR_PLANES_TOOL),
     ):
         if tool_name not in by_name:
             drift.append("%s: tools.yaml no longer declares %s" % (key, tool_name))
@@ -293,6 +359,38 @@ def capability_drift(
             drift.append(
                 "%s: capabilities %r != tools.yaml %s.%s.enum %r"
                 % (key, payload.get(key), tool_name, property_name, expected)
+            )
+    # The limits are what the driver refuses on, so a wrong advertised number
+    # sends a caller into a rejection it was told it could not hit. Each is
+    # compared against every tool that declares the property, and a tool that
+    # has stopped declaring it at all is drift rather than a value to accept.
+    for key, tool_names, property_name, keyword in DERIVED_BOUNDS:
+        expected: Any = None
+        for tool_name in tool_names:
+            if tool_name not in by_name:
+                drift.append("%s: tools.yaml no longer declares %s" % (key, tool_name))
+                expected = _MISSING
+                continue
+            schema = by_name[tool_name].get("input_schema") or {}
+            declared = ((schema.get("properties") or {}).get(property_name) or {}).get(keyword)
+            if declared is None:
+                drift.append(
+                    "%s: tools.yaml no longer declares %s for %s.%s"
+                    % (key, keyword, tool_name, property_name)
+                )
+                expected = _MISSING
+                continue
+            if expected is None:
+                expected = declared
+            elif declared != expected:
+                drift.append(
+                    "%s: %s declares %r but %s declares %r"
+                    % (key, tool_name, declared, tool_names[0], expected)
+                )
+        if expected is not _MISSING and payload.get(key) != expected:
+            drift.append(
+                "%s: capabilities %r != tools.yaml %s %r"
+                % (key, payload.get(key), keyword, expected)
             )
     for key, declared in (
         ("import_extensions", import_extensions),
