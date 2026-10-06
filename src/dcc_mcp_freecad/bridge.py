@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -11,8 +12,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ElementTree
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
@@ -49,6 +53,23 @@ _RENDER_SUFFIX = ".png"
 _IMPORT_SUFFIXES = {".brep", ".brp", ".iges", ".igs", ".obj", ".step", ".stl", ".stp"}
 _EXPORT_SUFFIXES = _IMPORT_SUFFIXES | {".3mf"}
 _OBJECT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+# Document discovery bounds. A listing is a filesystem walk, so the only thing
+# standing between one call and an unbounded scan of a multi-million-entry tree
+# is an explicit budget: entries visited, entries returned, bytes serialized,
+# and bytes read for checksums are each capped.
+_DEFAULT_LIST_PATTERN = "*.FCStd"
+_DEFAULT_LIST_LIMIT = 100
+_MAX_LIST_LIMIT = 200
+_MAX_LIST_OFFSET = 1_000_000
+_MAX_LIST_BYTES = 256 * 1024
+_MAX_LIST_SCAN_ENTRIES = 50_000
+_MAX_LIST_HASH_BYTES_PER_FILE = 64 * 1024 * 1024
+_MAX_LIST_READ_BYTES = 256 * 1024 * 1024
+_MAX_LIST_PATTERN_LENGTH = 128
+_MAX_DOCUMENT_XML_BYTES = 8 * 1024 * 1024
+_CANCEL_CHECK_INTERVAL = 256
+_DOCUMENT_XML = "Document.xml"
 
 #: Largest PNG the adapter will inline as base64. Rendering is bounded to
 #: 1280x720, so this only triggers on pathological content; it exists so an
@@ -159,6 +180,15 @@ class RenderVerificationError(BridgeError):
         return self.payload.get("geometry_pixel_fraction")
 
 
+class AllowedRootsError(BridgeError):
+    """A requested path fell outside ``DCC_MCP_FREECAD_ALLOWED_ROOTS``.
+
+    Raised as its own type so the refusal reaches the caller under a stable
+    error code of its own instead of a generic bridge failure. It subclasses
+    :class:`BridgeError`, so every existing handler keeps catching it.
+    """
+
+
 class WriteVerificationError(BridgeError):
     """A mutating tool's post-write read-back disagreed with the request.
 
@@ -233,6 +263,239 @@ def _split_roots(value: str) -> list[Path]:
         for item in value.split(os.pathsep)
         if item.strip()
     ]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_prefix(path: Path, count: int) -> Optional[str]:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            remaining = count
+            while remaining > 0:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _relative_to(path: Path, root: Path) -> str:
+    """Render ``path`` relative to ``root`` with portable separators."""
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _iso_timestamp(seconds: float) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _bounded_int(value: Any, name: str, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise BridgeError("%s must be an integer" % name) from None
+    if number < low or number > high:
+        raise BridgeError("%s must be between %d and %d" % (name, low, high))
+    return number
+
+
+def _compile_list_pattern(pattern: str) -> "re.Pattern":
+    """Compile a file-name glob for document listing.
+
+    The glob matches the file name only, never a path. That keeps a listing
+    inside the directory it was asked about: a pattern could otherwise reach
+    any sibling of the root, which is the escape this adapter exists to deny.
+    Matching is case-insensitive because document paths are accepted
+    case-insensitively everywhere else in the adapter, so a listing can name
+    every file ``inspect_document`` would accept.
+    """
+    if not isinstance(pattern, str) or not pattern:
+        raise BridgeError("pattern must be a non-empty string")
+    if len(pattern) > _MAX_LIST_PATTERN_LENGTH:
+        raise BridgeError("pattern must be at most %d characters" % _MAX_LIST_PATTERN_LENGTH)
+    separators = {os.sep}
+    if os.altsep:
+        separators.add(os.altsep)
+    if "\x00" in pattern or pattern == ".." or any(sep in pattern for sep in separators):
+        raise BridgeError(
+            "pattern must be a single file-name glob, not a path; pass a narrower "
+            "root instead of matching directories"
+        )
+    return re.compile(fnmatch.translate(pattern.lower()))
+
+
+def _xml_tag(element: Any) -> str:
+    tag = element.tag
+    if not isinstance(tag, str):
+        return ""
+    return tag.rpartition("}")[2]
+
+
+def _xml_child(element: Any, name: str) -> Any:
+    for child in element:
+        if _xml_tag(child) == name:
+            return child
+    return None
+
+
+def _xml_count(element: Any) -> Optional[int]:
+    try:
+        value = int(element.get("Count", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+class _ScanBudget:
+    """Bounded directory-entry budget for a single document listing walk."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.scanned = 0
+        self.exhausted = False
+        self.unreadable_directories = 0
+
+    def visit(self) -> bool:
+        if self.scanned >= self.limit:
+            self.exhausted = True
+            return False
+        self.scanned += 1
+        return True
+
+
+class _ReadBudget:
+    """Bounded total bytes a single listing may read for checksums and counts."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.remaining = limit
+        self.exhausted = False
+
+    def take(self, count: int) -> bool:
+        if count > self.remaining:
+            self.exhausted = True
+            return False
+        self.remaining -= count
+        return True
+
+
+def _walk_root(root: Path, recursive: bool, budget: _ScanBudget) -> Iterator[Path]:
+    """Yield regular files under ``root``, never following a symlink.
+
+    Symlinks are skipped on both sides of the walk. A linked directory could
+    leave the allowed root or loop forever, and a linked file resolves outside
+    the root, where ``inspect_document`` would refuse it anyway - so listing it
+    would advertise a path the rest of the tool surface rejects.
+    """
+    pending = [root]
+    seen = 0
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(str(directory)) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            budget.unreadable_directories += 1
+            continue
+        for entry in entries:
+            if not budget.visit():
+                return
+            seen += 1
+            if seen % _CANCEL_CHECK_INTERVAL == 0:
+                check_dcc_cancelled()
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    if recursive:
+                        pending.append(Path(entry.path))
+                    continue
+            except OSError:
+                continue
+            yield Path(entry.path)
+
+
+def _iter_scan_files(
+    roots: Sequence[Path], recursive: bool, budget: _ScanBudget
+) -> Iterator[Tuple[Path, Path]]:
+    for root in roots:
+        for path in _walk_root(root, recursive, budget):
+            yield root, path
+
+
+def _document_digest(path: Path, size: int, budget: _ReadBudget) -> Tuple[Optional[str], str]:
+    """Digest a document without reading more than the listing is allowed to.
+
+    The digest is the SHA-256 of at most ``_MAX_LIST_HASH_BYTES_PER_FILE``
+    leading bytes, and ``scope`` says which of three things it is: ``full``
+    (the whole file, so it equals ``inspect_document``'s ``document_sha256``),
+    ``prefix`` (a stable leading slice of a file too large to hash whole), or
+    ``unavailable`` (the per-call read budget was spent, or the file could not
+    be read).
+    """
+    readable = min(size, _MAX_LIST_HASH_BYTES_PER_FILE)
+    if not budget.take(readable):
+        return None, "unavailable"
+    digest = _sha256_prefix(path, readable)
+    if digest is None:
+        return None, "unavailable"
+    return digest, "full" if readable == size else "prefix"
+
+
+def _document_object_count(path: Path, budget: _ReadBudget) -> Optional[int]:
+    """Read an FCStd archive's object count without opening it in FreeCAD.
+
+    An FCStd is a zip archive, so the document index is readable with no host
+    process, no recompute, and no write. ``None`` is returned whenever the
+    index is missing, oversized, unparsable, or beyond the read budget: a
+    listing must never claim a count it did not read.
+
+    Only the archive's own declared ``Objects`` counts are trusted, never a
+    guess at the document schema, so a format change yields ``None`` rather
+    than a wrong number.
+    """
+    try:
+        with zipfile.ZipFile(str(path)) as archive:
+            try:
+                member = archive.getinfo(_DOCUMENT_XML)
+            except KeyError:
+                return None
+            if member.file_size > _MAX_DOCUMENT_XML_BYTES or not budget.take(member.file_size):
+                return None
+            with archive.open(member) as stream:
+                raw = stream.read(_MAX_DOCUMENT_XML_BYTES + 1)
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError):
+        return None
+    if len(raw) > _MAX_DOCUMENT_XML_BYTES:
+        return None
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        return None
+    objects = _xml_child(root, "Objects")
+    if objects is not None:
+        counted = sum(1 for child in objects if _xml_tag(child) == "Object")
+        if counted:
+            return counted
+        declared = _xml_count(objects)
+        return 0 if declared is None else declared
+    data = _xml_child(root, "ObjectData")
+    return None if data is None else _xml_count(data)
 
 
 def _replace_staged_path(value: Any, staged: Path, final: Path) -> Any:
@@ -1381,6 +1644,122 @@ class FreecadBridge:
     def validate_document(self, path: str, timeout_secs: float = 120) -> dict[str, Any]:
         document = self._document_path(path)
         return self._invoke("document.validate", {"document_path": str(document)}, timeout_secs)
+
+    def _listing_roots(self, root: Optional[str]) -> list[Path]:
+        """Resolve the directories to search, using the document path contract.
+
+        An omitted ``root`` means every allowed root. An explicit one is
+        normalized exactly like a document path - ``expanduser`` then
+        ``resolve`` - so a root that lists a file also accepts it everywhere
+        else in the tool surface, and an out-of-bounds root is refused with a
+        distinct error instead of being silently clipped to nothing.
+        """
+        if not root:
+            return list(self.allowed_roots)
+        candidate = Path(root).expanduser().resolve()
+        if not candidate.is_dir():
+            raise BridgeError("Listing root is not an existing directory: %s" % candidate)
+        if not _within(candidate, self.allowed_roots):
+            raise AllowedRootsError(
+                "Listing root is outside DCC_MCP_FREECAD_ALLOWED_ROOTS: %s" % candidate
+            )
+        return [candidate]
+
+    def list_documents(
+        self,
+        root: Optional[str] = None,
+        pattern: str = _DEFAULT_LIST_PATTERN,
+        recursive: bool = True,
+        limit: int = _DEFAULT_LIST_LIMIT,
+        offset: int = 0,
+        include_object_count: bool = False,
+    ) -> dict[str, Any]:
+        """Enumerate documents under the allowed roots without opening any of them.
+
+        This is the answer to "what is even here?". Every other document tool
+        demands an exact path, so without discovery an agent handed a project
+        directory has to guess one and eat an error when it guesses wrong.
+
+        No FreeCAD process is started and no document is opened or recomputed:
+        discovery is a filesystem walk plus bounded checksums. It therefore also
+        works when the FreeCAD host is not configured yet, which is exactly when
+        an agent most needs to find out what is on disk.
+
+        Every field is a point-in-time snapshot of a filesystem that can change
+        underneath the walk; a file deleted mid-listing simply does not appear.
+
+        Returns ``entries`` (each with ``path`` relative to the root it was
+        found under, ``absolute_path`` ready to hand to ``inspect_document``,
+        ``size_bytes``, ``modified_at``, and a bounded ``sha256``), ``truncated``
+        and ``next_offset`` for paging, and the budget counters that explain why
+        a listing stopped where it did.
+        """
+        matcher = _compile_list_pattern(pattern)
+        bounded_limit = _bounded_int(limit, "limit", 1, _MAX_LIST_LIMIT)
+        bounded_offset = _bounded_int(offset, "offset", 0, _MAX_LIST_OFFSET)
+        roots = self._listing_roots(root)
+        budget = _ScanBudget(_MAX_LIST_SCAN_ENTRIES)
+        read_budget = _ReadBudget(_MAX_LIST_READ_BYTES)
+        target = bounded_offset + bounded_limit + 1
+        matches = []
+        for candidate_root, candidate in _iter_scan_files(roots, recursive, budget):
+            if not matcher.match(candidate.name.lower()):
+                continue
+            try:
+                info = candidate.stat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or not _within(candidate, self.allowed_roots):
+                continue
+            matches.append((candidate_root, candidate, info))
+            if len(matches) >= target:
+                break
+        matches.sort(key=lambda item: (str(item[1]).lower(), str(item[1])))
+
+        entries = []
+        emitted = 0
+        consumed = 0
+        page = matches[bounded_offset : bounded_offset + bounded_limit]
+        for candidate_root, candidate, info in page:
+            digest, scope = _document_digest(candidate, info.st_size, read_budget)
+            entry = {
+                "path": _relative_to(candidate, candidate_root),
+                "root": str(candidate_root),
+                "absolute_path": str(candidate),
+                "size_bytes": info.st_size,
+                "modified_at": _iso_timestamp(info.st_mtime),
+                "sha256": digest,
+                "sha256_scope": scope,
+                "object_count": _document_object_count(candidate, read_budget)
+                if include_object_count
+                else None,
+            }
+            size = len(json.dumps(entry, ensure_ascii=False))
+            # Always emit the first entry, however large, so a page always
+            # advances and a caller can never page forever without progress.
+            if entries and emitted + size > _MAX_LIST_BYTES:
+                break
+            entries.append(entry)
+            emitted += size
+            consumed += 1
+        next_index = bounded_offset + consumed
+        more = len(matches) > next_index
+        return {
+            "roots": [str(item) for item in roots],
+            "pattern": pattern,
+            "recursive": bool(recursive),
+            "limit": bounded_limit,
+            "offset": bounded_offset,
+            "returned": len(entries),
+            "entries": entries,
+            "truncated": more or budget.exhausted,
+            "next_offset": next_index if more else None,
+            "scanned_entries": budget.scanned,
+            "scan_budget_exhausted": budget.exhausted,
+            "scan_budget_limit": budget.limit,
+            "unreadable_directories": budget.unreadable_directories,
+            "read_budget_exhausted": read_budget.exhausted,
+        }
 
     def save_copy(
         self,

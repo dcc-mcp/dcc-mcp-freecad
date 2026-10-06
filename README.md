@@ -34,6 +34,9 @@ Re-run the generator after changing the catalog.
 ## Capabilities
 
 - Detect FreeCADCmd and report the actual FreeCAD/Python runtime.
+- Discover every `.FCStd` under the allowed roots without opening one
+  (`list_documents`): bounded, paginated, with size, modification time, and a
+  bounded SHA-256.
 - Create, inspect, recompute, validate, copy, and dependency-safely edit FCStd
   documents.
 - Render a document view to a PNG headlessly and prove the frame is not a waste
@@ -187,9 +190,9 @@ dcc-mcp-cli load-skill freecad-modify --dcc-type freecad --instance-id <instance
 dcc-mcp-cli load-skill freecad-parts --dcc-type freecad --instance-id <instance-short>
 ```
 
-Typical sequence: `create_document` → `add_primitive` → `transform_object` →
-`boolean_operation` → `fillet_edges` → `linear_pattern` → `validate_document` →
-`export_geometry`.
+Typical sequence: `list_documents` → `create_document` → `add_primitive` →
+`transform_object` → `boolean_operation` → `fillet_edges` → `linear_pattern` →
+`validate_document` → `export_geometry`.
 
 ### Standard parts
 
@@ -230,6 +233,12 @@ millimetre unit, because a consumer scales the model by that declaration.
 ## Safety contract
 
 - Requested documents and geometry stay under configured allowed roots.
+- `list_documents` is a read-only filesystem listing: no FreeCAD process, no
+  opened document, no recompute, no write. A `root` outside the allowed roots
+  is refused with `AllowedRootsError` rather than silently returning nothing.
+  Entries per page (200), serialized response bytes, directory entries visited,
+  and bytes read for checksums are each capped, and a listing stopped by a cap
+  says so through `truncated` and the budget counters.
 - Existing outputs require explicit `overwrite=true`.
 - Every `save_copy` call with `overwrite=false`, plain or presentation,
   publishes exclusively: a sibling hard link where the output filesystem
