@@ -1114,6 +1114,7 @@ class FreecadBridge:
             },
             timeout_secs,
         )
+
     def create_drawing_page(
         self,
         document_path: str,

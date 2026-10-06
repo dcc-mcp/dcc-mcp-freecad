@@ -2121,6 +2121,10 @@ def _pattern_result(params, tool, matrices, wrap, detail):
             "detail": detail,
             "verified": _verified_checks(read_back),
         }
+    finally:
+        _close_document(App, doc)
+
+
 def drawing_create_page(params):
     """Create a bounded TechDraw page and prove every view is really there.
 
@@ -2334,6 +2338,10 @@ def model_mirror_feature(params):
             "solids": len(result_shape.Solids),
             "verified": _verified_checks(read_back),
         }
+    finally:
+        _close_document(App, doc)
+
+
 def drawing_export(params):
     """Render one TechDraw page to PDF or SVG and read the artefact back.
 
