@@ -73,6 +73,29 @@
       "remediation": "Read `len(ExternalGeometry)` on FreeCAD 1.1+."
     },
     {
+      "id": "partdesign-reversal-property-side-type",
+      "title": "PartDesign feature reversal property moved: `Symmetric` -> `Midplane` -> `SideType`",
+      "changed_in": "1.1",
+      "applies_from": "1.1",
+      "kind": "renamed",
+      "removed_symbol": "Symmetric",
+      "replacement": "SideType",
+      "probe": {
+        "module": "PartDesign",
+        "owner_type_id": "PartDesign::Pad",
+        "attribute": "Symmetric",
+        "replacement_attribute": "Midplane",
+        "alternate_attributes": ["SideType"],
+        "expected_on_or_after_changed_in": "unverified",
+        "expected_before_changed_in": "unverified",
+        "pre_change_note": "Neither the pre-change nor the post-change presence is asserted: which spelling a given build exposes is exactly what this probe measures. Both expectations stay unverified until a real host has reported them, so the matrix records evidence instead of a guess."
+      },
+      "symptom": "Writing the reversal property under the wrong generation's name is dropped, so a two-sided pad is computed one-sided and the feature still reports success.",
+      "adapter_usage": "guarded",
+      "enforcement": "guard",
+      "remediation": "The adapter resolves the property by capability, trying `SideType`, then `Midplane`, then `Symmetric`, and refuses when a host exposes none of them instead of writing to a name that silently does nothing."
+    },
+    {
       "id": "meshpart-tessellate-deflection",
       "title": "MeshPart tessellation (`meshFromShape`) deflection behaviour changed",
       "changed_in": "1.1",

@@ -12,7 +12,13 @@ ROOT = Path(__file__).parents[1]
 SKILLS = ROOT / "src" / "dcc_mcp_freecad" / "skills"
 
 
-SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify", "freecad-parts")
+SKILL_NAMES = (
+    "freecad-session",
+    "freecad-modeling",
+    "freecad-modify",
+    "freecad-parts",
+    "freecad-sketch",
+)
 
 
 def test_skill_contracts_are_valid():
@@ -28,8 +34,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 24
-    assert len({tool["name"] for tool in tools}) == 24
+    assert len(tools) == 28
+    assert len({tool["name"] for tool in tools}) == 28
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -78,6 +84,65 @@ def test_geometry_bounds_in_the_skill_match_the_driver():
 def test_modeling_declares_document_dependency():
     frontmatter = (SKILLS / "freecad-modeling" / "SKILL.md").read_text(encoding="utf-8")
     assert "depends: [freecad-session]" in frontmatter
+
+
+def test_sketch_declares_document_dependency():
+    frontmatter = (SKILLS / "freecad-sketch" / "SKILL.md").read_text(encoding="utf-8")
+    assert "depends: [freecad-session]" in frontmatter
+
+
+def test_sketch_tools_accept_only_declared_union_members():
+    """A discriminated union is only real if a wrong member is rejected."""
+    from dcc_mcp_core.skills_helper import ToolValidator
+
+    payload = yaml.safe_load((SKILLS / "freecad-sketch" / "tools.yaml").read_text(encoding="utf-8"))
+    tools = {tool["name"]: tool for tool in payload["tools"]}
+    import json
+
+    geometry = ToolValidator(_schema=tools["add_sketch_geometry"]["input_schema"])
+    assert geometry.validate(
+        json.dumps(
+            {
+                "document_path": "a.FCStd",
+                "sketch_name": "S",
+                "geometry": [{"type": "circle", "cx": 0, "cy": 0, "radius": 2}],
+            }
+        )
+    )[0]
+    assert not geometry.validate(
+        json.dumps(
+            {
+                "document_path": "a.FCStd",
+                "sketch_name": "S",
+                "geometry": [{"type": "circle", "cx": 0, "cy": 0}],
+            }
+        )
+    )[0]
+    assert not geometry.validate(
+        json.dumps({"document_path": "a.FCStd", "sketch_name": "S", "geometry": [{"type": "blob"}]})
+    )[0]
+
+    constraints = ToolValidator(_schema=tools["add_sketch_constraint"]["input_schema"])
+    assert constraints.validate(
+        json.dumps(
+            {
+                "document_path": "a.FCStd",
+                "sketch_name": "S",
+                "constraints": [{"type": "radius", "first": {"element": 0}, "value": 4}],
+            }
+        )
+    )[0]
+    assert not constraints.validate(
+        json.dumps(
+            {
+                "document_path": "a.FCStd",
+                "sketch_name": "S",
+                "constraints": [
+                    {"type": "angle", "first": {"element": 0}, "second": {"element": 1}}
+                ],
+            }
+        )
+    )[0]
 
 
 def test_driver_exposes_only_a_method_whitelist():
@@ -139,7 +204,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 24
+    assert len(payload["tools"]) == len(catalog) == 28
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -212,7 +277,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 24
+    assert len(catalog) == 28
 
 
 def _replace(path: Path, old: str, new: str) -> None:

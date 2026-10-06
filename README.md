@@ -167,6 +167,7 @@ instead of evicting anything. See [docs/snapshots.md](docs/snapshots.md).
 dcc-mcp-cli list
 dcc-mcp-cli search --query "FreeCAD create boolean export STEP"
 dcc-mcp-cli load-skill freecad-session --dcc-type freecad --instance-id <instance-short>
+dcc-mcp-cli load-skill freecad-sketch --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modeling --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modify --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-parts --dcc-type freecad --instance-id <instance-short>
@@ -195,6 +196,13 @@ containing `..`, absolute paths, backslashes, URL schemes, and anything that
 resolves outside a library root (including through a symlink) are refused
 before a file is read, each with a stable error code. Follow an insert with
 `validate_document`.
+
+The parametric path starts with a sketch instead:
+`create_sketch` → `add_sketch_geometry` → `add_sketch_constraint` →
+`get_sketch_info`. `get_sketch_info` reports `dof` and `feature_ready`, and a
+sketch with unconstrained degrees of freedom is never reported as usable for a
+feature — the adapter accepts no arbitrary Python, so there is no way to repair
+a silently under-constrained profile afterwards.
 
 ## Safety contract
 

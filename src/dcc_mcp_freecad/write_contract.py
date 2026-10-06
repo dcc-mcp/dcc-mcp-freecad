@@ -67,6 +67,9 @@ MUTATING_TOOLS = (
     "model.polar_pattern",
     "model.mirror_feature",
     "model.insert_part",
+    "sketch.create",
+    "sketch.add_geometry",
+    "sketch.add_constraint",
 )
 
 # Tools that observe state and change nothing. Kept here so the classification
@@ -75,6 +78,7 @@ READ_ONLY_TOOLS = (
     "system.status",
     "document.inspect",
     "document.validate",
+    "sketch.info",
 )
 
 # Read-only tools that run in the adapter process instead of the FreeCAD host.
