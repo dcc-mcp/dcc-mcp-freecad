@@ -113,3 +113,7 @@ Sources, views, page-name length, formats and deadlines are all bounded; see
 `tools.yaml` in the `freecad-drawing` skill for the exact limits, and
 [the write contract](write-contract.md) for what each tool must prove before it
 returns.
+
+Qualification on both pinned release lines, and the two host behaviours the real
+run caught, are recorded in
+[the drawing validation report](validation/drawing-export.md).

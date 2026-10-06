@@ -13,7 +13,7 @@
       "min_version": "1.0.0",
       "max_version": "1.0.9999",
       "status": "supported",
-      "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, plus the TechDraw drawing path (create_drawing_page with isometric/front/top views, export_drawing to PDF and SVG, the PDF asserted non-empty and parsed back to 1 page). 6 console-lane and 30 offscreen GUI-lane real tests, 1 passed / 0 skipped per lane.",
+      "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove all executed, plus the TechDraw drawing path (create_drawing_page with isometric/front/top views, export_drawing to PDF and SVG, the PDF asserted non-empty and parsed back to 1 page). 6 console-lane and 30 offscreen GUI-lane real tests, all passed, 0 skipped.",
       "ci_matrix_entry": "FreeCAD_1.0.2-conda-Linux-x86_64-py311.AppImage"
     },
     {
@@ -21,7 +21,7 @@
       "min_version": "1.1.0",
       "max_version": "1.1.9999",
       "status": "supported",
-      "evidence": "Real FreeCAD 1.1.4 end-to-end run in CI: same end-to-end path, same lane counts, 1 passed / 0 skipped. No adapter-visible API break; the Part/Placement/boolean/MeshPart surface used by the driver is unchanged, and the TechDraw page/view/template surface used by drawing.py is unchanged.",
+      "evidence": "Real FreeCAD 1.1.4 end-to-end run in CI: same end-to-end path and the same lane counts, all passed, 0 skipped. No adapter-visible API break; the Part/Placement/boolean/MeshPart surface used by the driver is unchanged, and the TechDraw page/view/template surface used by drawing.py is unchanged.",
       "ci_matrix_entry": "FreeCAD_1.1.4-Linux-x86_64-py311.AppImage"
     }
   ],
