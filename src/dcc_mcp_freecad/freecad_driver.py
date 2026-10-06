@@ -717,9 +717,20 @@ def document_save_copy(params):
     read_back = _ReadBack(tool, version, params)
     presentation = None
     gui = None
+    if params.get("visible_objects") is None and (
+        params.get("view", "isometric") != "isometric"
+        or params.get("appearances") is not None
+        or params.get("frame_margin") is not None
+    ):
+        raise ValueError("Presentation options require an explicit visible_objects selection")
     if params.get("visible_objects") is not None:
         presentation = _load_sibling_module("presentation.py", "dcc_mcp_freecad_presentation")
-        presentation.validate_selection(params["visible_objects"], params.get("view", "isometric"))
+        presentation.validate_options(
+            params["visible_objects"],
+            params.get("view", "isometric"),
+            params.get("appearances"),
+            params.get("frame_margin"),
+        )
         gui = presentation.initialize()
     doc = _open_document(App, params["document_path"])
     try:
@@ -730,13 +741,19 @@ def document_save_copy(params):
         expected_presentation = None
         if presentation:
             expected_presentation = presentation.apply(
-                doc, gui, params["visible_objects"], params.get("view", "isometric")
+                doc,
+                gui,
+                params["visible_objects"],
+                params.get("view", "isometric"),
+                params.get("appearances"),
+                params.get("frame_margin"),
             )
             read_back.check(
                 presentation.requested_matches(
                     params["visible_objects"],
                     params.get("view", "isometric"),
                     expected_presentation,
+                    params.get("appearances"),
                 ),
                 "copy.presentation_request",
                 {
@@ -745,9 +762,14 @@ def document_save_copy(params):
                     "camera_orientation": presentation.VIEW_ROTATIONS[
                         params.get("view", "isometric")
                     ],
+                    "appearances": presentation.validate_options(
+                        params["visible_objects"],
+                        params.get("view", "isometric"),
+                        params.get("appearances"),
+                    ),
                 },
                 expected_presentation,
-                "Native visibility and orientation must match the requested presentation.",
+                "Native visibility, orientation and appearance must match the request.",
             )
         doc.saveAs(output_path)
     finally:
@@ -793,7 +815,9 @@ def document_save_copy(params):
             "successful copy would lose that silently.",
         )
         if presentation:
-            actual_presentation = presentation.inspect(copy, gui)
+            actual_presentation = presentation.inspect(
+                copy, gui, [item["object_name"] for item in params.get("appearances") or []]
+            )
             read_back.check(
                 presentation.matches(expected_presentation, actual_presentation),
                 "copy.presentation",
@@ -813,6 +837,16 @@ def document_save_copy(params):
         _close_document(App, copy)
     return {
         "presentation": expected_presentation,
+        "presentation_request": (
+            {
+                "visible_objects": params["visible_objects"],
+                "view": params.get("view", "isometric"),
+                "appearances": params.get("appearances"),
+                "frame_margin": params.get("frame_margin"),
+            }
+            if presentation
+            else None
+        ),
         "object_count": count,
         "object_names": expected,
         "verified": _verified_checks(read_back),

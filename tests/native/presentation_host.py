@@ -142,6 +142,21 @@ def _inspect(params):
             "camera_type": view.getCameraType(),
             "camera_orientation": list(view.getCameraOrientation().Q),
             "camera": _camera(view),
+            "appearances": {
+                obj.Name: {
+                    "rgb": list(obj.ViewObject.ShapeColor)[:3],
+                    "opacity": 1.0 - obj.ViewObject.Transparency / 100.0,
+                    "face_materials": [
+                        {
+                            "rgb": list(material.DiffuseColor)[:3],
+                            "opacity": 1.0 - material.Transparency,
+                        }
+                        for material in obj.ViewObject.ShapeAppearance
+                    ],
+                }
+                for obj in doc.Objects
+                if obj.isDerivedFrom("Part::Feature") and not obj.Shape.isNull()
+            },
         }
     finally:
         App.closeDocument(doc.Name)
@@ -211,8 +226,8 @@ def _save_with_fault(driver):
     presentation = driver._load_sibling_module("presentation.py", "dcc_mcp_freecad_presentation")
     original = presentation.apply
 
-    def faulty_apply(doc, gui, names, view):
-        expected = original(doc, gui, names, view)
+    def faulty_apply(doc, gui, names, view, appearances=None, frame_margin=None):
+        expected = original(doc, gui, names, view, appearances, frame_margin)
         if fault == "visibility":
             doc.getObject(names[0]).ViewObject.Visibility = False
         else:

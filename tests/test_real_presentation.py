@@ -164,6 +164,56 @@ def _unchanged_source(source_state):
     assert _sha(source) == digest
 
 
+def test_real_appearance_and_relative_frame_persist(real_host, native_source, tmp_path):
+    executable, _version = real_host
+    source, _original, _digest, before = native_source
+    bridge = _bridge(executable, [source.parent, tmp_path])
+    selected = ["BodyWithPort", "PortCut"]
+    fitted = bridge.save_copy(
+        str(source),
+        str(tmp_path / "fitted.FCStd"),
+        visible_objects=selected,
+        view="top",
+        frame_margin=0,
+    )
+    requested = [
+        {"object_name": "BodyWithPort", "rgb": [0.2, 0.4, 0.6], "opacity": 0.427},
+        {"object_name": "PortCut", "rgb": [0.9, 0.8, 0.7], "opacity": 1},
+    ]
+    target = tmp_path / "styled.FCStd"
+    result = bridge.save_copy(
+        str(source),
+        str(target),
+        visible_objects=selected,
+        view="top",
+        appearances=requested,
+        frame_margin=0.1,
+    )
+    _unchanged_source(native_source)
+    assert result["presentation"]["camera"]["height"][0] == pytest.approx(
+        fitted["presentation"]["camera"]["height"][0] * 1.2, rel=1e-6
+    )
+    # A separate native process reads the persisted material lists independently.
+    after = _snapshot(executable, target, tmp_path)
+    _assert_numbers(after["objects"], before["objects"])
+    _assert_numbers(after["aggregate"], before["aggregate"])
+    _assert_presentation(after, "top", selected)
+    assert after["appearances"]["Body"] == before["appearances"]["Body"]
+    expected_colors = ([51 / 255, 102 / 255, 153 / 255], [230 / 255, 204 / 255, 179 / 255])
+    for item, opacity, color in zip(requested, (0.43, 1), expected_colors):
+        actual = after["appearances"][item["object_name"]]
+        assert actual["rgb"] == pytest.approx(color, abs=1e-6)
+        assert actual["opacity"] == pytest.approx(opacity, abs=1e-6)
+        assert actual["face_materials"]
+        for material in actual["face_materials"]:
+            assert material["rgb"] == pytest.approx(color, abs=1e-6)
+            assert material["opacity"] == pytest.approx(opacity, abs=1e-6)
+    assert after["camera"]["height"] == pytest.approx(
+        result["presentation"]["camera"]["height"], rel=1e-6
+    )
+    _unchanged_source(native_source)
+
+
 @pytest.mark.parametrize("view", list(PRESETS))
 def test_real_gui_public_copy_relocated_reopen(
     real_host, native_source, tmp_path, view, record_property
