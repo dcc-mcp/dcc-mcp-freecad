@@ -113,6 +113,11 @@ def test_mutating_tools_are_the_ones_that_change_state():
         "model.boolean_operation",
         "model.import_geometry",
         "model.export_geometry",
+        "model.fillet_edges",
+        "model.chamfer_edges",
+        "model.linear_pattern",
+        "model.polar_pattern",
+        "model.mirror_feature",
         "document.remove_object",
     ):
         assert method in MUTATING_TOOLS, method

@@ -1,0 +1,166 @@
+tools:
+  - name: fillet_edges
+    description: Round a bounded set of edges on an existing solid, with a feasibility pre-check on the radius.
+    source_file: scripts/fillet_edges.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, edge_refs, radius, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        edge_refs:
+          type: array
+          minItems: 1
+          maxItems: 200
+          uniqueItems: true
+          items: {type: integer, minimum: 1}
+        radius: {type: number, exclusiveMinimum: 0}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", object_name: Body, edge_refs: [1, 2, 3], radius: 2, result_name: BodyFilleted}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}
+
+  - name: chamfer_edges
+    description: Bevel a bounded set of edges on an existing solid with a symmetric or asymmetric distance.
+    source_file: scripts/chamfer_edges.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, edge_refs, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        edge_refs:
+          type: array
+          minItems: 1
+          maxItems: 200
+          uniqueItems: true
+          items: {type: integer, minimum: 1}
+        distance: {type: number, exclusiveMinimum: 0}
+        distance1: {type: number, exclusiveMinimum: 0}
+        distance2: {type: number, exclusiveMinimum: 0}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", object_name: Body, edge_refs: [1, 2], distance: 1.5, result_name: BodyChamfered}
+      - arguments: {document_path: "projects/flange.FCStd", object_name: Body, edge_refs: [5], distance1: 1, distance2: 3, result_name: BodyBevel}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}
+
+  - name: linear_pattern
+    description: Repeat a solid along a direction at a fixed spacing, up to 1000 instances.
+    source_file: scripts/linear_pattern.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, direction, spacing, count, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        direction:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+        spacing: {type: number, exclusiveMinimum: 0}
+        count: {type: integer, minimum: 1, maximum: 1000}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/heatsink.FCStd", object_name: Fin, direction: [1, 0, 0], spacing: 8, count: 12, result_name: FinArray}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}
+
+  - name: polar_pattern
+    description: Repeat a solid around an axis, either by angular step or across a total sweep, up to 1000 instances.
+    source_file: scripts/polar_pattern.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, axis, count, result_name]
+      oneOf:
+        - required: [angle_step_degrees]
+          not: {required: [total_angle_degrees]}
+        - required: [total_angle_degrees]
+          not: {required: [angle_step_degrees]}
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        axis:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+        center:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {type: number}
+          default: [0, 0, 0]
+        count: {type: integer, minimum: 1, maximum: 1000}
+        angle_step_degrees: {type: number}
+        total_angle_degrees: {type: number}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", object_name: BoltHole, axis: [0, 0, 1], count: 6, total_angle_degrees: 360, result_name: BoltCircle}
+      - arguments: {document_path: "projects/flange.FCStd", object_name: Tooth, axis: [0, 0, 1], count: 24, angle_step_degrees: 15, result_name: GearTeeth}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}
+
+  - name: mirror_feature
+    description: Reflect a solid across one of the three base planes, optionally offset along the plane normal.
+    source_file: scripts/mirror_feature.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, plane, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        plane: {type: string, enum: [xy, xz, yz]}
+        offset: {type: number, default: 0}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/bracket.FCStd", object_name: HalfBracket, plane: yz, result_name: FullBracket}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}

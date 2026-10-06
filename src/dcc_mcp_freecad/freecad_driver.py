@@ -1517,6 +1517,758 @@ def model_export_geometry(params):
         _close_document(App, doc)
 
 
+# --------------------------------------------------------------------------
+# Dress-up, patterns and mirroring
+#
+# These five methods cover the two operations every real part needs after the
+# base shape exists: finishing an edge (fillet, chamfer) and repeating a
+# feature (linear pattern, polar pattern, mirror).
+#
+# They inherit one rule from the rest of this driver -- a mutating call returns
+# only after the host proves the change is there -- and add one of their own:
+# a size the geometry cannot absorb is refused *before* the kernel is asked.
+# The reason is measured, not theoretical. Asking the kernel for a radius the
+# adjacent faces cannot absorb does not reliably fail; it raises an opaque OCC
+# error on this host and returns a self-intersecting solid on the next. Neither
+# is an answer a caller can act on, so the analytic bound runs first and the
+# post-write read-back catches whatever it lets through.
+# --------------------------------------------------------------------------
+
+# An edge list is bounded because every reference is validated against the real
+# shape before anything is written. An unbounded list would let one call ask the
+# kernel to dress an arbitrary number of edges, and the failure mode there is a
+# half-applied model reported as a success.
+MAX_EDGE_REFS = 200
+
+# A pattern is bounded for a plainer reason: every instance is a transformed
+# copy held in memory, so an unbounded count is an unbounded time and memory
+# commitment inside a process the caller cannot interrupt.
+MAX_PATTERN_INSTANCES = 1000
+
+
+def _save_failure(exc):
+    """A save that failed, reported as a code instead of FreeCAD's own wording."""
+    return _coded("E_SAVE_FAILED", "the result could not be saved: %s" % str(exc).strip()[:200])
+
+
+def _coded(code, message):
+    """A refusal that carries a stable machine-readable code.
+
+    The code travels twice: as the ``code`` key of the driver's JSON error and
+    as the message prefix. The prefix matters because the bridge guarantees
+    only that the message survives, so a caller that reads nothing else can
+    still branch on the code.
+    """
+    error = ValueError("%s: %s" % (code, message))
+    error.code = code
+    return error
+
+
+def _document_object(doc, name):
+    obj = doc.getObject(name)
+    if obj is None:
+        raise _coded("E_OBJECT_NOT_FOUND", "the document has no object named %r" % name)
+    return obj
+
+
+def _solid_shape(obj, name):
+    """The object's shape, refused when it is not something these tools can use."""
+    shape = getattr(obj, "Shape", None)
+    if shape is None or shape.isNull():
+        raise _coded(
+            "E_NO_SHAPE", "%r has no Part shape, so there is no geometry to operate on" % name
+        )
+    if not shape.Solids:
+        raise _coded(
+            "E_NOT_A_SOLID",
+            "%r is a %s with %d faces and no solids; fillet, chamfer, pattern and "
+            "mirror operate on solids only" % (name, shape.ShapeType, len(shape.Faces)),
+        )
+    return shape
+
+
+def _edge_refs(params, tool):
+    """A bounded, duplicate-free list of 1-based edge indices."""
+    refs = _required(params, "edge_refs", tool)
+    if not isinstance(refs, list) or not refs:
+        raise _coded(
+            "E_EDGE_REFS_REQUIRED",
+            "edge_refs must be a non-empty array of 1-based edge indices; inspect "
+            "the document to list them",
+        )
+    if len(refs) > MAX_EDGE_REFS:
+        raise _coded(
+            "E_EDGE_REF_LIMIT",
+            "edge_refs holds %d entries but the limit is %d; split the request into "
+            "smaller batches" % (len(refs), MAX_EDGE_REFS),
+        )
+    resolved = []
+    for ref in refs:
+        if isinstance(ref, bool) or not isinstance(ref, int):
+            raise _coded(
+                "E_EDGE_REF_INVALID", "edge ref %r is not a 1-based integer edge index" % (ref,)
+            )
+        if ref in resolved:
+            # A repeat is refused rather than de-duplicated: silently dropping it
+            # is how a caller ends up believing two edges were dressed when one was.
+            raise _coded("E_EDGE_REF_DUPLICATE", "edge %d is listed more than once" % ref)
+        resolved.append(ref)
+    return resolved
+
+
+def _resolve_edge_refs(shape, refs, name):
+    count = len(shape.Edges)
+    for ref in refs:
+        if ref < 1 or ref > count:
+            raise _coded(
+                "E_EDGE_REF_OUT_OF_RANGE",
+                "%r has %d edges, so edge %d does not exist; the valid 1-based "
+                "indices are 1..%d" % (name, count, ref, count),
+            )
+    return refs
+
+
+def _adjacent_faces(shape, edge):
+    """The faces sharing this edge; an edge of a manifold solid has exactly two."""
+    return [face for face in shape.Faces if any(item.isSame(edge) for item in face.Edges)]
+
+
+def _face_normal(face, point):
+    """The face's outward normal at ``point``, with orientation applied.
+
+    ``Face.normalAt`` reports the *underlying surface* normal, which points the
+    wrong way for a face whose orientation is reversed. Every width or
+    convexity calculation built on it silently inverts for those faces, so the
+    correction lives here rather than at each call site.
+    """
+    try:
+        u_value, v_value = face.Surface.parameter(point)
+        normal = face.normalAt(u_value, v_value)
+    except Exception:
+        return None
+    if str(face.Orientation) == "Reversed":
+        normal = normal.negative()
+    return normal
+
+
+def _bound_box_corners(box):
+    import FreeCAD as App
+
+    return [
+        App.Vector(x, y, z)
+        for x in (box.XMin, box.XMax)
+        for y in (box.YMin, box.YMax)
+        for z in (box.ZMin, box.ZMax)
+    ]
+
+
+def _edge_size_limit(edge, shape):
+    """The largest radius/distance this edge's adjacent faces can absorb.
+
+    A fillet or chamfer grows out of the edge into each adjacent face, so the
+    face's extent measured perpendicular to the edge caps the size. The extent
+    is sampled from the face's vertices *and* its bounding box corners:
+    vertices alone are too sparse for a curved face -- a cylinder wall has
+    almost none -- and would report a near-zero limit for a face that can
+    absorb a great deal.
+
+    Returns ``None`` when the geometry offers nothing to measure, which callers
+    treat as "no analytic bound" rather than "no limit".
+    """
+    point = edge.CenterOfMass
+    try:
+        tangent = edge.tangentAt(edge.ParameterRange[0])
+    except Exception:
+        return None
+    if tangent.Length <= 1e-12:
+        return None
+    tangent.normalize()
+    widths = []
+    for face in _adjacent_faces(shape, edge):
+        normal = _face_normal(face, point)
+        if normal is None or normal.Length <= 1e-12:
+            continue
+        axis = normal.cross(tangent)
+        if axis.Length <= 1e-12:
+            continue
+        axis.normalize()
+        span = 0.0
+        for corner in [vertex.Point for vertex in face.Vertexes] + _bound_box_corners(
+            face.BoundBox
+        ):
+            span = max(span, abs((corner - point).dot(axis)))
+        if span > 0:
+            widths.append(span)
+    if not widths:
+        return None
+    return min(widths)
+
+
+def _format_limits(limits):
+    """Render the measured per-edge limits for an infeasibility message."""
+    known = dict((index, value) for index, value in limits.items() if value is not None)
+    if not known:
+        return "no analytic limit could be measured on the requested edges"
+    return "; ".join("edge %d absorbs below %g" % (index, known[index]) for index in sorted(known))
+
+
+def _assert_size_feasible(shape, indices, size, code, noun):
+    """Refuse a size the geometry cannot absorb, and say what it can absorb.
+
+    The bound is necessary rather than sufficient: it catches the gross case
+    where a radius overruns an entire face, which is the case where the kernel
+    stops being trustworthy. Anything it lets through is caught by the
+    post-write read-back, so the two together mean a self-intersecting solid is
+    never returned as a success.
+    """
+    limits = {}
+    for index in indices:
+        limits[index] = _edge_size_limit(shape.Edges[index - 1], shape)
+        if limits[index] is None or size < limits[index]:
+            continue
+        raise _coded(
+            code,
+            "%s %g is not feasible on edge %d: %s" % (noun, size, index, _format_limits(limits)),
+        )
+    return limits
+
+
+def _dress_up(params, tool, type_id, sizes, code, noun, size):
+    """Shared body for fillet and chamfer: pre-check, build, verify, report.
+
+    ``sizes`` maps an edge index to the ``(first, second)`` pair the host
+    ``Edges`` property expects, which is the only part the two tools disagree
+    on -- a fillet repeats its radius, a chamfer carries two distances.
+    """
+    import FreeCAD as App
+
+    version = _host_version()
+    object_name = _required(params, "object_name", tool)
+    result_name = _required(params, "result_name", tool)
+    result_label = params.get("result_label")
+    indices = _edge_refs(params, tool)
+    doc = _open_document(App, params["document_path"])
+    try:
+        source = _document_object(doc, object_name)
+        shape = _solid_shape(source, object_name)
+        _resolve_edge_refs(shape, indices, object_name)
+        if doc.getObject(result_name) is not None:
+            raise _coded("E_RESULT_EXISTS", "an object named %r already exists" % result_name)
+        limits = _assert_size_feasible(shape, indices, size, code, noun)
+        requested = dict((index, sizes(index)) for index in indices)
+        before = shape.Volume
+        feature = doc.addObject(type_id, result_name)
+        feature.Base = source
+        if result_label:
+            feature.Label = str(result_label)
+        try:
+            feature.Edges = [(index,) + tuple(requested[index]) for index in indices]
+            doc.recompute()
+        except Exception as exc:
+            # The kernel's own refusal is opaque ("BRepCheck_Analyzer::Init()
+            # - NULL shape"), so it is re-reported with the measured limit,
+            # which is the number the caller can actually act on.
+            raise _coded(
+                code,
+                "%s %g is not feasible on the requested edges: %s (kernel: %s)"
+                % (noun, size, _format_limits(limits), str(exc).strip()[:200]),
+            ) from None
+        try:
+            _save_document(doc)
+        except Exception as exc:
+            raise _save_failure(exc) from None
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(result_name)
+        read_back.exists("result", result_name, stored)
+        read_back.check(
+            stored.TypeId == type_id,
+            "result.type_id",
+            type_id,
+            stored.TypeId,
+            "The stored object is not the %s that was requested." % noun,
+        )
+        # The wiring is the operation: a fillet whose Base link did not take
+        # recomputes against nothing and still looks like a success.
+        linked = getattr(stored, "Base", None)
+        read_back.check(
+            linked is not None and linked.Name == object_name,
+            "result.base",
+            object_name,
+            getattr(linked, "Name", None),
+            "The result is not wired to the requested source object.",
+        )
+        applied = {}
+        for item in stored.Edges:
+            applied[int(item[0])] = (float(item[1]), float(item[2]))
+        for index in indices:
+            expected = [float(item) for item in requested[index]]
+            actual = applied.get(index)
+            read_back.check(
+                actual is not None
+                and all(
+                    _contract_module().numbers_match(expected[position], actual[position])
+                    for position in range(2)
+                ),
+                "result.edges[%d]" % index,
+                expected,
+                list(actual) if actual is not None else None,
+                "The stored feature does not carry the requested %s for this edge, "
+                "so the call was only partly applied." % noun,
+            )
+        result_shape = read_back.shape("result", stored)
+        # A fillet or chamfer re-shapes one solid; it must not split it, drop it,
+        # or silently fuse it with anything else.
+        read_back.check(
+            len(result_shape.Solids) == len(shape.Solids),
+            "result.solids",
+            len(shape.Solids),
+            len(result_shape.Solids),
+            "The operation changed the number of solids, so the result is not the "
+            "requested re-shaping of the source.",
+        )
+        after = result_shape.Volume
+        delta = after - before
+        # Non-zero, not necessarily negative. A fillet removes material on a
+        # convex edge and adds it on a concave one, and the host cannot be made
+        # to say which an edge is: two independent classifications -- the
+        # outward-normal cross product, and whether the normal bisector leaves
+        # the solid -- both reported three of a plain cube's twelve edges as
+        # concave, which is false for every one of them. Asserting a sign on a
+        # number we cannot derive would fail real calls, so the direction is
+        # reported and the magnitude is what is enforced. Tests pin the sign for
+        # geometry whose convexity is known.
+        tolerance = 1e-6 * max(1.0, abs(before))
+        read_back.check(
+            abs(delta) > tolerance,
+            "result.volume_changed",
+            "a volume that differs from the source",
+            {"before": before, "after": after, "delta": delta},
+            "The feature exists but the volume is unchanged, so the operation did "
+            "not run even though the host accepted it.",
+        )
+        return {
+            "object": _object_payload(stored),
+            "feature_name": stored.Name,
+            "affected_edges": len(indices),
+            "edge_refs": list(indices),
+            "volume_before": before,
+            "volume_after": after,
+            "volume_delta": delta,
+            "volume_delta_direction": "decreased" if delta < 0 else "increased",
+            "edge_size_limits": dict((str(index), limits[index]) for index in sorted(limits)),
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def model_fillet_edges(params):
+    """Round a bounded set of edges on a solid."""
+    tool = "model.fillet_edges"
+    radius = _positive(_required(params, "radius", tool), "radius")
+    return _dress_up(
+        params,
+        tool,
+        "Part::Fillet",
+        lambda index: (radius, radius),
+        "E_RADIUS_NOT_FEASIBLE",
+        "radius",
+        radius,
+    )
+
+
+def _chamfer_sizes(params, tool):
+    """The chamfer's two distances, from either ``distance`` or the explicit pair."""
+    single = params.get("distance")
+    first = params.get("distance1")
+    second = params.get("distance2")
+    if single is not None:
+        if first is not None or second is not None:
+            raise _coded(
+                "E_DISTANCE_CONFLICT",
+                "pass distance, or distance1 together with distance2, but not both",
+            )
+        value = _positive(single, "distance")
+        return value, value, value
+    if first is None or second is None:
+        raise _coded(
+            "E_DISTANCE_REQUIRED",
+            "chamfer_edges needs distance, or both distance1 and distance2",
+        )
+    first_value = _positive(first, "distance1")
+    second_value = _positive(second, "distance2")
+    return max(first_value, second_value), first_value, second_value
+
+
+def model_chamfer_edges(params):
+    """Bevel a bounded set of edges on a solid."""
+    tool = "model.chamfer_edges"
+    size, first, second = _chamfer_sizes(params, tool)
+    return _dress_up(
+        params,
+        tool,
+        "Part::Chamfer",
+        lambda index: (first, second),
+        "E_DISTANCE_NOT_FEASIBLE",
+        "chamfer distance",
+        size,
+    )
+
+
+def _instance_count(params, tool):
+    count = _required(params, "count", tool)
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise _coded(
+            "E_INSTANCE_COUNT_INVALID",
+            "count must be an integer between 1 and %d" % MAX_PATTERN_INSTANCES,
+        )
+    if count < 1:
+        raise _coded("E_INSTANCE_COUNT_INVALID", "count must be at least 1, got %d" % count)
+    if count > MAX_PATTERN_INSTANCES:
+        raise _coded(
+            "E_INSTANCE_LIMIT",
+            "count %d exceeds the %d instance limit; a larger run is better built as "
+            "several smaller patterns" % (count, MAX_PATTERN_INSTANCES),
+        )
+    return count
+
+
+def _direction_vector(params, key):
+    values = _vector(params.get(key), key)
+    if sum(item * item for item in values) <= 0:
+        raise _coded("E_ZERO_VECTOR", "%s may not be the zero vector" % key)
+    return values
+
+
+def _boxes_intersect(first, second, tolerance=1e-6):
+    """Whether two axis-aligned boxes share interior volume."""
+    return (
+        first.XMax > second.XMin + tolerance
+        and second.XMax > first.XMin + tolerance
+        and first.YMax > second.YMin + tolerance
+        and second.YMax > first.YMin + tolerance
+        and first.ZMax > second.ZMin + tolerance
+        and second.ZMax > first.ZMin + tolerance
+    )
+
+
+def _min_instance_gap(boxes, wrap):
+    """The smallest clearance between neighbouring instances.
+
+    Two axis-aligned boxes are disjoint when they are separated on at least one
+    axis, so the clearance is the largest single-axis separation; a negative
+    clearance means the boxes overlap.
+
+    This is a bounding-box test and therefore conservative: interleaved shapes
+    (a comb meshing with its neighbour) can report an overlap the solids do not
+    have. It never reports clearly separated instances as colliding, which is
+    the direction that matters -- the flag exists to stop a caller shipping a
+    pattern whose instances sit inside each other.
+    """
+    pairs = [(index, index + 1) for index in range(len(boxes) - 1)]
+    if wrap and len(boxes) > 2:
+        pairs.append((len(boxes) - 1, 0))
+    gap = None
+    for first_index, second_index in pairs:
+        first = boxes[first_index]
+        second = boxes[second_index]
+        clearance = max(
+            second.XMin - first.XMax,
+            first.XMin - second.XMax,
+            second.YMin - first.YMax,
+            first.YMin - second.YMax,
+            second.ZMin - first.ZMax,
+            first.ZMin - second.ZMax,
+        )
+        gap = clearance if gap is None else min(gap, clearance)
+    return gap
+
+
+def _pattern_result(params, tool, matrices, wrap, detail):
+    """Shared body for the two pattern tools: build, verify, report.
+
+    The result is a compound of transformed copies rather than a live
+    parametric array. That is a deliberate trade: the stock array objects are
+    workbench-level and their constructor signatures moved between host
+    versions, whereas ``Shape.transformed`` and ``Part.makeCompound`` are
+    kernel primitives that behave identically on 1.0 and 1.1. A compound also
+    makes the two things a caller needs to trust measurable -- the solid count
+    is exactly ``instances x source solids``, and the volume is exactly
+    ``instances x source volume``.
+    """
+    import FreeCAD as App
+    import Part
+
+    version = _host_version()
+    object_name = _required(params, "object_name", tool)
+    result_name = _required(params, "result_name", tool)
+    result_label = params.get("result_label")
+    count = len(matrices)
+    doc = _open_document(App, params["document_path"])
+    try:
+        source = _document_object(doc, object_name)
+        shape = _solid_shape(source, object_name)
+        if doc.getObject(result_name) is not None:
+            raise _coded("E_RESULT_EXISTS", "an object named %r already exists" % result_name)
+        instance_volume = shape.Volume
+        copies = [shape.transformed(matrix) for matrix in matrices]
+        compound = Part.makeCompound(copies)
+        feature = doc.addObject("Part::Feature", result_name)
+        if result_label:
+            feature.Label = str(result_label)
+        feature.Shape = compound
+        doc.recompute()
+        try:
+            _save_document(doc)
+        except Exception as exc:
+            raise _save_failure(exc) from None
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(result_name)
+        read_back.exists("result", result_name, stored)
+        read_back.check(
+            stored.TypeId == "Part::Feature",
+            "result.type_id",
+            "Part::Feature",
+            stored.TypeId,
+            "The stored object is not the pattern feature that was requested.",
+        )
+        result_shape = read_back.shape("result", stored)
+        # Solid count is the instance count made falsifiable: a host that
+        # silently coalesced or dropped copies cannot produce this number.
+        read_back.check(
+            len(result_shape.Solids) == count * len(shape.Solids),
+            "result.instance_count",
+            count * len(shape.Solids),
+            len(result_shape.Solids),
+            "The pattern does not contain one solid group per requested instance, so "
+            "some instances were dropped or merged.",
+        )
+        expected_volume = instance_volume * count
+        # The tolerance absorbs floating point noise in the sum of transformed
+        # copies, not a missing instance: one dropped copy is a whole
+        # instance-volume of difference, six orders of magnitude larger.
+        read_back.numbers(
+            "result.volume",
+            expected_volume,
+            result_shape.Volume,
+            "The pattern's volume is not the source volume times the instance count, "
+            "so the instances are not all there.",
+            rel_tolerance=1e-6,
+        )
+        boxes = [copy.BoundBox for copy in copies]
+        gap = _min_instance_gap(boxes, wrap)
+        return {
+            "object": _object_payload(stored),
+            "feature_name": stored.Name,
+            "instance_count": count,
+            "source_volume": instance_volume,
+            "volume": result_shape.Volume,
+            "expected_volume": expected_volume,
+            "volume_deviation": result_shape.Volume - expected_volume,
+            "min_instance_gap": gap,
+            "overlap_detected": gap is not None and gap < 1e-6,
+            "detail": detail,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def model_linear_pattern(params):
+    """Repeat a solid along a direction at a fixed spacing."""
+    import FreeCAD as App
+
+    tool = "model.linear_pattern"
+    _required(params, "object_name", tool)
+    direction = _direction_vector(params, "direction")
+    spacing = float(_required(params, "spacing", tool))
+    if not math.isfinite(spacing) or abs(spacing) <= 0:
+        raise _coded("E_PATTERN_SPACING", "spacing must be a finite, non-zero distance")
+    count = _instance_count(params, tool)
+    unit = App.Vector(*direction)
+    unit.normalize()
+    matrices = []
+    for index in range(count):
+        offset = App.Vector(
+            unit.x * spacing * index, unit.y * spacing * index, unit.z * spacing * index
+        )
+        matrices.append(App.Placement(offset, App.Rotation()).toMatrix())
+    return _pattern_result(
+        params,
+        tool,
+        matrices,
+        False,
+        {"kind": "linear", "direction": direction, "spacing": spacing},
+    )
+
+
+def model_polar_pattern(params):
+    """Repeat a solid around an axis at a fixed angular step."""
+    import FreeCAD as App
+
+    tool = "model.polar_pattern"
+    _required(params, "object_name", tool)
+    axis = _direction_vector(params, "axis")
+    center = _vector(params.get("center") or [0, 0, 0], "center")
+    count = _instance_count(params, tool)
+    step_angle = params.get("angle_step_degrees")
+    total_angle = params.get("total_angle_degrees")
+    if step_angle is None and total_angle is None:
+        raise _coded(
+            "E_ANGLE_REQUIRED",
+            "polar_pattern needs angle_step_degrees or total_angle_degrees",
+        )
+    if step_angle is not None and total_angle is not None:
+        raise _coded(
+            "E_ANGLE_CONFLICT",
+            "pass angle_step_degrees or total_angle_degrees, but not both",
+        )
+    if total_angle is not None:
+        if count < 2:
+            raise _coded(
+                "E_ANGLE_CONFLICT",
+                "total_angle_degrees spreads the instances across the sweep, so it "
+                "needs at least 2 instances, got %d" % count,
+            )
+        step_angle = float(total_angle) / (count - 1)
+    step_angle = float(step_angle)
+    if not math.isfinite(step_angle):
+        raise _coded("E_ANGLE_INVALID", "the angle must be a finite number of degrees")
+    if count > 1 and abs(step_angle) <= 0:
+        raise _coded(
+            "E_PATTERN_DEGENERATE",
+            "a polar pattern of %d instances needs a non-zero angle; a zero step "
+            "would stack every instance on the first" % count,
+        )
+    unit = App.Vector(*axis)
+    unit.normalize()
+    origin = App.Vector(*center)
+    to_origin = App.Placement(origin.negative(), App.Rotation()).toMatrix()
+    from_origin = App.Placement(origin, App.Rotation()).toMatrix()
+    matrices = []
+    for index in range(count):
+        rotation = App.Placement(App.Vector(), App.Rotation(unit, step_angle * index)).toMatrix()
+        # Matrix products compose left to right, so this reads inside out:
+        # move to the origin, rotate there, move back.
+        matrices.append(from_origin * rotation * to_origin)
+    return _pattern_result(
+        params,
+        tool,
+        matrices,
+        True,
+        {
+            "kind": "polar",
+            "axis": axis,
+            "center": center,
+            "angle_step_degrees": step_angle,
+            "total_angle_degrees": step_angle * (count - 1),
+        },
+    )
+
+
+# The mirror planes, named by the plane they flip across. Each normal is the
+# axis the plane is perpendicular to.
+_MIRROR_PLANES = {
+    "xy": (0, 0, 1),
+    "xz": (0, 1, 0),
+    "yz": (1, 0, 0),
+}
+
+
+def model_mirror_feature(params):
+    """Reflect a solid across one of the three base planes."""
+    import FreeCAD as App
+
+    tool = "model.mirror_feature"
+    version = _host_version()
+    object_name = _required(params, "object_name", tool)
+    result_name = _required(params, "result_name", tool)
+    result_label = params.get("result_label")
+    plane = _required(params, "plane", tool)
+    if plane not in _MIRROR_PLANES:
+        raise _coded(
+            "E_PLANE_INVALID",
+            "plane must be one of %s, got %r" % (sorted(_MIRROR_PLANES), plane),
+        )
+    offset = float(params.get("offset") or 0)
+    if not math.isfinite(offset):
+        raise _coded("E_PLANE_OFFSET_INVALID", "offset must be a finite distance")
+    doc = _open_document(App, params["document_path"])
+    try:
+        source = _document_object(doc, object_name)
+        shape = _solid_shape(source, object_name)
+        if doc.getObject(result_name) is not None:
+            raise _coded("E_RESULT_EXISTS", "an object named %r already exists" % result_name)
+        normal = _MIRROR_PLANES[plane]
+        mirror = doc.addObject("Part::Mirroring", result_name)
+        mirror.Source = source
+        mirror.Normal = App.Vector(*normal)
+        mirror.Base = App.Vector(normal[0] * offset, normal[1] * offset, normal[2] * offset)
+        if hasattr(mirror, "MirrorPlane"):
+            # Newer hosts add a plane reference that overrides the explicit
+            # normal. Leaving it unset keeps the typed plane in charge instead
+            # of inheriting whatever the host defaults it to.
+            mirror.MirrorPlane = None
+        if result_label:
+            mirror.Label = str(result_label)
+        doc.recompute()
+        try:
+            _save_document(doc)
+        except Exception as exc:
+            raise _save_failure(exc) from None
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(result_name)
+        read_back.exists("result", result_name, stored)
+        read_back.check(
+            stored.TypeId == "Part::Mirroring",
+            "result.type_id",
+            "Part::Mirroring",
+            stored.TypeId,
+            "The stored object is not the mirror feature that was requested.",
+        )
+        linked = getattr(stored, "Source", None)
+        read_back.check(
+            linked is not None and linked.Name == object_name,
+            "result.source",
+            object_name,
+            getattr(linked, "Name", None),
+            "The mirror is not wired to the requested source object.",
+        )
+        result_shape = read_back.shape("result", stored)
+        # A mirror is an isometry, which makes it the one operation here whose
+        # result is known exactly in advance. Volume cannot move and neither can
+        # the topology, so either moving means the host did something else and
+        # the call must not be reported as a success.
+        read_back.numbers(
+            "result.volume",
+            shape.Volume,
+            result_shape.Volume,
+            "A mirror preserves volume, so a different volume means the result is "
+            "not a mirror of the source.",
+            rel_tolerance=1e-6,
+        )
+        for attribute in ("Solids", "Faces", "Edges", "Vertexes"):
+            read_back.numbers(
+                "result.%s" % attribute.lower(),
+                len(getattr(shape, attribute)),
+                len(getattr(result_shape, attribute)),
+                "A mirror preserves topology, so a different %s count means the "
+                "result is not a mirror of the source." % attribute.lower(),
+            )
+        return {
+            "object": _object_payload(stored),
+            "feature_name": stored.Name,
+            "plane": plane,
+            "offset": offset,
+            "volume_before": shape.Volume,
+            "volume": result_shape.Volume,
+            "solids": len(result_shape.Solids),
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
 _METHODS = {
     "system.status": system_status,
     "document.create": document_create,
@@ -1530,6 +2282,11 @@ _METHODS = {
     "model.boolean_operation": model_boolean_operation,
     "model.import_geometry": model_import_geometry,
     "model.export_geometry": model_export_geometry,
+    "model.fillet_edges": model_fillet_edges,
+    "model.chamfer_edges": model_chamfer_edges,
+    "model.linear_pattern": model_linear_pattern,
+    "model.polar_pattern": model_polar_pattern,
+    "model.mirror_feature": model_mirror_feature,
 }
 
 
@@ -1552,6 +2309,11 @@ def main():
             "ok": False,
             "error": {"type": type(exc).__name__, "message": str(exc)},
         }
+        # A typed refusal from the geometry tools carries a stable code, so the
+        # caller can branch on "why" instead of parsing a sentence.
+        code = getattr(exc, "code", None)
+        if code:
+            payload["error"]["code"] = code
         # A read-back mismatch carries expected/actual across the process
         # boundary verbatim, so the caller can act on the numbers instead of
         # re-reading a sentence.

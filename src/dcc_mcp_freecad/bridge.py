@@ -22,7 +22,17 @@ _OBJECT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 class BridgeError(RuntimeError):
-    """A bounded FreeCAD bridge failure safe to return to a local caller."""
+    """A bounded FreeCAD bridge failure safe to return to a local caller.
+
+    ``code`` carries the driver's stable refusal code when it gave one, so a
+    caller can branch on why a geometry request was refused instead of matching
+    on prose. It stays ``None`` for failures that have no code, which is every
+    failure that predates the typed geometry tools.
+    """
+
+    def __init__(self, message: str, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class BridgeTimeoutError(BridgeError):
@@ -489,7 +499,8 @@ class FreecadBridge:
                 verification = error.get("write_verification")
                 if isinstance(verification, dict):
                     raise WriteVerificationError(verification, message)
-                raise BridgeError(message)
+                code = error.get("code")
+                raise BridgeError(message, str(code) if code else None)
             result = payload.get("result")
             if not isinstance(result, dict):
                 result = {"result": result}
@@ -596,9 +607,17 @@ class FreecadBridge:
                 "remove_object",
                 "import_geometry",
                 "export_geometry",
+                "fillet_edges",
+                "chamfer_edges",
+                "linear_pattern",
+                "polar_pattern",
+                "mirror_feature",
             ],
             "primitives": ["box", "cone", "cylinder", "sphere", "torus"],
             "boolean_operations": ["cut", "intersection", "union"],
+            "mirror_planes": sorted(["xy", "xz", "yz"]),
+            "max_edge_refs": 200,
+            "max_pattern_instances": 1000,
             "import_extensions": sorted(_IMPORT_SUFFIXES),
             "export_extensions": sorted(_EXPORT_SUFFIXES),
             "atomic_document_mutations": True,
@@ -938,6 +957,133 @@ class FreecadBridge:
             if staged.exists():
                 staged.unlink()
             _remove_staged_backups(staged)
+
+    def fillet_edges(
+        self,
+        document_path: str,
+        object_name: str,
+        edge_refs: Sequence[int],
+        radius: float,
+        result_name: str,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "model.fillet_edges",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "edge_refs": list(edge_refs),
+                "radius": radius,
+                "result_name": self._object_name(result_name),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def chamfer_edges(
+        self,
+        document_path: str,
+        object_name: str,
+        edge_refs: Sequence[int],
+        result_name: str,
+        distance: Optional[float] = None,
+        distance1: Optional[float] = None,
+        distance2: Optional[float] = None,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "model.chamfer_edges",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "edge_refs": list(edge_refs),
+                "distance": distance,
+                "distance1": distance1,
+                "distance2": distance2,
+                "result_name": self._object_name(result_name),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def linear_pattern(
+        self,
+        document_path: str,
+        object_name: str,
+        direction: Sequence[float],
+        spacing: float,
+        count: int,
+        result_name: str,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "model.linear_pattern",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "direction": list(direction),
+                "spacing": spacing,
+                "count": count,
+                "result_name": self._object_name(result_name),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def polar_pattern(
+        self,
+        document_path: str,
+        object_name: str,
+        axis: Sequence[float],
+        count: int,
+        result_name: str,
+        angle_step_degrees: Optional[float] = None,
+        total_angle_degrees: Optional[float] = None,
+        center: Optional[Sequence[float]] = None,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "model.polar_pattern",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "axis": list(axis),
+                "center": list(center) if center is not None else None,
+                "count": count,
+                "angle_step_degrees": angle_step_degrees,
+                "total_angle_degrees": total_angle_degrees,
+                "result_name": self._object_name(result_name),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def mirror_feature(
+        self,
+        document_path: str,
+        object_name: str,
+        plane: str,
+        result_name: str,
+        offset: float = 0,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "model.mirror_feature",
+            document_path,
+            {
+                "object_name": self._object_name(object_name),
+                "plane": plane,
+                "offset": offset,
+                "result_name": self._object_name(result_name),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
 
 
 def get_bridge() -> FreecadBridge:
