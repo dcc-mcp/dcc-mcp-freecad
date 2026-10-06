@@ -233,6 +233,7 @@ def build_capabilities(
     import_extensions: Sequence[str] = (),
     export_extensions: Sequence[str] = (),
     parts: Optional[Mapping[str, Any]] = None,
+    render: Optional[Mapping[str, Any]] = None,
     skills_dir: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Derive the whole ``get_capabilities`` payload from the tool catalog.
@@ -241,7 +242,9 @@ def build_capabilities(
     process rather than a tool schema: which suffixes the library accepts and
     how the library is configured right now. It is passed in rather than
     imported so this module stays free of a dependency on the parts library and
-    the bridge keeps ownership of the runtime half of the report.
+    the bridge keeps ownership of the runtime half of the report. ``render``
+    carries the same kind of block for view rendering, which depends on whether
+    this host can drive OpenGL at all and so is only knowable at call time.
     """
     catalog = load_tool_catalog(skills_dir)
     limits = host_limits(host_status)
@@ -290,6 +293,8 @@ def build_capabilities(
     for key, tool_names, property_name, keyword in DERIVED_BOUNDS:
         payload[key] = _bound_for(catalog, tool_names, property_name, keyword)
     for key, value in (parts or {}).items():
+        payload[key] = value
+    for key, value in (render or {}).items():
         payload[key] = value
     return payload
 

@@ -34,8 +34,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 28
-    assert len({tool["name"] for tool in tools}) == 28
+    assert len(tools) == 29
+    assert len({tool["name"] for tool in tools}) == 29
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False

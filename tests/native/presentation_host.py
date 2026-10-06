@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -240,6 +241,48 @@ def _save_with_fault(driver):
     driver.main()
 
 
+def _flat_png(path, width, height):
+    """Overwrite a capture with an opaque single-colour frame.
+
+    Written with the host's own Qt so the fixture does not ship a second PNG
+    encoder. This is what a capture pipeline that never reached the scene
+    produces, and it is the shape of the failure this tool exists to refuse.
+    """
+    from PySide import QtGui
+
+    image = QtGui.QImage(width, height, QtGui.QImage.Format_RGB32)
+    image.fill(0xFF000000)
+    assert image.save(str(path), "PNG"), "the fixture could not write a flat PNG"
+
+
+def _render_with_fault(driver):
+    """Corrupt a capture after the real host produced it.
+
+    The production driver, its read-back and the adapter's verdict are not
+    patched. Only the bytes on disk are changed, so these faults prove the whole
+    path -- capture, measurement, refusal, no publication -- on real hardware
+    instead of proving a mock.
+    """
+    fault = os.environ.get("DCC_MCP_FREECAD_TEST_RENDER_FAULT")
+    assert fault in ("flat", "baseline_copy"), "Unknown repository-owned render fault"
+    presentation = driver._load_sibling_module("presentation.py", "dcc_mcp_freecad_presentation")
+    original = presentation.capture
+    captured = []
+
+    def faulty_capture(view, path, width, height):
+        original(view, path, width, height)
+        captured.append((path, width, height))
+        if fault == "flat":
+            _flat_png(path, width, height)
+        elif len(captured) == 2:
+            # Make the empty-scene reference identical to the subject, which is
+            # exactly the "background rendered, model did not" failure.
+            shutil.copyfile(str(captured[0][0]), str(path))
+
+    presentation.capture = faulty_capture
+    driver.main()
+
+
 def main():
     request_path, result_path = sys.argv[-2:]
     with open(request_path, encoding="utf-8") as stream:
@@ -247,6 +290,11 @@ def main():
     driver = _driver()
     if request["method"] == "document.save_copy":
         _save_with_fault(driver)
+        return
+    if request["method"] == "document.render_view" and os.environ.get(
+        "DCC_MCP_FREECAD_TEST_RENDER_FAULT"
+    ):
+        _render_with_fault(driver)
         return
     methods = {
         "fixture.inspect": _inspect,

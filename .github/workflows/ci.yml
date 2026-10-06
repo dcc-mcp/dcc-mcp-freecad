@@ -98,7 +98,7 @@ jobs:
         run: python -m pytest -m freecad_gui -v --junitxml=freecad-gui-${{ matrix.freecad_version }}.xml
       - name: Assert GUI cases executed without skips
         if: always()
-        run: python3 .github/scripts/verify-freecad-run.py freecad-gui-${{ matrix.freecad_version }}.xml 27
+        run: python3 .github/scripts/verify-freecad-run.py freecad-gui-${{ matrix.freecad_version }}.xml 38
       - name: Upload real run report
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

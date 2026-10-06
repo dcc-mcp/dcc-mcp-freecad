@@ -79,6 +79,13 @@ READ_ONLY_TOOLS = (
     "document.inspect",
     "document.validate",
     "sketch.info",
+    # Opens the document, changes view-provider state in memory only, and never
+    # saves it, so the caller's document is byte-for-byte untouched. It does
+    # write raster files, but the artefact it owes a read-back for is the
+    # captured frame, not the document -- and that comparison is a pixel
+    # measurement (raster.py), not a WriteVerificationError. It is read-only
+    # with respect to the thing this classification guards.
+    "document.render_view",
 )
 
 # Read-only tools that run in the adapter process instead of the FreeCAD host.

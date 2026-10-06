@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -15,7 +17,17 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
 from . import parts_library, sketch_rules
+from . import raster
 from .capabilities import build_capabilities
+from .presentation import (
+    DEFAULT_RENDER_HEIGHT,
+    DEFAULT_RENDER_WIDTH,
+    MAX_RENDER_HEIGHT,
+    MAX_RENDER_WIDTH,
+    VIEWS,
+    validate_options,
+    validate_render_size,
+)
 from .snapshots import (
     DEFAULT_MAX_SNAPSHOT_BYTES,
     DEFAULT_MAX_SNAPSHOTS,
@@ -34,9 +46,32 @@ from .snapshots import (
 )
 
 _DOCUMENT_SUFFIX = ".fcstd"
+_RENDER_SUFFIX = ".png"
 _IMPORT_SUFFIXES = {".brep", ".brp", ".iges", ".igs", ".obj", ".step", ".stl", ".stp"}
 _EXPORT_SUFFIXES = set(_IMPORT_SUFFIXES)
 _OBJECT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+#: Largest PNG the adapter will inline as base64. Rendering is bounded to
+#: 1280x720, so this only triggers on pathological content; it exists so an
+#: opt-in image can never grow without limit into an agent's context.
+MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
+
+_RENDER_REMEDIATION = {
+    "degenerate_render": (
+        "The captured frame is a flat fill, so the host's offscreen rendering pipeline "
+        "produced no content. On Linux this usually means no software GL is reachable: set "
+        "LIBGL_ALWAYS_SOFTWARE=1 (Mesa llvmpipe) or install libgl1-mesa-dri/mesa-utils. On "
+        "Windows and macOS, confirm the FreeCAD build ships its GUI libraries. Confirm the "
+        "host once with `dcc-mcp-freecad doctor --json` and check the render_view block in "
+        "get_capabilities."
+    ),
+    "empty_render": (
+        "The captured frame does not differ from the same camera with every object hidden, so "
+        "the selected objects contributed no pixels. Check that visible_objects names objects "
+        "that exist and carry geometry, that the chosen view is not framed away from them, and "
+        "that frame_margin is not so large the model falls below the detection threshold."
+    ),
+}
 
 
 class BridgeError(RuntimeError):
@@ -55,6 +90,35 @@ class BridgeError(RuntimeError):
 
 class BridgeTimeoutError(BridgeError):
     """FreeCADCmd exceeded the configured deadline."""
+
+
+class RenderVerificationError(BridgeError):
+    """A render produced a frame this adapter refuses to hand back.
+
+    The whole reason ``render_view`` measures its output. A host that captures a
+    flat frame, or a frame identical to an empty scene, has not rendered the
+    caller's model, and returning that image would be worse than failing: the
+    agent would reason about a picture that contains nothing. The payload carries
+    the ``error_code`` (``degenerate_render`` or ``empty_render``), both pixel
+    summaries, the measured geometry fraction, and the remediation, so the caller
+    can act on numbers instead of a sentence.
+    """
+
+    def __init__(self, payload: Mapping[str, Any], message: str):
+        super().__init__(message)
+        self.payload = dict(payload)
+
+    @property
+    def error_code(self) -> Any:
+        return self.payload.get("error_code")
+
+    @property
+    def statistics(self) -> Any:
+        return self.payload.get("statistics")
+
+    @property
+    def geometry_pixel_fraction(self) -> Any:
+        return self.payload.get("geometry_pixel_fraction")
 
 
 class WriteVerificationError(BridgeError):
@@ -553,6 +617,12 @@ class FreecadBridge:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             environment = os.environ.copy()
             environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+            # Ask Mesa for a software rasteriser. A headless call has no GPU, and
+            # FreeCAD's default saveImage backend creates its own OpenGL context,
+            # so without this a host with only a hardware driver may produce a
+            # context it cannot use. This is a hint Mesa honours and every other
+            # platform ignores, and an operator can still override it.
+            environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
             if self.backend == "python-module":
                 # A compatible installed native library, never arbitrary caller code.
                 # Keep every temporary preference/cache write out of the operator home.
@@ -718,9 +788,9 @@ class FreecadBridge:
         # Every declaration below is derived from skills/*/tools.yaml and from
         # the suffix sets enforced by _input_path / _output_path, so the
         # capability list and the schemas the tools actually enforce cannot
-        # drift apart. The parts block describes the running process rather
-        # than a tool schema, so the bridge computes it and passes it in.
-        # See dcc_mcp_freecad.capabilities.
+        # drift apart. The parts and render blocks describe the running process
+        # rather than a tool schema, so the bridge computes them and passes them
+        # in. See dcc_mcp_freecad.capabilities.
         return build_capabilities(
             host_status=self.status(),
             import_extensions=_IMPORT_SUFFIXES,
@@ -729,6 +799,7 @@ class FreecadBridge:
                 "part_extensions": sorted(parts_library.PART_SUFFIXES),
                 "parts_library": self._parts_library_capability(),
             },
+            render=self._render_capability(self.status()),
         )
 
     def _parts_library_capability(self) -> dict[str, Any]:
@@ -903,6 +974,184 @@ class FreecadBridge:
                 _remove_staged_backups(staged)
             except OSError:
                 pass
+
+    @staticmethod
+    def _analyse_render(subject_path: Path, baseline_path: Path) -> dict[str, Any]:
+        """Measure a captured frame, refusing anything that carries no signal.
+
+        Runs before publication, so a frame that fails here never reaches the
+        caller's output path and never appears in a response as an image.
+        """
+        for path in (subject_path, baseline_path):
+            if not path.is_file():
+                raise BridgeError("The native host captured no image at %s" % path)
+        subject_bytes = subject_path.read_bytes()
+        baseline_bytes = baseline_path.read_bytes()
+        subject_width, subject_height, subject_opaque, subject_rgb = raster.decode_rgb(
+            subject_bytes
+        )
+        baseline_width, baseline_height, baseline_opaque, baseline_rgb = raster.decode_rgb(
+            baseline_bytes
+        )
+        subject = raster.describe(
+            subject_width, subject_height, subject_opaque, raster.statistics(subject_rgb)
+        )
+        baseline = raster.describe(
+            baseline_width, baseline_height, baseline_opaque, raster.statistics(baseline_rgb)
+        )
+        reasons = raster.degeneracy_reasons(subject)
+        changed = 0
+        fraction = 0.0
+        if (subject_width, subject_height) != (baseline_width, baseline_height):
+            reasons.append(
+                "the requested frame is %dx%d but the empty-scene reference is %dx%d, so the "
+                "two captures are not comparable"
+                % (subject_width, subject_height, baseline_width, baseline_height)
+            )
+        else:
+            changed, fraction = raster.differing_pixel_fraction(subject_rgb, baseline_rgb)
+        geometry = raster.geometry_reasons(changed, subject["pixel_count"], fraction)
+        if reasons or geometry:
+            code = "degenerate_render" if reasons else "empty_render"
+            combined = reasons + geometry
+            raise RenderVerificationError(
+                {
+                    "error_code": code,
+                    "tool": "document.render_view",
+                    "statistics": subject,
+                    "baseline_statistics": baseline,
+                    "geometry_pixel_count": changed,
+                    "geometry_pixel_fraction": fraction,
+                    "reasons": combined,
+                    "remediation": _RENDER_REMEDIATION[code],
+                },
+                "The native host captured a frame this adapter refuses to return (%s): %s "
+                "Remediation: %s" % (code, "; ".join(combined), _RENDER_REMEDIATION[code]),
+            )
+        return {
+            "statistics": subject,
+            "baseline_statistics": baseline,
+            "geometry_pixel_count": changed,
+            "geometry_pixel_fraction": fraction,
+        }
+
+    def render_view(
+        self,
+        document_path: str,
+        output_path: Optional[str] = None,
+        overwrite: bool = False,
+        timeout_secs: float = 300,
+        visible_objects: Optional[list[str]] = None,
+        view: str = "isometric",
+        appearances: Optional[list[dict[str, Any]]] = None,
+        frame_margin: Optional[float] = None,
+        width: int = DEFAULT_RENDER_WIDTH,
+        height: int = DEFAULT_RENDER_HEIGHT,
+        include_image: bool = False,
+    ) -> dict[str, Any]:
+        """Render a document view to a PNG and prove the frame is not waste.
+
+        ``include_image`` defaults to false on purpose: returning a picture on
+        every call is how a visual-feedback feature becomes a context-cost
+        problem. The default response is text -- whether the render is usable,
+        the pixel summary, and what was in frame -- and the image is attached
+        only when it is explicitly asked for.
+
+        The render is read-only with respect to the document: the host records
+        the native camera, visibility and selection, frames the scene, captures,
+        and puts all of them back before returning. The source file is never
+        written.
+        """
+        source = self._document_path(document_path)
+        if not isinstance(include_image, bool):
+            raise BridgeError("include_image must be a boolean")
+        if not isinstance(overwrite, bool):
+            raise BridgeError("overwrite must be a boolean")
+        width, height = validate_render_size(width, height)
+        if visible_objects is None:
+            if appearances is not None or frame_margin is not None:
+                raise BridgeError(
+                    "appearances and frame_margin require an explicit visible_objects selection"
+                )
+        else:
+            validate_options(visible_objects, view, appearances, frame_margin)
+            for name in visible_objects:
+                self._object_name(name)
+        output = self._output_path(output_path, {_RENDER_SUFFIX}) if output_path else None
+        replaced_existing = bool(output is not None and output.exists())
+        if replaced_existing and not overwrite:
+            raise BridgeError(_OUTPUT_EXISTS_MESSAGE)
+        request: dict[str, Any] = {
+            "document_path": str(source),
+            "view": view,
+            "width": width,
+            "height": height,
+        }
+        if visible_objects is not None:
+            request["visible_objects"] = list(visible_objects)
+        if appearances is not None:
+            request["appearances"] = appearances
+        if frame_margin is not None:
+            request["frame_margin"] = frame_margin
+        with tempfile.TemporaryDirectory(prefix="dcc-mcp-freecad-render-") as work_value:
+            work = Path(work_value)
+            baseline = work / "empty-scene.png"
+            if output is None:
+                # Nothing is published; the frame is measured and discarded so a
+                # caller asking "did this render?" leaves no artefact behind.
+                staged = work / "render.png"
+            else:
+                descriptor, temp_name = tempfile.mkstemp(
+                    prefix=".%s." % output.stem, suffix=_RENDER_SUFFIX, dir=str(output.parent)
+                )
+                os.close(descriptor)
+                staged = Path(temp_name)
+                staged.unlink()
+            try:
+                result = self._invoke(
+                    "document.render_view",
+                    dict(request, image_path=str(staged), baseline_path=str(baseline)),
+                    timeout_secs,
+                )
+                image = staged.read_bytes()
+                verdict = self._analyse_render(staged, baseline)
+                if include_image and len(image) > MAX_INLINE_IMAGE_BYTES:
+                    raise BridgeError(
+                        "The rendered PNG is %d bytes, over the %d byte inline limit. Publish "
+                        "it with output_path and read the file instead."
+                        % (len(image), MAX_INLINE_IMAGE_BYTES)
+                    )
+                response = dict(result, **verdict)
+                response.update(
+                    {
+                        "document_path": str(source),
+                        "output_path": None if output is None else str(output),
+                        "image_bytes": len(image),
+                        "image_sha256": hashlib.sha256(image).hexdigest(),
+                        "overwritten": replaced_existing,
+                    }
+                )
+                check_dcc_cancelled()
+                if output is not None:
+                    if overwrite:
+                        os.replace(str(staged), str(output))
+                    else:
+                        _publish_exclusive(staged, output)
+                    # Read back from the published file, so the reported hash
+                    # describes the artefact the caller can actually open rather
+                    # than the staged copy it was published from.
+                    response["bytes"] = output.stat().st_size
+                    response["sha256"] = _sha256_file(output)
+                if include_image:
+                    response["image_base64"] = base64.b64encode(image).decode("ascii")
+                    response["image_media_type"] = "image/png"
+                return response
+            finally:
+                try:
+                    if staged.exists():
+                        staged.unlink()
+                except OSError:
+                    pass
 
     def add_primitive(
         self,

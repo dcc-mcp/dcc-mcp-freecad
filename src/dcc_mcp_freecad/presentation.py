@@ -1,10 +1,13 @@
-"""Bounded native view-provider state for an explicitly requested copy.
+"""Bounded native view-provider state, and offscreen raster capture.
 
-The caller opts in to the installed FreeCAD GUI library. This creates no image
-and makes no offscreen OpenGL rendering claim.
+The caller opts in to the installed FreeCAD GUI library. The raster helpers
+below additionally capture the active view to a PNG; nothing here claims that a
+given offscreen host can drive OpenGL, which is why every capture is measured
+before it is returned and why the view state is put back afterwards.
 """
 
 import math
+import os
 import re
 import struct
 from decimal import ROUND_HALF_UP, Decimal
@@ -12,6 +15,17 @@ from importlib import import_module
 
 VIEWS = {"isometric", "front", "top", "right"}
 OBJECT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+# Bounded raster capture. The default and the ceiling are the same value: a
+# bigger frame costs the agent context without adding information an agent can
+# act on, and an unbounded size is exactly the kind of knob that becomes a
+# memory problem on a workstation with a 4K document open.
+DEFAULT_RENDER_WIDTH = 1280
+DEFAULT_RENDER_HEIGHT = 720
+MAX_RENDER_WIDTH = 1280
+MAX_RENDER_HEIGHT = 720
+MIN_RENDER_WIDTH = 16
+MIN_RENDER_HEIGHT = 16
 # FreeCAD 1.0.2/1.1.4 Gui/Camera.cpp presets, ordered (x, y, z, w).
 VIEW_ROTATIONS = {
     "top": (0.0, 0.0, 0.0, 1.0),
@@ -88,6 +102,160 @@ def validate_options(names, view, appearances=None, frame_margin=None):
     return sorted(normalized, key=lambda item: item["object_name"])
 
 
+def validate_render_size(width, height):
+    """Bound a raster capture to a pixel size this adapter will publish."""
+    values = []
+    for value, name, low, high in (
+        (width, "render width", MIN_RENDER_WIDTH, MAX_RENDER_WIDTH),
+        (height, "render height", MIN_RENDER_HEIGHT, MAX_RENDER_HEIGHT),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(
+                "%s must be an integer between %d and %d, got %r" % (name, low, high, value)
+            )
+        values.append(value)
+    return tuple(values)
+
+
+def _container_names(doc):
+    """Names of container objects and of objects a container claims.
+
+    Local Visibility cannot prove visibility through hidden container parents;
+    hiding a Group or LinkGroup may also affect its children. Both halves of
+    that profile are named here so an explicit selection and a default render
+    use the same rule instead of two rules that can drift apart.
+    """
+    grouped = set()
+    containers = set()
+    for obj in doc.Objects:
+        for members_property in ("Group", "ElementList"):
+            if hasattr(obj, members_property):
+                containers.add(obj.Name)
+                grouped.update(child.Name for child in getattr(obj, members_property))
+    return containers, grouped
+
+
+def renderable_names(doc):
+    """The default render selection: top-level non-container view providers.
+
+    A caller who passes ``visible_objects`` chooses explicitly. A caller who
+    omits it is asking "show me the document", and the honest answer to that is
+    the objects whose visibility this adapter can actually prove -- containers
+    and their members are excluded for the same reason an explicit selection
+    rejects them.
+    """
+    containers, grouped = _container_names(doc)
+    return sorted(
+        obj.Name
+        for obj in doc.Objects
+        if obj.ViewObject is not None and obj.Name not in containers and obj.Name not in grouped
+    )
+
+
+def hide_all(doc):
+    """Hide every view provider without touching the camera.
+
+    Used to capture the empty-scene reference that proves the selection
+    contributed pixels. Deliberately does not re-fit the camera: the reference
+    must be the same frame with less in it, not a differently framed scene.
+    """
+    for obj in doc.Objects:
+        if obj.ViewObject is not None:
+            obj.ViewObject.Visibility = False
+
+
+def capture(view, path, width, height):
+    """Write the active view to ``path`` as a PNG at an explicit pixel size.
+
+    ``saveImage`` takes positional arguments only. It is registered as
+    ``METH_VARARGS`` and parsed with ``PyArg_ParseTuple``, so keyword arguments
+    raise ``TypeError`` on every supported host -- there is no keyword spelling
+    to fall back to. The signature is
+    ``saveImage(filename, width, height, color, comment, samples)`` and the
+    defaults (``"Current"``, ``"$MIBA"``, the host's MSAA preference) are what
+    this adapter wants: "Current" keeps the document's own background and
+    ``"$MIBA"`` records the camera matrix in the PNG as provenance.
+
+    A capture that produced no file is reported, never treated as an image: the
+    failure mode this whole path exists to catch is a host that answers "done"
+    while writing nothing or nothing usable.
+    """
+    view.saveImage(str(path), int(width), int(height))
+    if not os.path.isfile(path):
+        raise RuntimeError("The native view wrote no image to %s" % path)
+    if os.path.getsize(path) == 0:
+        raise RuntimeError("The native view wrote an empty image to %s" % path)
+
+
+def view_state(doc, gui):
+    """Snapshot everything a render is allowed to borrow and must give back.
+
+    A render has to frame the scene to see it, which means moving the camera,
+    changing visibility and fitting the view. None of that may outlive the call:
+    a "look at the model" tool that quietly re-frames or re-hides the user's
+    scene is worse than one that cannot see anything. The camera is recorded as
+    the host's own serialized string so the comparison is byte-exact rather
+    than a tolerance away from a silent drift.
+
+    ``selection`` is ``None`` when the host does not expose it, rather than
+    being recorded as empty: an unrecorded state must not be restored as
+    "nothing was selected".
+    """
+    active = gui.getDocument(doc.Name).activeView()
+    try:
+        selection = sorted({obj.Name for obj in gui.Selection.getSelection()})
+    except Exception:
+        selection = None
+    return {
+        "camera": active.getCamera(),
+        "camera_type": active.getCameraType(),
+        "visibility": {
+            obj.Name: bool(obj.ViewObject.Visibility)
+            for obj in doc.Objects
+            if obj.ViewObject is not None
+        },
+        "selection": selection,
+    }
+
+
+def restore_view_state(doc, gui, state):
+    """Put back exactly what :func:`view_state` recorded."""
+    active = gui.getDocument(doc.Name).activeView()
+    active.setAnimationEnabled(False)
+    # The type is part of the serialized camera, but setting it first keeps the
+    # restore from depending on the host re-parsing its own node type.
+    if state.get("camera_type") and active.getCameraType() != state["camera_type"]:
+        active.setCameraType(state["camera_type"])
+    active.setCamera(state["camera"])
+    visibility = state.get("visibility") or {}
+    for obj in doc.Objects:
+        if obj.ViewObject is not None and obj.Name in visibility:
+            obj.ViewObject.Visibility = visibility[obj.Name]
+    if state.get("selection") is not None:
+        gui.Selection.clearSelection()
+        for name in state["selection"]:
+            if doc.getObject(name) is not None:
+                gui.Selection.addSelection(doc.Name, name)
+
+
+def states_match(expected, actual):
+    """Byte-exact comparison of two :func:`view_state` snapshots.
+
+    Deliberately has no tolerance. The camera round-trips byte-for-byte through
+    ``getCamera``/``setCamera`` on the supported hosts, so anything less than
+    equality is a real difference in where the user's view now points.
+    """
+    if set(expected) != set(actual):
+        return False
+    for key in expected:
+        if expected[key] is None or actual[key] is None:
+            if expected[key] is not actual[key]:
+                return False
+        elif expected[key] != actual[key]:
+            return False
+    return True
+
+
 def _appearance_state(obj):
     provider = obj.ViewObject
     color = list(provider.ShapeColor)[:3]
@@ -128,11 +296,21 @@ def appearances_match(expected, actual):
 
 def initialize():
     import FreeCAD as App
-    import FreeCADGui as Gui
 
     # The bridge gives this native process an isolated preference file.
     # No blank thumbnail is embedded when an offscreen host has no GL context.
     App.ParamGet("User parameter:BaseApp/Preferences/Document").SetBool("SaveThumbnail", False)
+    # The notification area can self-deadlock under the Qt offscreen platform:
+    # showing a notification raises the area, the unsupported raise() is logged
+    # to FreeCAD's console, and the console handler re-enters the notification
+    # area on the same thread. Disabling it before FreeCADGui is imported keeps
+    # an offscreen render call from hanging.
+    notifications = App.ParamGet("User parameter:BaseApp/Preferences/NotificationArea")
+    notifications.SetBool("NotificationAreaEnabled", False)
+    notifications.SetBool("NonIntrusiveNotificationsEnabled", False)
+
+    import FreeCADGui as Gui
+
     Gui.showMainWindow()
     if not App.GuiUp:
         raise RuntimeError("Native FreeCAD GUI view providers are unavailable")
@@ -150,13 +328,7 @@ def apply(doc, gui, names, view, appearances=None, frame_margin=None):
     # Local Visibility cannot prove visibility through hidden container parents;
     # hiding a Group or LinkGroup may also affect its children. Reject this profile
     # before changing any provider state, even if the caller selected a parent.
-    grouped = set()
-    containers = set()
-    for obj in doc.Objects:
-        for members_property in ("Group", "ElementList"):
-            if hasattr(obj, members_property):
-                containers.add(obj.Name)
-                grouped.update(child.Name for child in getattr(obj, members_property))
+    containers, grouped = _container_names(doc)
     if selected & (grouped | containers):
         raise ValueError("Presentation selection requires top-level non-container objects")
     for item in normalized:

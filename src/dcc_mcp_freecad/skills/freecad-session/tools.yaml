@@ -142,6 +142,92 @@ tools:
     timeout_hint_secs: 1800
     annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
 
+  - name: render_view
+    description: >-
+      Render an FCStd document view to a PNG in an isolated headless process and prove the
+      frame is not waste before returning it. The document is opened read-only and never
+      saved, so the source is byte-for-byte unchanged; the frame is written to a staging file
+      and measured before publication, so a rejected frame never reaches output_path. This
+      tool is read-only with respect to the document. Framing the scene requires moving the
+      camera and changing visibility, so the native camera, visibility and selection are
+      recorded first and restored afterwards, and that restoration is a byte-exact read-back
+      check reported as render.view_state_restored. Two captures are always taken, one as
+      requested and one with every object hidden at the identical camera. FreeCAD's default
+      3D-view background is a linear gradient that is baked into the saved PNG, so an entirely
+      empty render already has plenty of pixel variance and would pass any "is it
+      monochrome?" test; comparing the pair is what actually distinguishes "the model
+      rendered" from "the background rendered". A flat fill fails with error_code
+      degenerate_render; a frame that does not differ from the empty scene by at least 0.5
+      percent of its pixels fails with empty_render. Both carry pixel statistics, the measured
+      fraction, and remediation instead of an image. Requires the installed FreeCAD GUI
+      library; a host without FreeCADGui cannot render and is reported as host_limited by
+      get_capabilities rather than silently returning nothing. Rendering also needs the Qt
+      offscreen platform and a working software GL path. The image is NOT returned by default.
+      include_image defaults to false so a visual check does not silently consume context on
+      every call; the default response is text, being whether the render is usable, the pixel
+      summary, the view, and what was in frame. With output_path omitted the frame is measured
+      and discarded, leaving no artefact. With output_path given it must end with .png and be
+      inside the allowed roots; an existing destination requires overwrite=true, and
+      no-overwrite publication is exclusive exactly as save_copy publishes.
+    source_file: scripts/render_view.py
+    input_schema:
+      type: object
+      required: [document_path]
+      properties:
+        document_path: {type: string, minLength: 1}
+        output_path: {type: string, minLength: 1, description: 'Optional .png destination inside the allowed roots. Omitted means render, measure and discard.'}
+        overwrite: {type: boolean, default: false}
+        visible_objects:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+          description: Optional explicit top-level non-container native view-provider selection; group members are rejected. Omitted selects every top-level non-container object. Requires the installed FreeCAD GUI library.
+        view: {type: string, enum: [isometric, front, top, right], default: isometric}
+        appearances:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          description: Optional uniform native Part colors, changing only this render and never the document. Names must be unique members of visible_objects with non-null Part shapes and initially uniform face RGB and transparency. Requires visible_objects.
+          items:
+            type: object
+            required: [object_name, rgb, opacity]
+            additionalProperties: false
+            properties:
+              object_name: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+              rgb:
+                type: array
+                minItems: 3
+                maxItems: 3
+                items: {type: number, minimum: 0, maximum: 1}
+              opacity: {type: number, minimum: 0, maximum: 1}
+        frame_margin:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Optional extra fraction of fitted orthographic camera height at each side. Final height is fitted_height * (1 + 2 * frame_margin), not a guarantee of pixel padding. Requires visible_objects.
+        width: {type: integer, minimum: 16, maximum: 1280, default: 1280}
+        height: {type: integer, minimum: 16, maximum: 720, default: 720}
+        include_image: {type: boolean, default: false, description: 'Attach the rendered PNG as base64. Off by default because returning a picture on every call is a context cost, not a feature.'}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      dependencies:
+        appearances: [visible_objects]
+        frame_margin: [visible_objects]
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: true, destructive_hint: true, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", view: isometric}
+      - arguments: {document_path: "projects/enclosure.FCStd", output_path: "renders/enclosure.png", view: front, include_image: true}
+    next-tools: {on-failure: [get_status, inspect_document]}
+
   - name: remove_object
     description: Remove an object, refusing dependents unless cascade removal is explicit.
     source_file: scripts/remove_object.py
