@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from dcc_mcp_freecad import (  # noqa: E402
     MUTATING_TOOLS,
     READ_ONLY_TOOLS,
+    SERVICE_READ_ONLY_TOOLS,
     freecad_driver,
     write_contract,
 )
@@ -101,6 +102,21 @@ def test_every_driver_method_is_classified_as_mutating_or_read_only():
     assert not (set(MUTATING_TOOLS) & set(READ_ONLY_TOOLS))
 
 
+def test_service_side_tools_are_not_silently_counted_as_driver_methods():
+    """A service-side tool must never appear in the driver classification.
+
+    Listing the parts library runs in the adapter process so it keeps working
+    without a FreeCAD host. If such a tool were also added to
+    ``READ_ONLY_TOOLS``, the equality assertion above would stop pinning the
+    driver's method table and a new host method could ship unclassified.
+    """
+    classified = set(MUTATING_TOOLS) | set(READ_ONLY_TOOLS)
+
+    assert SERVICE_READ_ONLY_TOOLS == ("parts.list",)
+    assert not (classified & set(SERVICE_READ_ONLY_TOOLS))
+    assert "parts.list" not in freecad_driver._METHODS
+
+
 def test_mutating_tools_are_the_ones_that_change_state():
     # system.status is the instrument that measures the host, so it must never
     # be the thing that cannot report. Everything else that can move geometry or
@@ -118,6 +134,7 @@ def test_mutating_tools_are_the_ones_that_change_state():
         "model.linear_pattern",
         "model.polar_pattern",
         "model.mirror_feature",
+        "model.insert_part",
         "document.remove_object",
     ):
         assert method in MUTATING_TOOLS, method
@@ -925,6 +942,174 @@ def test_import_geometry_refuses_when_the_mesh_came_back_empty(host, tmp_path):
     error = _mismatch(excinfo)
     assert error.check == "mesh.non_empty"
     assert error.actual == {"points": 0, "facets": 0}
+
+
+# ---------------------------------------------------------------------------
+# model.insert_part
+#
+# The path itself was proven to live inside the library by the bridge before
+# the host was started. What is under test here is the other half: that a
+# library entry which imports to nothing, or lands somewhere else, is refused
+# instead of reported as a successful insert.
+# ---------------------------------------------------------------------------
+
+
+def _library_part(tmp_path, name="part.step", payload=b"ISO-10303-21;"):
+    part = tmp_path / name
+    part.write_bytes(payload)
+    return part
+
+
+def test_insert_part_proves_the_geometry_and_the_placement_landed(host, tmp_path):
+    _doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path)
+
+    result = freecad_driver.model_insert_part(
+        {
+            "document_path": path,
+            "part_path": str(part),
+            "part_ref": "fasteners/part.step",
+            "object_name": "BoltM8x40",
+            "label": "M8x40 bolt",
+            "translation": [10, 20, 30],
+            "rotation_axis": [0, 0, 1],
+            "rotation_degrees": 90,
+        }
+    )
+
+    assert result["object"]["name"] == "BoltM8x40"
+    assert result["part_ref"] == "fasteners/part.step"
+    assert result["object"]["placement"]["translation"] == [10.0, 20.0, 30.0]
+    for check in (
+        "part.non_empty",
+        "object.exists",
+        "object.label",
+        "object.shape.not_null",
+        "object.shape.valid",
+        "object.bounding_box.XLength",
+        "object.placement",
+    ):
+        assert check in result["verified"], check
+
+
+def test_insert_part_refuses_an_empty_library_file(host, tmp_path):
+    _doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path, payload=b"")
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_insert_part(
+            {"document_path": path, "part_path": str(part), "object_name": "Bolt"}
+        )
+
+    assert _mismatch(excinfo).check == "part.non_empty"
+
+
+def test_insert_part_refuses_an_entry_that_imports_to_nothing(host, tmp_path):
+    """A library file that reads to a null shape is not an insert.
+
+    Refused at the read, the same way ``import_geometry`` refuses an empty
+    source: there is nothing to put in the document, so no object is created.
+    """
+    _doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path)
+    host.part.shapes[str(part)] = _Shape(null=True)
+
+    with pytest.raises(ValueError, match="empty shape"):
+        freecad_driver.model_insert_part(
+            {"document_path": path, "part_path": str(part), "object_name": "Bolt"}
+        )
+
+
+def test_insert_part_refuses_when_the_geometry_is_gone_after_the_save(host, tmp_path, monkeypatch):
+    """The read-back, not the import, is what catches a shape lost on save.
+
+    The import succeeded and the object was created with the geometry; what the
+    host persisted is empty. Only the post-save read-back can see that, so the
+    check is the guard and this is the case that proves it.
+    """
+    doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path)
+    original = freecad_driver._save_document
+
+    def save(document):
+        original(document)
+        document.getObject("Bolt").Shape = _Shape(null=True)
+
+    monkeypatch.setattr(freecad_driver, "_save_document", save)
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_insert_part(
+            {"document_path": path, "part_path": str(part), "object_name": "Bolt"}
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "object.shape.not_null"
+    assert error.expected == "a non-null shape"
+    assert error.actual == "null"
+
+
+def test_insert_part_refuses_an_invalid_shape(host, tmp_path):
+    _doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path)
+    host.part.shapes[str(part)] = _Shape(valid=False)
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_insert_part(
+            {"document_path": path, "part_path": str(part), "object_name": "Bolt"}
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "object.shape.valid"
+    assert error.expected is True and error.actual is False
+
+
+def test_insert_part_refuses_when_the_placement_was_dropped(host, tmp_path):
+    """The object exists with the right geometry and sits in the wrong place."""
+    doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path)
+    _silence_new_objects(doc)
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_insert_part(
+            {
+                "document_path": path,
+                "part_path": str(part),
+                "object_name": "Bolt",
+                "translation": [10, 20, 30],
+            }
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "object.placement"
+    assert error.expected["translation"] == [10.0, 20.0, 30.0]
+    assert error.actual["translation"] == [0.0, 0.0, 0.0]
+
+
+def test_insert_part_reads_a_mesh_library_entry(host, tmp_path):
+    _doc, path = _document(host, tmp_path)
+    part = _library_part(tmp_path, name="part.stl")
+
+    result = freecad_driver.model_insert_part(
+        {"document_path": path, "part_path": str(part), "object_name": "Bracket"}
+    )
+
+    assert result["object"]["mesh"]["points"] > 0
+    for check in ("part.non_empty", "object.exists", "mesh.non_empty", "object.placement"):
+        assert check in result["verified"], check
+
+
+def test_insert_part_refuses_an_object_name_that_is_taken(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    doc.addObject("Part::Box", "Bolt")
+
+    with pytest.raises(ValueError, match="already exists"):
+        freecad_driver.model_insert_part(
+            {
+                "document_path": path,
+                "part_path": str(_library_part(tmp_path)),
+                "object_name": "Bolt",
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

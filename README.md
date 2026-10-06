@@ -132,6 +132,7 @@ cache external binaries.
 | `DCC_MCP_FREECAD_MAX_SNAPSHOTS` | Maximum stored snapshots | 50 |
 | `DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES` | Maximum total snapshot store size | 1 GiB |
 | `DCC_MCP_FREECAD_PORT` | Fixed adapter port when direct addressing is required | OS-assigned |
+| `DCC_MCP_FREECAD_PARTS_LIBRARY` | `os.pathsep`-separated local standard-parts library directories | none — `list_parts` reports `parts_library_unavailable` |
 
 The service is a standalone DCC-MCP instance with no GUI PID. Every operation
 launches a clean FreeCADCmd process in safe mode with a temporary user config.
@@ -168,11 +169,32 @@ dcc-mcp-cli search --query "FreeCAD create boolean export STEP"
 dcc-mcp-cli load-skill freecad-session --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modeling --dcc-type freecad --instance-id <instance-short>
 dcc-mcp-cli load-skill freecad-modify --dcc-type freecad --instance-id <instance-short>
+dcc-mcp-cli load-skill freecad-parts --dcc-type freecad --instance-id <instance-short>
 ```
 
 Typical sequence: `create_document` → `add_primitive` → `transform_object` →
 `boolean_operation` → `fillet_edges` → `linear_pattern` → `validate_document` →
 `export_geometry`.
+
+### Standard parts
+
+`freecad-parts` adds `list_parts` and `insert_part`. The library is a set of
+local directories configured through `DCC_MCP_FREECAD_PARTS_LIBRARY`:
+
+```bash
+dcc-mcp-cli call list_parts --category Fasteners --query M8
+dcc-mcp-cli call insert_part --document_path projects/enclosure.FCStd \
+  --part_ref fasteners/iso4014-m8x40.step --object_name BoltM8x40 \
+  --translation '[10, 20, 0]'
+```
+
+The adapter is offline-only: it never downloads, extracts, or caches a library,
+and writes nothing outside the directories the operator named. `part_ref` is
+the relative path `list_parts` returned and nothing else — references
+containing `..`, absolute paths, backslashes, URL schemes, and anything that
+resolves outside a library root (including through a symlink) are refused
+before a file is read, each with a stable error code. Follow an insert with
+`validate_document`.
 
 ## Safety contract
 
@@ -193,6 +215,8 @@ Typical sequence: `create_document` → `add_primitive` → `transform_object` �
   size, process output, and deadlines are bounded.
 - Cancellation and timeouts terminate the owned FreeCADCmd process.
 - Cascade removal is explicit and reports every removed dependent.
+- Parts-library references are resolved and containment-checked against the
+  configured roots before anything is read; a caller never names a file.
 
 FreeCAD Python API reference: <https://www.freecad.org/api/>
 

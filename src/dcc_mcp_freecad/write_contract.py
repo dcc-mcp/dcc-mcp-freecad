@@ -66,6 +66,7 @@ MUTATING_TOOLS = (
     "model.linear_pattern",
     "model.polar_pattern",
     "model.mirror_feature",
+    "model.insert_part",
 )
 
 # Tools that observe state and change nothing. Kept here so the classification
@@ -75,6 +76,13 @@ READ_ONLY_TOOLS = (
     "document.inspect",
     "document.validate",
 )
+
+# Read-only tools that run in the adapter process instead of the FreeCAD host.
+# Listed apart from the two tables above because "does this owe a post-write
+# read-back?" only has an answer for the driver's own method table -- and
+# because they must keep answering when no FreeCAD host is installed: a caller
+# can browse the parts library before it has a document to insert into.
+SERVICE_READ_ONLY_TOOLS = ("parts.list",)
 
 TOOL_CLASSIFICATION_ERROR = (
     "every driver method must be listed in write_contract.MUTATING_TOOLS or "

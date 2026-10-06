@@ -178,11 +178,23 @@ Every failure includes `failure_stage`, `failure_reason`, and a structured
 4. Set `DCC_MCP_FREECAD_ALLOWED_ROOTS` to an `os.pathsep`-separated list of
    existing document/import/export roots when the working directory default is
    too narrow.
-5. Run doctor and verify before starting the service.
+5. Optional: set `DCC_MCP_FREECAD_PARTS_LIBRARY` to an `os.pathsep`-separated
+   list of local directories that already hold standard parts (STEP, IGES,
+   BREP, STL, OBJ) to enable `list_parts` and `insert_part`.
+6. Run doctor and verify before starting the service.
 
 The adapter never scrapes a latest-download page and has no adapter-managed binary cache.
 FreeCAD upgrades and cleanup remain with the selected OS/package-manager
 owner; the wheel contains only the bounded Python bridge and typed driver.
+
+The parts library follows the same rule: the adapter reads the directories the
+operator named and downloads nothing. A URL in
+`DCC_MCP_FREECAD_PARTS_LIBRARY` is refused with `remote_library_unsupported`
+rather than fetched, so the library stays operator-owned and auditable. Its
+roots are deliberately not required to sit inside
+`DCC_MCP_FREECAD_ALLOWED_ROOTS` — a shared, read-only library normally lives
+outside a project sandbox — because what the caller can never do is name a
+file: only a relative path `list_parts` returned is accepted.
 
 ## Verify
 

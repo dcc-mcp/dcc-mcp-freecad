@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
+from . import parts_library
 from .snapshots import (
     DEFAULT_MAX_SNAPSHOT_BYTES,
     DEFAULT_MAX_SNAPSHOTS,
@@ -711,6 +712,8 @@ class FreecadBridge:
                 "list_snapshots",
                 "restore_snapshot",
                 "delete_snapshot",
+                "list_parts",
+                "insert_part",
             ],
             "primitives": ["box", "cone", "cylinder", "sphere", "torus"],
             "boolean_operations": ["cut", "intersection", "union"],
@@ -719,10 +722,35 @@ class FreecadBridge:
             "max_pattern_instances": 1000,
             "import_extensions": sorted(_IMPORT_SUFFIXES),
             "export_extensions": sorted(_EXPORT_SUFFIXES),
+            "part_extensions": sorted(parts_library.PART_SUFFIXES),
+            "parts_library": self._parts_library_capability(),
             "atomic_document_mutations": True,
             "arbitrary_python": False,
             "document_snapshots": True,
         }
+
+    def _parts_library_capability(self) -> dict[str, Any]:
+        """Describe the configured library without letting it break discovery.
+
+        An unconfigured library is the normal state, not a fault, so
+        ``get_capabilities`` reports it with the error code that explains how
+        to configure it instead of failing the whole call.
+        """
+        capability = {
+            "offline_only": True,
+            "remote_sources": False,
+            "max_limit": parts_library.MAX_LIMIT,
+            "env_var": parts_library.ENV_LIBRARY_ROOTS,
+        }
+        try:
+            roots = self.parts_library_roots()
+        except parts_library.PartLibraryError as error:
+            capability.update(
+                {"configured": False, "roots": [], "error_code": error.code, "reason": str(error)}
+            )
+            return capability
+        capability.update({"configured": True, "roots": [str(root) for root in roots]})
+        return capability
 
     def create_document(
         self,
@@ -996,6 +1024,56 @@ class FreecadBridge:
                 "input_path": str(source),
                 "object_name": self._object_name(object_name),
                 "label": label,
+            },
+            timeout_secs,
+        )
+
+    def parts_library_roots(self) -> list[Path]:
+        """The configured local parts-library roots, or a refusal with a code."""
+        return parts_library.resolve_library_roots()
+
+    def list_parts(
+        self,
+        category: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: Any = parts_library.DEFAULT_LIMIT,
+    ) -> dict[str, Any]:
+        """List the offline library. Needs no FreeCAD host, so it starts none."""
+        return parts_library.list_parts(
+            category=category, query=query, limit=limit, roots=self.parts_library_roots()
+        )
+
+    def insert_part(
+        self,
+        document_path: str,
+        part_ref: str,
+        object_name: str,
+        label: Optional[str] = None,
+        translation: Optional[Sequence[float]] = None,
+        rotation_axis: Optional[Sequence[float]] = None,
+        rotation_degrees: float = 0,
+        timeout_secs: float = 600,
+    ) -> dict[str, Any]:
+        """Insert a standard part from the configured offline library.
+
+        The reference is resolved and containment-checked *before* the document
+        is staged, so a refused ``part_ref`` costs nothing and can never leave
+        a half-applied mutation behind. A caller never names a file: only the
+        relative paths ``list_parts`` returned are accepted.
+        """
+        path, root = parts_library.resolve_part_ref(part_ref, self.parts_library_roots())
+        return self._mutate_document(
+            "model.insert_part",
+            document_path,
+            {
+                "part_path": str(path),
+                "part_ref": path.relative_to(root).as_posix(),
+                "part_root": str(root),
+                "object_name": self._object_name(object_name),
+                "label": label,
+                "translation": list(translation or (0, 0, 0)),
+                "rotation_axis": list(rotation_axis or (0, 0, 1)),
+                "rotation_degrees": rotation_degrees,
             },
             timeout_secs,
         )

@@ -1302,6 +1302,102 @@ def model_import_geometry(params):
         _close_document(App, doc)
 
 
+def model_insert_part(params):
+    """Insert a standard part from the offline library into a document.
+
+    The path was already containment-checked by the bridge against the
+    configured library roots; what this method owes is the same proof every
+    other mutating tool owes: the object is there after the save, it carries
+    the geometry that was read, and it sits where it was placed. A library
+    entry that imports to an empty or invalid shape is refused here rather than
+    handed back as a plausible-looking insert.
+    """
+    import FreeCAD as App
+
+    tool = "model.insert_part"
+    version = _host_version()
+    part_path = _required(params, "part_path", tool)
+    object_name = _required(params, "object_name", tool)
+    label = params.get("label")
+    suffix = part_path.lower().rsplit(".", 1)[-1]
+    is_mesh = suffix in ("stl", "obj")
+    doc = _open_document(App, params["document_path"])
+    try:
+        read_back = _ReadBack(tool, version, params)
+        if doc.getObject(object_name) is not None:
+            raise ValueError("Object already exists: %s" % object_name)
+        read_back.check(
+            os.path.isfile(part_path) and os.path.getsize(part_path) > 0,
+            "part.non_empty",
+            "a non-empty library file",
+            _size_or_missing(part_path),
+            "There is nothing to insert, so an inserted object would be reported "
+            "without having read anything.",
+        )
+        if is_mesh:
+            import Mesh
+
+            mesh = Mesh.Mesh(part_path)
+            if not getattr(mesh, "CountPoints", 0):
+                raise ValueError("Library part produced an empty mesh")
+            obj = doc.addObject("Mesh::Feature", object_name)
+            obj.Mesh = mesh
+        else:
+            import Part
+
+            shape = Part.read(part_path)
+            if shape.isNull():
+                raise ValueError("Library part produced an empty shape: %s" % part_path)
+            obj = doc.addObject("Part::Feature", object_name)
+            obj.Shape = shape
+        if label:
+            obj.Label = str(label)
+        placement = App.Placement(
+            App.Vector(*_vector(params.get("translation") or [0, 0, 0], "translation")),
+            _rotation(
+                App,
+                params.get("rotation_axis") or [0, 0, 1],
+                params.get("rotation_degrees") or 0,
+            ),
+        )
+        obj.Placement = placement
+        _save_document(doc)
+        stored = doc.getObject(object_name)
+        read_back.exists("object", object_name, stored)
+        if label:
+            read_back.check(
+                stored.Label == str(label),
+                "object.label",
+                str(label),
+                stored.Label,
+                "The inserted object label was not persisted.",
+            )
+        if is_mesh:
+            mesh = getattr(stored, "Mesh", None)
+            points = int(getattr(mesh, "CountPoints", 0) or 0)
+            facets = int(getattr(mesh, "CountFacets", 0) or 0)
+            read_back.check(
+                points > 0 and facets > 0,
+                "mesh.non_empty",
+                {"points": ">0", "facets": ">0"},
+                {"points": points, "facets": facets},
+                "The object was created but carries no geometry after the save.",
+            )
+            _verify_box(read_back, "mesh", getattr(mesh, "BoundBox", None))
+        else:
+            shape = read_back.shape("object", stored)
+            _verify_box(read_back, "object", getattr(shape, "BoundBox", None))
+        read_back.placement("object", App, placement, stored.Placement)
+        return {
+            "object": _object_payload(stored),
+            "part_path": part_path,
+            "part_ref": params.get("part_ref"),
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
 def _assert_tessellation(mesh_obj, source_name, version):
     """Assert tessellation produced a real, bounded mesh instead of a silent one.
 
@@ -2287,6 +2383,7 @@ _METHODS = {
     "model.linear_pattern": model_linear_pattern,
     "model.polar_pattern": model_polar_pattern,
     "model.mirror_feature": model_mirror_feature,
+    "model.insert_part": model_insert_part,
 }
 
 
