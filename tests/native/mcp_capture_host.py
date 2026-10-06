@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -22,7 +23,7 @@ pixel_witness = importlib.util.module_from_spec(pixel_spec)
 pixel_spec.loader.exec_module(pixel_witness)
 
 
-def _capture(params):
+def _capture_impl(params):
     before = fixture._inspect(params)
     App, Gui = fixture._gui()
     from PySide import QtGui
@@ -63,6 +64,24 @@ def _capture(params):
         "snapshot": after,
         "capture_role": "test-only native fixture; no MCP capture endpoint",
     }
+
+
+failure_path = Path(__file__).resolve().parents[1] / "e2e_support/failure.py"
+failure_spec = importlib.util.spec_from_file_location("native_image_failure", str(failure_path))
+failure = importlib.util.module_from_spec(failure_spec)
+failure_spec.loader.exec_module(failure)
+
+
+def _capture(params):
+    try:
+        return _capture_impl(params)
+    except Exception as error:
+        details = failure.native_image_failure(error, Path(__file__).resolve().parents[2])
+        try:
+            Path(params["failure_path"]).write_text(json.dumps(details), encoding="utf-8")
+        except OSError:
+            pass  # Preserve the original error; the controller reports missing diagnostics.
+        raise
 
 
 if __name__ == "__main__" and "--pass" in sys.argv:

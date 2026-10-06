@@ -193,3 +193,55 @@ def test_expected_native_error_does_not_allow_core_or_protocol_failure(fault):
     )
     with pytest.raises(AssertionError):
         asyncio.run(client.call("add_primitive", {}, expect_success=False))
+
+
+def test_native_failure_location_does_not_disclose_exception_text():
+    from pathlib import Path
+
+    from e2e_support.failure import native_image_failure, validate_failure
+
+    root = Path(__file__).resolve().parents[1]
+    try:
+        colored_geometry(image("blank"), 128, 128)
+    except AssertionError as error:
+        details = native_image_failure(error, root)
+    assert validate_failure(details) == details
+    assert details["source"] == "tests/e2e_support/pixels.py" and details["line"] > 0
+    try:
+        raise ValueError("private /home/person/file token-like-value")
+    except ValueError as error:
+        details = native_image_failure(error, root)
+    assert details == {"error_type": "ValueError", "source": None, "line": None}
+
+
+def test_capture_diagnostic_re_raises_identical_error_without_rewriting_it(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "native/mcp_capture_host.py"
+    spec = importlib.util.spec_from_file_location("native_capture_diagnostic", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    error = ValueError("synthetic private diagnostic text")
+
+    def fail(_params):
+        raise error
+
+    monkeypatch.setattr(module, "_capture_impl", fail)
+    destination = tmp_path / "failure.json"
+    with pytest.raises(ValueError) as result:
+        module._capture({"failure_path": str(destination)})
+    assert result.value is error and str(result.value) == "synthetic private diagnostic text"
+    report = json.loads(destination.read_text())
+    assert report["source"] == "tests/native/mcp_capture_host.py"
+    assert "synthetic" not in destination.read_text() and "private" not in destination.read_text()
+
+
+def test_native_failure_record_refuses_untrusted_detail_fields():
+    from e2e_support.failure import validate_failure
+
+    with pytest.raises(AssertionError):
+        validate_failure(
+            {"error_type": "ValueError", "source": None, "line": None, "message": "raw detail"}
+        )

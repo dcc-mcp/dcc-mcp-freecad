@@ -19,6 +19,7 @@ import pytest
 from e2e_support.artifacts import Evidence, digest
 from e2e_support.cleanup import close_owned
 from e2e_support.client import session_flow
+from e2e_support.failure import validate_failure
 from e2e_support.rejection import native_shape_rejection
 
 from dcc_mcp_freecad import bridge as bridge_module
@@ -56,6 +57,7 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
     destination = Path(os.environ.get("FREECAD_E2E_ARTIFACT_DIR", str(tmp_path / "artifacts")))
     evidence = Evidence(destination / ("freecad-" + version))
     model, presentation = tmp_path / "model.FCStd", tmp_path / "presentation.FCStd"
+    image_failure = tmp_path / "native-image-failure.json"
     for key, value in {
         "DCC_MCP_FREECAD_EXECUTABLE": executable,
         "DCC_MCP_FREECAD_BACKEND": "freecadcmd",
@@ -241,6 +243,7 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
                 "document_path": str(presentation),
                 "raw_path": str(tmp_path / "raw.png"),
                 "output_path": str(tmp_path / "clean.png"),
+                "failure_path": str(image_failure),
             },
             30,
         )
@@ -267,6 +270,20 @@ def test_real_sdk_model_appearance_reopen_native_image_and_cleanup(tmp_path, mon
         )
     except BaseException as error:
         error_type = type(error).__name__
+        if evidence.stage == "independent-native-image":
+            report["native_image_status"] = {
+                "native_result_missing": str(error).startswith(
+                    "FreeCAD freecadcmd backend did not return a result"
+                ),
+                "raw_png_created": (tmp_path / "raw.png").is_file(),
+                "clean_png_created": (tmp_path / "clean.png").is_file(),
+            }
+            if image_failure.is_file() and image_failure.stat().st_size <= 4096:
+                report["native_image_failure"] = validate_failure(
+                    json.loads(image_failure.read_text(encoding="utf-8"))
+                )
+            else:
+                report["native_image_failure"] = {"diagnostic_available": False}
     finally:
         admission["open"] = False
         cleanup, terminal = close_owned(server, handle, children)
