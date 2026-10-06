@@ -678,21 +678,29 @@ class FreecadBridge:
         timeout_secs: float = 120,
         visible_objects: Optional[list[str]] = None,
         view: str = "isometric",
+        appearances: Optional[list[dict[str, Any]]] = None,
+        frame_margin: Optional[float] = None,
     ) -> dict[str, Any]:
         source = self._document_path(source_path)
         output = self._output_path(output_path, {_DOCUMENT_SUFFIX})
         presentation = {}
-        if visible_objects is None and view != "isometric":
-            raise BridgeError("A view requires an explicit visible_objects selection")
+        if visible_objects is None and (
+            view != "isometric" or appearances is not None or frame_margin is not None
+        ):
+            raise BridgeError("Presentation options require an explicit visible_objects selection")
         if visible_objects is not None:
-            from .presentation import validate_selection
+            from .presentation import validate_options
 
-            validate_selection(visible_objects, view)
+            validate_options(visible_objects, view, appearances, frame_margin)
             for name in visible_objects:
                 self._object_name(name)
             if source == output:
                 raise BridgeError("Presentation copies must not replace the source")
             presentation = {"visible_objects": visible_objects, "view": view}
+            if appearances is not None:
+                presentation["appearances"] = appearances
+            if frame_margin is not None:
+                presentation["frame_margin"] = frame_margin
         replaced_existing = output.exists()
         if replaced_existing and not overwrite:
             raise BridgeError(_OUTPUT_EXISTS_MESSAGE)

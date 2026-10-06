@@ -200,3 +200,24 @@ atomic replacement. These readbacks cover recorded geometry metrics,
 not full BRep or mesh connectivity equivalence. Source qualification and the
 supported-host GUI persistence gate are recorded in
 [presentation-copy validation](docs/validation/presentation-copy.md).
+
+Optional `appearances` entries contain only `object_name`, three `rgb` numbers,
+and `opacity`. Each number must be finite and in `[0, 1]`; names must be unique
+members of `visible_objects` with non-null top-level Part features and initially
+uniform native face RGB and transparency. FreeCAD's integer-percent transparency rounds
+the requested opacity to 1% resolution (transparency ties round upward). The
+response reports that applied value. RGB is also normalized to the native
+8-bit-per-channel save format using float32 scaling and nearest-integer rounding
+with ties upward. The response retains original values in `presentation_request`
+and reports applied colors/opacity in `presentation.appearances`. All entries are validated before any
+view-provider changes; scalar properties and every native face material are
+checked before saving and after reopening. Only named parts change appearance.
+
+Optional `frame_margin` is a finite fraction in `[0, 1]` added at each side of
+the fitted orthographic camera height: final height is
+`fitted_height * (1 + 2 * frame_margin)`. It does not guarantee pixel padding or
+fix the capture aspect ratio. Omitting it preserves the existing fit behavior.
+Both options require an explicit `visible_objects` selection. These controls
+save native presentation state; they do not render an image or add a material
+execution interface. See the [appearance qualification gate](docs/validation/appearance-copy.md)
+for the source evidence and native tests still required for this enhancement.
