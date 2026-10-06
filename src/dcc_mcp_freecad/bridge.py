@@ -1141,7 +1141,7 @@ class FreecadBridge:
                     # describes the artefact the caller can actually open rather
                     # than the staged copy it was published from.
                     response["bytes"] = output.stat().st_size
-                    response["sha256"] = _sha256_file(output)
+                    response["sha256"] = sha256_file(output)
                 if include_image:
                     response["image_base64"] = base64.b64encode(image).decode("ascii")
                     response["image_media_type"] = "image/png"

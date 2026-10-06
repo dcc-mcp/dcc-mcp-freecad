@@ -138,6 +138,9 @@ rather than quietly dropping the suite.
   failure came from a paint race or from framing; it reports the measurement
   and the caller can tell from the statistics which one it was.
 - Offscreen rendering under `QT_QPA_PLATFORM=offscreen` is what this adapter
-  uses and what CI exercises. FreeCAD's own upstream CI uses `xvfb-run`; if a
-  host cannot render at all under offscreen, Xvfb is the better-supported
-  fallback and `LIBGL_ALWAYS_SOFTWARE=1` remains the first thing to try.
+  uses and what CI exercises. That platform still needs an OpenGL context: on a
+  machine with no GPU and no X display the 3D view dies with
+  `QOpenGLWidget: Failed to create context`. CI therefore installs Mesa's
+  software rasteriser plus Xvfb and runs this lane under `xvfb-run -a`, with
+  `LIBGL_ALWAYS_SOFTWARE=1` set by the bridge; FreeCAD's own upstream CI uses
+  `xvfb-run` for the same reason.

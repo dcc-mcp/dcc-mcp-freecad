@@ -200,6 +200,14 @@ def view_state(doc, gui):
     ``selection`` is ``None`` when the host does not expose it, rather than
     being recorded as empty: an unrecorded state must not be restored as
     "nothing was selected".
+
+    The camera is reported in its settled form -- see
+    :func:`restore_view_state` -- so that a snapshot taken before the render and
+    one taken after describe the same view with the same fields on both
+    supported release lines. FreeCAD 1.1 adds ``nearDistance``/``farDistance``
+    the first time a camera is written back, so an unsettled "before" snapshot
+    and a settled "after" one would differ in serialization while describing the
+    identical view.
     """
     active = gui.getDocument(doc.Name).activeView()
     try:
@@ -207,7 +215,7 @@ def view_state(doc, gui):
     except Exception:
         selection = None
     return {
-        "camera": active.getCamera(),
+        "camera": settled_camera(active),
         "camera_type": active.getCameraType(),
         "visibility": {
             obj.Name: bool(obj.ViewObject.Visibility)
@@ -216,6 +224,26 @@ def view_state(doc, gui):
         },
         "selection": selection,
     }
+
+
+def settled_camera(active):
+    """Return the camera string the host will keep reporting for this view.
+
+    FreeCAD 1.1's ``getCamera`` omits ``nearDistance``/``farDistance`` until
+    the camera has been written back once, then reports them for good. Feeding
+    the host its own string makes that promotion happen here rather than at
+    comparison time, so every snapshot is in the same canonical form. This reads
+    the view and writes the same camera straight back: it moves nothing.
+    """
+    camera = active.getCamera()
+    try:
+        active.setCamera(camera)
+    except Exception:
+        # A view that cannot be written back cannot be promoted either; report
+        # the host's own string rather than failing the snapshot.
+        return camera
+    settled = active.getCamera()
+    return settled if settled.count("\n") >= camera.count("\n") else camera
 
 
 def restore_view_state(doc, gui, state):
@@ -227,6 +255,19 @@ def restore_view_state(doc, gui, state):
     if state.get("camera_type") and active.getCameraType() != state["camera_type"]:
         active.setCameraType(state["camera_type"])
     active.setCamera(state["camera"])
+    # FreeCAD 1.1 grows the serialized camera on the way back in: its
+    # ``getCamera`` omits ``nearDistance``/``farDistance`` for a default camera,
+    # but ``setCamera`` computes and stores them, so one set turns
+    # ``OrthographicCamera { position 0 0 1 ... }`` into one that also carries
+    # ``nearDistance 1 / farDistance 10``. The added values are the ones the
+    # host derives for this exact camera, so the view is where it was -- only
+    # the serialization changed, which would still fail a byte-exact comparison.
+    # Re-applying the string the host reports settles the node: the second call
+    # is fed a camera that already lists every field the host writes, so
+    # ``getCamera`` stops changing and both sides of the comparison report the
+    # same canonical form. On 1.0 the string is already stable and this is a
+    # no-op.
+    active.setCamera(active.getCamera())
     visibility = state.get("visibility") or {}
     for obj in doc.Objects:
         if obj.ViewObject is not None and obj.Name in visibility:
@@ -241,9 +282,10 @@ def restore_view_state(doc, gui, state):
 def states_match(expected, actual):
     """Byte-exact comparison of two :func:`view_state` snapshots.
 
-    Deliberately has no tolerance. The camera round-trips byte-for-byte through
-    ``getCamera``/``setCamera`` on the supported hosts, so anything less than
-    equality is a real difference in where the user's view now points.
+    Deliberately has no tolerance. Once the camera has been round-tripped
+    through ``setCamera`` (see :func:`restore_view_state`) the serialized string
+    is stable on both supported release lines, so anything less than equality is
+    a real difference in where the user's view now points.
     """
     if set(expected) != set(actual):
         return False

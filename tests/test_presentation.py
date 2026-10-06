@@ -420,6 +420,41 @@ def test_view_state_records_the_camera_as_the_host_serialized_it():
     assert state["selection"] == ["A"]
 
 
+def test_view_state_settles_a_camera_the_host_promotes_on_write_back():
+    """FreeCAD 1.1 grows the serialized camera the first time it is written.
+
+    Its ``getCamera`` leaves ``nearDistance``/``farDistance`` out until
+    ``setCamera`` has stored them, so a "before" snapshot and an "after" one can
+    describe the same view in different serializations. Both are settled here,
+    which is what makes the byte-exact restore check hold on both release lines.
+    """
+    unsettled = "OrthographicCamera {\n  height 12.5\n}"
+    settled = "OrthographicCamera {\n  nearDistance 1\n  height 12.5\n}"
+    reported = [unsettled]
+
+    def get_camera():
+        return reported[0]
+
+    def set_camera(value):
+        reported[0] = settled
+
+    active = SimpleNamespace(
+        getCamera=get_camera,
+        setCamera=set_camera,
+        getCameraType=lambda: "Orthographic",
+    )
+    gui = SimpleNamespace(
+        getDocument=lambda name: SimpleNamespace(activeView=lambda: active),
+        Selection=SimpleNamespace(getSelection=lambda: []),
+    )
+    document = SimpleNamespace(Name="Doc", Objects=[])
+    assert presentation.settled_camera(active) == settled
+    reported[0] = unsettled
+    assert presentation.view_state(document, gui)["camera"] == settled
+    # Settling is idempotent: a second snapshot of the same view is identical.
+    assert presentation.view_state(document, gui)["camera"] == settled
+
+
 def test_view_state_records_no_selection_rather_than_an_empty_one():
     active = SimpleNamespace(getCamera=lambda: "camera", getCameraType=lambda: "Orthographic")
     gui = SimpleNamespace(

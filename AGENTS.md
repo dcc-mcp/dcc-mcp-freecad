@@ -42,11 +42,17 @@ Both lanes install a real FreeCAD first via `bash .github/scripts/install-freeca
 then assert the run actually measured something with
 `python3 .github/scripts/verify-freecad-run.py <junitxml> <expected-count>`.
 The expected counts are asserted in `.github/workflows/ci.yml` (32 for the
-headless lane, 27 for the GUI lane): a run that collects fewer tests than the
+headless lane, 38 for the GUI lane): a run that collects fewer tests than the
 count fails instead of reporting a green skip. Never lower those numbers to make
 a lane pass, and when a lane gains tests, raise the count in the same change --
 `ci.yml` is the source of truth, so a count here that disagrees with it is
 drift.
+
+The GUI lane additionally needs a headless GL stack. `QT_QPA_PLATFORM=offscreen`
+is not enough on its own: the 3D view still asks for an OpenGL context, so on a
+runner it dies with `QOpenGLWidget: Failed to create context`. CI installs Mesa's
+software rasteriser plus Xvfb and runs the lane under `xvfb-run -a`; a local run
+on Linux needs the same packages.
 
 ## Repo layout
 
