@@ -77,6 +77,7 @@ def run(cmd: List[str]) -> Tuple[int, str, str]:
         encoding="utf-8",
         errors="replace",
         cwd=str(REPO_ROOT),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -85,20 +86,46 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def _normalize(data: bytes) -> bytes:
+    """Compare and push LF-normalized bytes.
+
+    `core.autocrlf` decides the checkout's line endings, not the content, so a
+    raw byte compare flips from "0 drift" to "everything drifted" depending on
+    which host last ran the push. Normalizing on both sides makes the verdict a
+    property of the content and keeps push and check on one code path.
+    """
+    return data.replace(b"\r\n", b"\n")
+
+
+def _is_tracked(path: Path, root: Path) -> bool:
+    """Skip build artefacts and dotfiles that must never reach the registry.
+
+    `tests/` imports the skill scripts by path, so a pytest run leaves
+    `__pycache__/*.pyc` behind; without this filter the next `--check` reports
+    three bogus drifts and the following push uploads compiled binaries into
+    what an agent run actually mounts.
+    """
+    parts = path.relative_to(root).parts
+    return not any(
+        part in {"__pycache__", ".git", ".hg", ".svn"}
+        or part.endswith(".pyc")
+        or (part.startswith(".") and part != ".")
+        for part in parts
+    )
+
+
 def local_snapshot(root: Path) -> Dict[str, bytes]:
-    """Every file in the skill tree, keyed by its registry path."""
+    """Every tracked file in the skill tree, keyed by its registry path."""
     out: Dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
-        if path.is_file():
-            out[path.relative_to(root).as_posix()] = path.read_bytes()
+        if path.is_file() and _is_tracked(path, root):
+            out[path.relative_to(root).as_posix()] = _normalize(path.read_bytes())
     return out
 
 
 def registry_snapshot(skill_id: str) -> Optional[Dict[str, bytes]]:
     """Read the bytes an agent run would actually mount."""
-    code, out, err = run(
-        ["monica", "skill", "get", skill_id, "--with-content", "--output", "json"]
-    )
+    code, out, err = run(["monica", "skill", "get", skill_id, "--with-content", "--output", "json"])
     if code != 0:
         print(f"  monica skill get {skill_id} 失败（exit {code}）: {err.strip()}", file=sys.stderr)
         return None
@@ -108,27 +135,64 @@ def registry_snapshot(skill_id: str) -> Optional[Dict[str, bytes]]:
         print(f"  monica skill get {skill_id} 返回非 JSON: {exc}", file=sys.stderr)
         return None
     snapshot = {
-        SKILL_BODY: (payload.get("content") or "").encode("utf-8"),
+        SKILL_BODY: _normalize((payload.get("content") or "").encode("utf-8")),
     }
     for entry in payload.get("files") or []:
-        snapshot[str(entry["path"])] = (entry.get("content") or "").encode("utf-8")
+        snapshot[str(entry["path"])] = _normalize((entry.get("content") or "").encode("utf-8"))
     return snapshot
 
 
+def registry_file_ids(skill_id: str) -> Dict[str, str]:
+    """Registry path -> file id, needed to delete a file the repo dropped."""
+    code, out, err = run(["monica", "skill", "files", "list", skill_id, "--output", "json"])
+    if code != 0:
+        print(
+            f"  monica skill files list {skill_id} 失败（exit {code}）: {err.strip()}",
+            file=sys.stderr,
+        )
+        return {}
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError as exc:
+        print(f"  monica skill files list {skill_id} 返回非 JSON: {exc}", file=sys.stderr)
+        return {}
+    entries = payload if isinstance(payload, list) else (payload.get("files") or [])
+    return {str(e["path"]): str(e["id"]) for e in entries if "path" in e and "id" in e}
+
+
 def push(skill_id: str, root: Path, snapshot: Dict[str, bytes]) -> bool:
+    """Upsert every local file, then delete registry files the repo dropped."""
     ok = True
     for rel in sorted(snapshot):
         if rel == SKILL_BODY:
             cmd = ["monica", "skill", "update", skill_id, "--content-file", str(root / rel)]
         else:
             cmd = [
-                "monica", "skill", "files", "upsert", skill_id,
-                "--path", rel, "--content-file", str(root / rel),
+                "monica",
+                "skill",
+                "files",
+                "upsert",
+                skill_id,
+                "--path",
+                rel,
+                "--content-file",
+                str(root / rel),
             ]
         code, _out, err = run(cmd)
         if code != 0:
             ok = False
             print(f"  写入失败 {rel}（exit {code}）: {err.strip()}", file=sys.stderr)
+
+    remote_ids = registry_file_ids(skill_id)
+    for rel in sorted(set(remote_ids) - set(snapshot)):
+        if rel == SKILL_BODY:
+            continue
+        code, _out, err = run(["monica", "skill", "files", "delete", skill_id, remote_ids[rel]])
+        if code != 0:
+            ok = False
+            print(f"  删除失败 {rel}（exit {code}）: {err.strip()}", file=sys.stderr)
+        else:
+            print(f"  已删除注册表里不存在于仓库的文件 {rel}")
     return ok
 
 
@@ -189,7 +253,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  OK {len(local)} 个文件与注册表逐字节一致")
 
     if failed:
-        print("\n注册表与仓库不一致：运行 python scripts/sync_monica_skills.py 重新同步。")
+        print(
+            "\n注册表与仓库不一致：运行 python scripts/sync_monica_skills.py 重新同步"
+            "（新增/修改/删除的文件都会同步，删除需要 monica CLI 与工作区权限）。"
+        )
         return 1
     return 0
 
