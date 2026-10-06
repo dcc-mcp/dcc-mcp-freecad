@@ -1037,6 +1037,11 @@ class FreecadBridge:
                     stderr_file.seek(0)
                     stdout = stdout_file.read(65_537)
                     stderr = stderr_file.read(65_537)
+            if process.returncode != 0:
+                raise BridgeError(
+                    "FreeCAD %s backend exited unsuccessfully (exit %s)"
+                    % (self.backend, process.returncode)
+                )
             if not result_path.is_file():
                 raise BridgeError(
                     "FreeCAD %s backend did not return a result (exit %s): %s"
