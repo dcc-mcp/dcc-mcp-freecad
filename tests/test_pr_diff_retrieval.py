@@ -189,3 +189,32 @@ def test_project_requires_python_37():
         .read_text(encoding="utf-8")
     )
     assert ">=3.7" in text
+
+
+def test_empty_diff_text_guarded_in_main():
+    """`result` 是 dict，空 diff 时仍是真值 —— 必须单独判 `diff_text`。
+
+    只写 `if not result: sys.exit(1)` 拦不住空变更集：dict 非空即真值，
+    于是照样打印"获取成功"并退出 0，调用方读成"这个 PR 没有改动"。
+    """
+    src = (SKILL_SCRIPTS / "fetch_pr_diff.py").read_text(encoding="utf-8")
+    assert 'result.get("diff_text")' in src
+    # 该判定必须落在打印"获取成功"之前，否则先报成功再退出也已于事无补
+    guard = src.index('result.get("diff_text")')
+    success = src.index("获取成功")
+    assert guard < success
+
+
+def test_failed_fetch_aborts_instead_of_running_doomed_diff():
+    """fetch 缺任一个 sha 就直接返回，不再跑一个注定失败的 diff。
+
+    继续跑下去会让 git 的报错顶替真正的根因，干扰定位。
+    """
+    src = (SKILL_SCRIPTS / "fetch_pr_diff.py").read_text(encoding="utf-8")
+    assert "中止 fallback" in src
+
+
+def test_docstring_matches_two_dot_diff():
+    """docstring 不得再写三点式 —— 那正是本条的回归向量。"""
+    src = (SKILL_SCRIPTS / "fetch_pr_diff.py").read_text(encoding="utf-8")
+    assert "git diff base_sha...head_sha" not in src

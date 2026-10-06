@@ -338,8 +338,16 @@ def fetch_github_pr(info: dict, token: Optional[str]) -> Optional[dict]:
 def git_clone_and_diff(clone_url: str, base_sha: str, head_sha: str,
                        token: Optional[str], platform: str) -> str:
     """
-    克隆仓库，checkout head_sha，然后 git diff base_sha...head_sha。
-    适用于 API 无法获取完整 diff 的场景（大 MR 等）。
+    Clone the repo, fetch both SHAs, then git diff base_sha head_sha.
+
+    Uses the two-dot form, not `base...head`: the three-dot form needs a
+    merge base, which a `--depth=50` clone often does not have, and it then
+    yields an empty diff that looks like "no changes". The API's base_sha is
+    already the comparison base for this PR, so the two-dot form is the
+    intended comparison.
+
+    Returns "" on any failure. Callers must treat that as failure, not as an
+    empty PR — see the diff_text check in main().
     """
     if not base_sha or not head_sha:
         print("⚠️  缺少 base/head sha，无法执行 git diff fallback", file=sys.stderr)
@@ -375,8 +383,11 @@ def git_clone_and_diff(clone_url: str, base_sha: str, head_sha: str,
                 capture_output=True, text=True, cwd=tmpdir
             )
             if rf.returncode != 0:
-                print(f"  fetch {sha[:12]} 失败: {redact(rf.stderr[:200], token)}",
-                      file=sys.stderr)
+                # 缺任一个 sha，后面的 diff 必然失败 —— 直接中止，不要跑一个
+                # 注定失败的命令再把它的报错当成根因。
+                print(f"  fetch {sha[:12]} 失败，中止 fallback: "
+                      f"{redact(rf.stderr[:200], token)}", file=sys.stderr)
+                return ""
 
         # 三点式 `base...head` 需要 merge base，depth=50 的历史常常没有 →
         # 改用两点式 `base head`。API 返回的 base_sha 已经是本 PR 的比较基准，
@@ -456,6 +467,15 @@ def main():
         sys.exit(1)
 
     if not result:
+        sys.exit(1)
+
+    # `result` 是 dict，空 diff 时它仍然是真值 —— `if not result` 拦不住。
+    # 必须单独判 `diff_text`：空变更集配退出码 0 会让调用方读成"这个 PR 没有改动"，
+    # 与真实失败无法区分。
+    if not result.get("diff_text"):
+        print("❌ 获取到的 diff 为空：浅克隆可能缺 merge base，"
+              "或该 PR/MR 确实无可比较的改动。按失败处理，不输出空结果。",
+              file=sys.stderr)
         sys.exit(1)
 
     # 输出摘要到 stderr（供 Agent 消费）

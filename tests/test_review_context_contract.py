@@ -587,6 +587,36 @@ def test_build_counts_is_shared_by_both_paths():
     assert src.count("build_counts(items)") == 2
 
 
+def test_container_exclusion_line_is_emitted():
+    """AC #4 要求的「已识别并排除 N 条容器评论」必须有输出且被锁住。
+
+    这行是 AC #4 唯一对外的可观测证据；没有任何测试锁住它的话，
+    容器识别一旦回退，采集器会静默少报一行而恒等式仍然平衡（因为
+    container 归零时 total 也同步归零），回归会悄悄溜过去。
+    """
+    src = (SKILL_SCRIPTS / "collect_pr_context.py").read_text(encoding="utf-8")
+    assert "已识别并排除" in src
+    assert "container=" in src  # 分类行里也要带 container 计数
+
+
+def test_container_exclusion_line_only_when_containers_exist():
+    """容器数为 0 时不该打印那行 —— 否则读的人会以为识别失效。"""
+    import subprocess
+    import sys
+
+    script = SKILL_SCRIPTS / "collect_pr_context.py"
+    src = script.read_text(encoding="utf-8")
+    assert 'if c.get("container"):' in src
+    # 该行受 container 计数保护，而非无条件打印
+    guarded = src.index("已识别并排除")
+    guard = src.index('if c.get("container"):')
+    assert guard < guarded
+
+    # 冒烟：脚本可被调用（不联网也能验证参数面不炸）
+    r = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True)
+    assert r.returncode == 0
+
+
 def test_strict_identity_check_precedes_payload_write():
     """--strict-identity 必须在序列化/落盘之前判定。
 
