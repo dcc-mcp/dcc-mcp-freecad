@@ -21,6 +21,69 @@ tools:
     timeout_hint_secs: 30
     annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
 
+  - name: list_documents
+    description: >-
+      Discover FCStd documents under the allowed roots without opening any of
+      them. Returns a bounded, paginated listing (path relative to the root it
+      was found under, absolute path ready for inspect_document, size,
+      modification time, and a bounded SHA-256). Purely a filesystem
+      enumeration: no FreeCAD process is started, no document is opened or
+      recomputed, and nothing is written. A root outside the allowed roots is
+      refused with an error rather than silently returning nothing.
+    source_file: scripts/list_documents.py
+    input_schema:
+      type: object
+      properties:
+        root:
+          type: string
+          minLength: 1
+          description: >-
+            Directory to search, resolved like any document path. Omit it to
+            search every allowed root. An explicit root must itself be inside
+            DCC_MCP_FREECAD_ALLOWED_ROOTS.
+        pattern:
+          type: string
+          minLength: 1
+          maxLength: 128
+          default: "*.FCStd"
+          description: >-
+            Case-insensitive glob matched against the file name only, never a
+            path. Narrow root instead of matching directories.
+        recursive:
+          type: boolean
+          default: true
+          description: Include subdirectories. Symlinked directories and files are always skipped.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 100
+          description: Maximum entries to return. A response byte budget also applies, so fewer may be returned.
+        offset:
+          type: integer
+          minimum: 0
+          description: Entries to skip before collecting a page. Use next_offset from the previous page.
+        include_object_count:
+          type: boolean
+          default: false
+          description: >-
+            Read each archive's object count from its stored document index.
+            Costs one bounded read per entry and returns null when the index is
+            missing, oversized, or unreadable.
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 120
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+    call_examples:
+      - arguments: {}
+      - arguments: {root: "projects", pattern: "*.FCStd", limit: 20}
+      - arguments: {pattern: "bracket-*.FCStd", include_object_count: true}
+    next-tools: {on-success: [inspect_document, create_document], on-failure: [get_status]}
+
   - name: create_document
     description: Create an empty durable FCStd document with atomic destination replacement.
     source_file: scripts/create_document.py

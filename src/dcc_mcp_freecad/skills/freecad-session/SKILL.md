@@ -1,10 +1,10 @@
 ---
 name: freecad-session
 description: >-
-  Create, inspect, validate, copy, snapshot, restore, and safely edit durable
-  FreeCAD documents through an isolated FreeCADCmd process. Use for FCStd
-  document lifecycle, recoverability, and diagnostics; load freecad-modeling
-  for geometry operations.
+  Discover, create, inspect, validate, copy, snapshot, restore, and safely edit
+  durable FreeCAD documents through an isolated FreeCADCmd process. Use for
+  FCStd document lifecycle, discovery, recoverability, and diagnostics; load
+  freecad-modeling for geometry operations.
 license: MIT
 compatibility: "Python 3.7+; FreeCAD 1.0.x or 1.1.x (see compat_matrix.json); dcc-mcp-core 0.20.36+"
 allowed-tools: "python"
@@ -15,15 +15,22 @@ metadata:
     version: "0.7.0"  # x-release-please-version
     tags: [freecad, cad, parametric-modeling, pipeline]
     search-hint: >-
-      FreeCAD status capabilities create inspect validate copy snapshot restore
-      undo recover rollback FCStd document remove object dependency-aware
-      atomic save run script python file escape hatch
+      FreeCAD status capabilities list discover create inspect validate copy
+      snapshot restore undo recover rollback FCStd document remove object
+      dependency-aware atomic save run script python file escape hatch
     tools: tools.yaml
 ---
 
 # FreeCAD Session
 
-Start with `get_status`, then create or inspect a durable `.FCStd` document.
+Start with `get_status`. When the caller does not already know the path, use
+`list_documents` first: it enumerates the `.FCStd` files under
+`DCC_MCP_FREECAD_ALLOWED_ROOTS` and returns each one's `absolute_path`, ready
+to hand to `inspect_document`. It is a filesystem listing, so it works even
+before a FreeCAD host is configured, and it never opens, recomputes, or rewrites
+a document. Paging is bounded: follow `next_offset` while `truncated` is true,
+and narrow `root` or `pattern` when `scan_budget_exhausted` is true.
+
 Every mutation runs on a sibling staging copy and replaces the original only
 after FreeCADCmd reports success and a non-empty document exists.
 
