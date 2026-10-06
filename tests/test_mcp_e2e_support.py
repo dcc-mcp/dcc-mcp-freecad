@@ -121,3 +121,42 @@ def test_public_junit_retains_counts_but_removes_private_diagnostics(tmp_path):
     text = target.read_text()
     assert "private" not in text and "secret" not in text
     assert ET.fromstring(text).find("testsuite").get("failures") == "1"
+
+
+@pytest.mark.parametrize("module_name", ["mcp_capture_host", "__main__"])
+@pytest.mark.parametrize("dispatch", [False, True])
+def test_capture_fixture_dispatches_when_freecad_imports_command_line_module(
+    monkeypatch, module_name, dispatch
+):
+    import importlib.util
+    import runpy
+    import sys
+    from importlib.machinery import ModuleSpec
+    from types import SimpleNamespace
+
+    path = Path(__file__).parent / "native/mcp_capture_host.py"
+    events = []
+    driver = SimpleNamespace(_METHODS={}, main=lambda: events.append("main"))
+
+    class FixtureLoader:
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            assert "--pass" not in sys.argv
+            module._driver = lambda: driver
+
+    original = importlib.util.spec_from_file_location
+
+    def fixture_spec(name, location, *args, **kwargs):
+        if Path(location).name == "presentation_host.py":
+            return ModuleSpec(name, FixtureLoader())
+        return original(name, location, *args, **kwargs)
+
+    arguments = [str(path)] + (["--pass", "request.json", "result.json"] if dispatch else [])
+    monkeypatch.setattr(sys, "argv", arguments)
+    monkeypatch.setattr(importlib.util, "spec_from_file_location", fixture_spec)
+    namespace = runpy.run_path(str(path), run_name=module_name)
+    assert sys.argv is arguments
+    assert events == (["main"] if dispatch else [])
+    assert driver._METHODS == ({"fixture.capture": namespace["_capture"]} if dispatch else {})

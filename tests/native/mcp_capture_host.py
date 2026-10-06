@@ -84,7 +84,8 @@ def _capture(params):
         raise
 
 
-if __name__ == "__main__" and "--pass" in sys.argv:
+# FreeCAD imports command-line .py files as modules before its run-file fallback.
+if "--pass" in sys.argv:
     driver = fixture._driver()
     driver._METHODS["fixture.capture"] = _capture
     driver.main()
