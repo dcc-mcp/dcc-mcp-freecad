@@ -1,0 +1,41 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Local AI-agent / IDE directories.
+#
+# These are mount points for agent runtimes (Monica, Claude Code, Codex, Cursor,
+# Kimi, ...). Their contents are materialised per run from the Monica workspace
+# skill registry, so a committed copy is never what a run actually loads - it
+# only drifts out of date the moment the registry moves on. Anchored with a
+# leading "/" so only the repository root matches; unanchored patterns would
+# silently ignore a nested directory of the same name.
+/.agents/
+/.agent_context/
+/.aider/
+/.augment/
+/.beads/
+/.claude/
+/.cline/
+/.clinerules/
+/.codebuddy/
+/.codegraph/
+/.codex/
+/.continue/
+/.cursor/
+/.gemini/
+/.kimi/
+/.kiro/
+/.monica/
+/.multica/
+/.opencode/
+/.roo/
+/.serena/
+/.trae/
+/.windsurf/
+

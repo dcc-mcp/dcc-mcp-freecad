@@ -1,0 +1,164 @@
+tools:
+  - name: get_status
+    description: Verify the configured native FreeCAD backend, version, Python runtime, workspace roots, and limits.
+    source_file: scripts/get_status.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: get_capabilities
+    description: List typed document/modeling methods, primitives, booleans, formats, and safety boundaries.
+    source_file: scripts/get_capabilities.py
+    input_schema: {type: object, properties: {}, additionalProperties: false}
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 30
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+
+  - name: create_document
+    description: Create an empty durable FCStd document with atomic destination replacement.
+    source_file: scripts/create_document.py
+    input_schema:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string, minLength: 1}
+        overwrite: {type: boolean, default: false}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {path: "projects/enclosure.FCStd"}
+    next-tools: {on-success: [inspect_document], on-failure: [get_status]}
+
+  - name: inspect_document
+    description: Inspect document metadata, objects, links, placements, shapes, meshes, and bounding boxes.
+    source_file: scripts/inspect_document.py
+    input_schema:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string, minLength: 1}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {path: "projects/enclosure.FCStd"}
+
+  - name: validate_document
+    description: Recompute an FCStd document and report invalid or empty Part shapes.
+    source_file: scripts/validate_document.py
+    input_schema:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string, minLength: 1}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    next-tools: {on-failure: [inspect_document, get_status]}
+
+  - name: save_copy
+    description: Save an FCStd document to a new output path without changing the source. Publication is atomic for overwrite=true and for the hard-link path used by overwrite=false. Where the output volume has no hard-link support (FAT/exFAT, some SMB/FUSE mounts), overwrite=false falls back to an exclusive create plus copy, which never replaces the destination but is not atomic - a concurrent reader can observe a partially written .fcstd. Publication fails with a hard-link error and the overwrite=true escape hatch if neither is available. Explicit overwrite uses atomic replacement.
+    source_file: scripts/save_copy.py
+    input_schema:
+      type: object
+      required: [source_path, output_path]
+      properties:
+        source_path: {type: string, minLength: 1}
+        output_path: {type: string, minLength: 1}
+        overwrite: {type: boolean, default: false}
+        visible_objects:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+          description: Optional explicit top-level non-container native view-provider selection; group members are rejected. Requires the installed FreeCAD GUI library.
+        view: {type: string, enum: [isometric, front, top, right], default: isometric}
+        appearances:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          description: Optional uniform native Part colors. Names must be unique members of visible_objects with non-null Part shapes and initially uniform face RGB and transparency. RGB and opacity are finite fractions. Applied RGB uses native float32 scaling to nearest 8-bit channels (ties upward); opacity uses the nearest 1 percent (transparency ties upward). Original values are returned in presentation_request and applied values in presentation.appearances.
+          items:
+            type: object
+            required: [object_name, rgb, opacity]
+            additionalProperties: false
+            properties:
+              object_name: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+              rgb:
+                type: array
+                minItems: 3
+                maxItems: 3
+                items: {type: number, minimum: 0, maximum: 1}
+              opacity: {type: number, minimum: 0, maximum: 1}
+        frame_margin:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Optional extra fraction of fitted orthographic camera height at each side. Final height is fitted_height * (1 + 2 * frame_margin), not a guarantee of pixel padding. Requires visible_objects.
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      dependencies:
+        appearances: [visible_objects]
+        frame_margin: [visible_objects]
+      if:
+        required: [view]
+        properties:
+          view: {enum: [front, top, right]}
+      then:
+        required: [visible_objects]
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+
+  - name: remove_object
+    description: Remove an object, refusing dependents unless cascade removal is explicit.
+    source_file: scripts/remove_object.py
+    input_schema:
+      type: object
+      required: [document_path, object_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        cascade: {type: boolean, default: false}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    next-tools: {on-success: [inspect_document, validate_document], on-failure: [inspect_document]}
