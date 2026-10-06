@@ -8,7 +8,9 @@ from .bridge import get_bridge
 from .snapshots import SnapshotError
 
 
-def _success(message: str, postcondition_method: str, result: dict[str, Any]) -> dict[str, Any]:
+def bridge_success(
+    message: str, postcondition_method: str, result: dict[str, Any]
+) -> dict[str, Any]:
     checks = result.get("verified")
     if isinstance(checks, list):
         context = dict(result)
@@ -28,7 +30,7 @@ def bridge_main(method: str, message: str) -> Callable[..., dict[str, Any]]:
         result = getattr(get_bridge(), method)(**kwargs)
         # Core's verified keyword is boolean postcondition metadata, not the
         # native driver's list of completed checks. Keep that list in context.
-        return _success(message, "native_document_readback", result)
+        return bridge_success(message, "native_document_readback", result)
 
     return main
 
@@ -58,6 +60,6 @@ def snapshot_main(method: str, message: str) -> Callable[..., dict[str, Any]]:
                 possible_solutions=list(error.remediation) or None,
                 **error.details,
             )
-        return _success(message, "snapshot_readback", result)
+        return bridge_success(message, "snapshot_readback", result)
 
     return main

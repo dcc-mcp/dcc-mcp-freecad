@@ -1,0 +1,69 @@
+tools:
+  - name: list_parts
+    description: List standard parts from the configured offline parts library, returning a part_ref per entry.
+    source_file: scripts/list_parts.py
+    input_schema:
+      type: object
+      properties:
+        category:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Optional top-level library directory, case-insensitive; matches that directory and everything under it.
+        query:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Optional case-insensitive substring matched against the part's relative path.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 50
+          description: Bounded page size. Results are sorted by relative path; truncated is true when more matched.
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: sync
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 60
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: false}
+    call_examples:
+      - arguments: {}
+      - arguments: {category: Fasteners, query: M8, limit: 20}
+    next-tools: {on-success: [insert_part], on-failure: [get_status]}
+
+  - name: insert_part
+    description: Insert a standard part from the configured offline parts library into an FCStd document with translation and axis-angle rotation.
+    source_file: scripts/insert_part.py
+    input_schema:
+      type: object
+      required: [document_path, part_ref, object_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        part_ref:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: >-
+            POSIX-relative path from list_parts. Absolute paths, '..' segments, backslashes and
+            unsupported suffixes are refused by the tool with a stable error code before FreeCAD
+            starts; a reference that resolves outside the library roots, including through a
+            symlink, is refused with part_ref_escapes_library.
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        label: {type: string, minLength: 1, maxLength: 256}
+        translation: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
+        rotation_axis: {type: array, minItems: 3, maxItems: 3, items: {type: number}, default: [0, 0, 1]}
+        rotation_degrees: {type: number, default: 0}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 600}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", part_ref: "fasteners/iso4014-m8x40.step", object_name: BoltM8x40, translation: [10, 20, 0], rotation_axis: [0, 0, 1], rotation_degrees: 90}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}

@@ -9,7 +9,7 @@ ROOT = Path(__file__).parents[1]
 SKILLS = ROOT / "src" / "dcc_mcp_freecad" / "skills"
 
 
-SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify")
+SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify", "freecad-parts")
 
 
 def test_skill_contracts_are_valid():
@@ -25,8 +25,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 22
-    assert len({tool["name"] for tool in tools}) == 22
+    assert len(tools) == 24
+    assert len({tool["name"] for tool in tools}) == 24
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
