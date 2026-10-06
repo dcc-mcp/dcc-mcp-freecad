@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -191,18 +193,52 @@ def test_project_requires_python_37():
     assert ">=3.7" in text
 
 
-def test_empty_diff_text_guarded_in_main():
-    """`result` 是 dict，空 diff 时仍是真值 —— 必须单独判 `diff_text`。
+def _run_main(monkeypatch, capsys, result, url="https://github.com/o/r/pull/1"):
+    """以给定 fetch 结果跑 `main()`，返回退出码与合并后的输出。"""
+    monkeypatch.setattr(sys, "argv", ["fetch_pr_diff", url, "--no-fallback"])
+    monkeypatch.setattr(fpd, "fetch_github_pr", lambda info, token: result)
+    monkeypatch.setattr(fpd, "fetch_gongfeng_mr", lambda info, token: result)
 
-    只写 `if not result: sys.exit(1)` 拦不住空变更集：dict 非空即真值，
-    于是照样打印"获取成功"并退出 0，调用方读成"这个 PR 没有改动"。
+    code = 0
+    with pytest.raises(SystemExit) as excinfo:
+        fpd.main()
+    code = excinfo.value.code or 0
+    cap = capsys.readouterr()
+    return code, cap.out + cap.err
+
+
+def test_empty_diff_text_exits_nonzero(monkeypatch, capsys):
+    """空 diff 必须以非零码退出 —— `result` 是 dict，`if not result` 拦不住。
+
+    断言锚在退出动作上，而不是 `result.get("diff_text")` 这个子串：
+    后者在修复前就已存在于 fallback 分支，子串断言在修复前的 head 上同样 PASS。
     """
-    src = (SKILL_SCRIPTS / "fetch_pr_diff.py").read_text(encoding="utf-8")
-    assert 'result.get("diff_text")' in src
-    # 该判定必须落在打印"获取成功"之前，否则先报成功再退出也已于事无补
-    guard = src.index('result.get("diff_text")')
-    success = src.index("获取成功")
-    assert guard < success
+    empty = {"title": "t", "diff_text": "", "files_changed": ["a.py"]}
+    code, out = _run_main(monkeypatch, capsys, empty)
+    assert code != 0, "空 diff 必须非零退出，否则调用方读成「这个 PR 没有改动」"
+    assert "获取成功" not in out, "空 diff 不得先打印成功再退出"
+
+
+def test_nonempty_diff_still_succeeds(monkeypatch, capsys, tmp_path):
+    """非空 diff 仍走成功路径 —— 上一条不得误伤正常情况（阳性对照）。"""
+    out_file = tmp_path / "pr.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fetch_pr_diff",
+            "https://github.com/o/r/pull/1",
+            "--no-fallback",
+            "--output",
+            str(out_file),
+        ],
+    )
+    ok = {"title": "t", "diff_text": "diff --git a/x b/x", "files_changed": ["x"]}
+    monkeypatch.setattr(fpd, "fetch_github_pr", lambda info, token: ok)
+    fpd.main()  # 成功路径不抛 SystemExit；这里断言它确实正常返回
+    cap = capsys.readouterr()
+    assert "获取成功" in cap.out + cap.err
+    assert json.loads(out_file.read_text(encoding="utf-8"))["diff_text"] == ok["diff_text"]
 
 
 def test_failed_fetch_aborts_instead_of_running_doomed_diff():
