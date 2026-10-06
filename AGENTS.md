@@ -41,16 +41,18 @@ python -m pytest -m freecad_gui -v --junitxml=freecad-gui.xml
 Both lanes install a real FreeCAD first via `bash .github/scripts/install-freecad.sh`,
 then assert the run actually measured something with
 `python3 .github/scripts/verify-freecad-run.py <junitxml> <expected-count>`.
-The expected counts (3 for the headless lane, 27 for the GUI lane) are the
-contract: a run that collects fewer tests than the count fails instead of
-reporting a green skip. Never lower those numbers to make a lane pass.
+The expected counts (13 for the headless lane, 30 for the GUI lane) are the
+contract: a run that collects a different number of tests than the count fails
+instead of reporting a green skip. Never lower those numbers to make a lane
+pass, and update them in the same change that adds or removes a marked test.
 
 ## Repo layout
 
 | Path | Role |
 |---|---|
-| `src/dcc_mcp_freecad/` | Adapter package — `server.py`, `cli.py`, `doctor.py`, `bridge.py`, `freecad_driver.py`, `module_runner.py`, `skill_tools.py`, `write_contract.py`, `__version__.py` |
+| `src/dcc_mcp_freecad/` | Adapter package — `server.py`, `cli.py`, `doctor.py`, `bridge.py`, `freecad_driver.py`, `module_runner.py`, `skill_tools.py`, `write_contract.py`, `drawing.py`, `presentation.py`, `__version__.py` |
 | `src/dcc_mcp_freecad/skills/` | Shipped skills; shipped as wheel artifacts |
+| `src/dcc_mcp_freecad/templates/` | Built-in TechDraw page templates; shipped as wheel artifacts |
 | `src/dcc_mcp_freecad/compat_matrix.json` | Host compatibility matrix (`1.0.x` / `1.1.x`) |
 | `tests/` | pytest suite; host-free by default, FreeCAD lanes behind markers |
 | `docs/` | Human-readable guides |
