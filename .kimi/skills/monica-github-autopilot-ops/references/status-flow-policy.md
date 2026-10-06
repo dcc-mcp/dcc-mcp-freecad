@@ -18,7 +18,7 @@ Use status plus metadata plus recent comments/runs to decide the next action.
 
 Squad leader activity such as `action`, `no_action`, and `failed` is useful timeline evidence.
 
-- `action`: the leader delegated or took action. Verify that a real trigger happened: assignment, mention, rerun, child issue, or status/metadata update.
+- `action`: the leader delegated or took action. Verify that a real trigger happened: assignment, mention, rerun, or child issue. A status/metadata update on its own is **not** a trigger — see Source Of Truth above; treat an `action` backed only by a status change as unconfirmed.
 - `no_action`: preserve the decision, but patrol may reopen/reroute if new evidence arrives.
 - `failed`: treat as recovery input. Inspect failure reason and rerun/reassign if still actionable.
 
@@ -60,10 +60,15 @@ Rules:
 
 ## Safe Mutation Order
 
-1. Add a compact comment with evidence and at most one live mention.
+1. Add a compact evidence comment **without** a live mention.
 2. Update metadata.
 3. Update status.
-4. Assign/reassign or rerun as the final mutation.
+4. Add the live mention, or assign/reassign, as the final mutation.
+
+The live mention must come last. A mention enqueues a run immediately, so if it goes out
+before metadata and status are written, the owner wakes up and reads the pre-update state.
+The earlier ordering had the evidence comment carry the mention at step 1, which raced the
+metadata and status writes that followed it.
 
 ## Dedicated Recovery Automation
 

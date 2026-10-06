@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import List, Optional
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -94,6 +95,20 @@ def parse_pr_url(url: str) -> dict:
 
 # ── HTTP 工具 ─────────────────────────────────────────────────────────────────
 
+def redact(text: str, secret: Optional[str] = None) -> str:
+    """把 token 从任意输出里抹掉。
+
+    git 的错误文本、remote 回显和 .git/config 都可能带出凭据；
+    任何打印 stderr 的地方都必须先过这一层。
+    """
+    if not text:
+        return text
+    if secret:
+        text = text.replace(secret, "***")
+    # 兜底：抹掉 URL 里 `//user:pass@host` 形式的凭据
+    return re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1***@", text)
+
+
 def http_get(url: str, headers: dict = None, timeout: int = 30) -> dict | str:
     """发送 GET 请求，返回解析的 JSON 或原始文本"""
     req = Request(url)
@@ -105,7 +120,12 @@ def http_get(url: str, headers: dict = None, timeout: int = 30) -> dict | str:
             body = resp.read().decode("utf-8", errors="replace")
             ct = resp.headers.get("Content-Type", "")
             if "json" in ct:
-                return json.loads(body)
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as e:
+                    # Content-Type 声称是 JSON 但体是畸形的 —— 不能让它冒出去
+                    print(f"JSON 解析失败 {url}: {e}", file=sys.stderr)
+                    return None
             return body
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
@@ -113,6 +133,10 @@ def http_get(url: str, headers: dict = None, timeout: int = 30) -> dict | str:
         return None
     except URLError as e:
         print(f"URL error {url}: {e.reason}", file=sys.stderr)
+        return None
+    except (TimeoutError, OSError) as e:
+        # socket.timeout / TimeoutError 不是 URLError 的子类，必须单独 catch
+        print(f"请求超时或 IO 错误 {url}: {e}", file=sys.stderr)
         return None
 
 
@@ -319,44 +343,55 @@ def git_clone_and_diff(clone_url: str, base_sha: str, head_sha: str,
         print("⚠️  缺少 base/head sha，无法执行 git diff fallback", file=sys.stderr)
         return ""
 
-    # 注入认证
+    # 注入认证：用 `git -c http.extraHeader=...` 而不是把 token 拼进 clone URL。
+    # 嵌在 URL 里的 token 会被 git 的错误输出、remote 回显和 .git/config 带出来。
     auth_url = clone_url
+    auth_args: List[str] = []
     if token:
         if platform == "gongfeng":
-            auth_url = clone_url.replace("https://", f"https://oauth2:{token}@")
+            auth_args = ["-c", f"http.extraHeader=PRIVATE-TOKEN: {token}"]
         elif platform == "github":
-            auth_url = clone_url.replace("https://", f"https://x-token:{token}@")
+            auth_args = ["-c", f"http.extraHeader=AUTHORIZATION: Bearer {token}"]
 
     with tempfile.TemporaryDirectory(prefix="code_review_pr_") as tmpdir:
         print(f"  克隆到临时目录: {tmpdir}", file=sys.stderr)
         r = subprocess.run(
-            ["git", "clone", "--depth=50", auth_url, tmpdir],
+            ["git", *auth_args, "clone", "--depth=50", auth_url, tmpdir],
             capture_output=True, text=True
         )
         if r.returncode != 0:
-            print(f"  克隆失败: {r.stderr[:300]}", file=sys.stderr)
+            # git 的错误文本常回显远端 URL 与 header —— 打印前先脱敏。
+            print(f"  克隆失败: {redact(r.stderr[:300], token)}", file=sys.stderr)
             return ""
 
-        # fetch head_sha（shallow clone 可能没有）
-        subprocess.run(
-            ["git", "fetch", "--depth=50", "origin", head_sha],
-            capture_output=True, cwd=tmpdir
-        )
-        subprocess.run(
-            ["git", "fetch", "--depth=50", "origin", base_sha],
-            capture_output=True, cwd=tmpdir
-        )
+        # fetch 两个 sha（shallow clone 可能没有）。必须检查返回码：
+        # 早期版本忽略 rc，失败后 diff 静默返回空串，消费者拿到空变更集且退出码 0，
+        # 等于"这个 PR 没有改动"。
+        for sha in (head_sha, base_sha):
+            rf = subprocess.run(
+                ["git", *auth_args, "fetch", "--depth=50", "origin", sha],
+                capture_output=True, text=True, cwd=tmpdir
+            )
+            if rf.returncode != 0:
+                print(f"  fetch {sha[:12]} 失败: {redact(rf.stderr[:200], token)}",
+                      file=sys.stderr)
 
+        # 三点式 `base...head` 需要 merge base，depth=50 的历史常常没有 →
+        # 改用两点式 `base head`。API 返回的 base_sha 已经是本 PR 的比较基准，
+        # 两点式在语义上就是这次改动。
         r2 = subprocess.run(
-            ["git", "diff", f"{base_sha}...{head_sha}"],
+            ["git", "diff", base_sha, head_sha],
             capture_output=True, text=True, cwd=tmpdir
         )
-        if r2.returncode == 0:
+        if r2.returncode == 0 and r2.stdout.strip():
             print(f"  git diff 成功，diff 大小: {len(r2.stdout)} bytes", file=sys.stderr)
             return r2.stdout
+        if r2.returncode != 0:
+            print(f"  git diff 失败: {redact(r2.stderr[:300], token)}", file=sys.stderr)
         else:
-            print(f"  git diff 失败: {r2.stderr[:300]}", file=sys.stderr)
-            return ""
+            print("  git diff 返回空结果 —— 浅克隆可能缺 merge base，"
+                  "视为获取失败而非空 PR", file=sys.stderr)
+        return ""
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────

@@ -98,19 +98,34 @@ WAITING = {"pending", "queued", "in_progress", "waiting", "requested", "expected
 
 # ── 容器评论（container comments）识别 ─────────────────────────────────────────
 # 同一批 bot 评论里混着两类不含独立 finding 的评论：
-#   - 汇总型：只报计数（"Actionable comments posted: 3" / "5 issues found"）
+#   - 汇总型：只报计数（"Actionable comments posted: 16"）
 #   - 入口型：只给导航（walkthrough / "View reviewed changes" / change-stack）
 # 识别点：没有锚定到具体 file:line 的 finding，正文只有计数或导航。
 # 这类评论计入 out_of_scope 且计入 S2 总条数 —— 否则 `总条数 = 五态之和` 不成立，
 # 不同 PR 的裁决分布行无法横向比较（2026-09-22 试点 1 vs 试点 2 的根因）。
+#
+# 真实语料形状（dcc-mcp-freecad #32/#34/#36 实测，2026-10-06）：
+#   汇总型是 **计数句作开头行**，后面还跟数千字（autofix 复选框 + prompt 块），
+#   所以不能要求整条正文只等于计数句；入口型剥完 HTML 也有 8000 字（walkthrough 正文）。
+#   早期版本两个分支都要求"整条正文很短"，在真实语料上 0/21 命中。
 SUMMARY_CONTAINER_RE = re.compile(
-    r"^\s*(?:actionable\s+comments?\s+posted\s*:\s*\d+|"
+    r"^\s*\W{0,3}\s*(?:actionable\s+comments?\s+posted\s*:\s*\d+|"
     r"\d+\s+(?:issues?|comments?|findings?|suggestions?)\s+found|"
     r"(?:this\s+pr|this\s+merge\s+request)\s+was\s+reviewed|"
     r"(?:found|reviewed)\s+\d+\s+(?:issues?|comments?|findings?)|"
     r"(?:no|0)\s+(?:new\s+)?(?:issues?|comments?|findings?|suggestions?|problems?|blocking\s+issues?)"
-    r"(?:\s+(?:found|detected|to\s+report))?|"
-    r"all\s+checks?\s+passed|lgtm)\s*[.!]?\s*$",
+    r"(?:\s+(?:found|detected|to\s+report|were\s+generated))?|"
+    r"all\s+checks?\s+passed|lgtm)\s*[.!:]?\s*$",
+    re.IGNORECASE,
+)
+# 汇总型在真实语料里是"计数句 + 大段后续"，故按行匹配开头，不按整条匹配。
+SUMMARY_LEAD_RE = re.compile(
+    r"^\s*(?:\*\*|__)?\s*(?:actionable\s+comments?\s+posted\s*:\s*\d+|"
+    r"\d+\s+(?:issues?|comments?|findings?|suggestions?)\s+found|"
+    r"no\s+(?:new\s+)?(?:issues?|comments?|findings?|suggestions?|problems?|blocking\s+issues?)"
+    r"(?:\s+(?:found|detected|to\s+report|were\s+generated))?|"
+    r"(?:this\s+pr|this\s+merge\s+request)\s+was\s+reviewed|"
+    r"all\s+checks?\s+passed|lgtm)\s*[.!:]?\s*(?:\*\*|__)?\s*$",
     re.IGNORECASE,
 )
 NAV_CONTAINER_RE = re.compile(
@@ -119,15 +134,30 @@ NAV_CONTAINER_RE = re.compile(
     r"full\s+report|see\s+all\s+comments|view\s+all\s+comments)",
     re.IGNORECASE,
 )
+# 服务状态/配额通知：bot 说明自己没跑或跑不了，不是对代码的 finding。
+# 例如 codex 的 "You have reached your Codex usage limits for code reviews"。
+# 这类必须计入 out_of_scope 并计入总条数 —— 否则"bot 静默"会被误认为"bot 认可"。
+STATUS_NOTICE_RE = re.compile(
+    r"^\s*(?:\*\*|__)?\s*(?:you\s+have\s+reached\s+(?:your|the)|"
+    r"(?:usage|rate)\s+limit|quota\s+exceeded|"
+    r"(?:this\s+)?(?:review|analysis)\s+(?:was\s+)?(?:skipped|not\s+run|disabled)|"
+    r"unable\s+to\s+(?:review|analyze|run)|no\s+review\s+was\s+performed)",
+    re.IGNORECASE,
+)
 # 正文里出现这些，说明它锚定了具体代码 —— 不是容器评论
 ANCHOR_HINT_RE = re.compile(r"(?:[\w./\\-]+\.(?:py|rs|ts|tsx|js|jsx|go|cpp|c|h|md|toml|ya?ml|json|sh)\s*:\s*\d+)")
-# 剥掉 HTML 注释 / 标签后正文基本为空 = 纯机器生成的容器壳
+# 剥掉 HTML 注释 / 标签后剩下的可读正文
 HTML_NOISE_RE = re.compile(r"(?:<!--.*?-->|<[^>]+>)", re.DOTALL)
-# 自动生成的导航壳：coderabbit 的 review_stack_entry / change-stack 之类
+# 自动生成的外壳标记：出现在正文**开头**即说明这条是 bot 生成的导航/汇总容器。
+# 用"标记 + 位置"而不是"长度"判定 —— 真实 walkthrough 正文长达 8000 字。
+# 只认开头：coderabbit 的 finding 正文里也会出现 `auto-generated comment` 页脚，
+# 若在正文任意位置匹配，会把 15 条真实 finding 全误判成容器（PR #36 实测）。
 AUTOGEN_MARKERS = (
-    "auto-generated comment", "review_stack_entry", "change-stack",
-    "app.coderabbit.ai", "coderabbit.ai",
+    "review_stack_entry_start", "walkthrough_start", "summary by coderabbit",
+    "change-stack", "autofix_checkbox_start",
 )
+# 外壳标记只在这个前缀窗口内搜索
+AUTOGEN_WINDOW = 600
 
 # 五态裁决。容器评论固定落 out_of_scope，其余由 review 逐条裁。
 VERDICT_STATES = ("confirmed", "refuted", "stale", "already_addressed", "out_of_scope")
@@ -232,7 +262,11 @@ def check_identity(counts: Dict[str, int], verdicts: Optional[Dict[str, int]] = 
 
     1. 分类恒等式：total = ai_reviewer + ci_bot + human + self_echo + container
     2. 裁决恒等式：X = confirmed + refuted + stale + already_addressed + out_of_scope
-                  其中 X = 需要逐条裁决的条数（ai_reviewer + human）
+                  其中 X = ai_reviewer + human + container
+
+    `X` 必须含 container：契约规定容器评论"一律计入 out_of_scope"，所以按文档规则
+    裁决出的 out_of_scope 数必然包含容器数。早期版本把 container 排除在 X 外，
+    导致完全合规的分布被判失败 —— 一旦 container 识别真实生效就会否认真值。
     """
     total = counts.get("total", 0)
     classified = sum(counts.get(k, 0) for k in
@@ -244,7 +278,7 @@ def check_identity(counts: Dict[str, int], verdicts: Optional[Dict[str, int]] = 
         "verdict": None,
     }
     if verdicts is not None:
-        expected = counts.get("ai_reviewer", 0) + counts.get("human", 0)
+        expected = sum(counts.get(k, 0) for k in ("ai_reviewer", "human", "container"))
         right = sum(verdicts.get(k, 0) for k in VERDICT_STATES)
         out["verdict_ok"] = expected == right
         out["verdict"] = {"left": expected, "right": right, "states": dict(verdicts)}
@@ -256,7 +290,17 @@ def is_container_comment(body: str, path: Optional[str] = None,
     """汇总型/入口型评论 = 没有锚定到 file:line 的独立 finding。
 
     容器评论计入 out_of_scope 且计入 S2 总条数，使 `总条数 = 五态之和` 恒成立。
-    判定顺序：有锚点 → 不是容器；正文只有计数或导航 → 容器。
+
+    判定顺序（真实语料驱动，dcc-mcp-freecad #32/#34/#36 实测）：
+      1. 有 file:line 锚点 → 不是容器（bot 的 finding 一定带锚点）；
+      2. 正文自带 file:line 提示 → 不是容器；
+      3. 整条正文只有一句计数（理想短文本）→ 容器；
+      4. 开头行是计数句（真实汇总型：计数句 + 数千字后续）→ 容器；
+      5. 带自动生成外壳标记（walkthrough / change-stack / 汇总壳）→ 容器。
+
+    第 4、5 条是关键：早期的"整条正文必须很短"在真实语料上 0/21 命中，
+    因为 coderabbit 的汇总体是 `**Actionable comments posted: 16**` 开头后接
+    7000+ 字的 autofix/prompt 块，walkthrough 剥完 HTML 也有 8000 字。
     """
     if path and line is not None:
         return False
@@ -265,17 +309,30 @@ def is_container_comment(body: str, path: Optional[str] = None,
         return False
     if ANCHOR_HINT_RE.search(text):
         return False
+
+    # 3) 理想短文本：整条就是一句计数
     if SUMMARY_CONTAINER_RE.match(text):
         return True
 
-    # 剥掉 HTML 注释与标签再看：coderabbit 的 review_stack_entry 之类整条都是
-    # 机器生成的导航壳，保留标签时长度很大，剥完几乎没有实质内容（PR #34 实测）。
-    plain = HTML_NOISE_RE.sub(" ", text)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    if not plain and any(mk in text for mk in AUTOGEN_MARKERS):
+    # 3b) 服务状态/配额通知：bot 声明自己没跑，不是对代码的 finding
+    if STATUS_NOTICE_RE.match(text):
         return True
 
-    # 导航型：正文短（<= 400 字符）且通篇是导航链接/入口，没有别的实质内容
+    # 5) 自动生成的外壳：walkthrough / change-stack / 汇总壳 / autofix 块。
+    #    按标记 + 开头位置判定，不按长度 —— 真实 walkthrough 正文长达数千字。
+    head = text[:AUTOGEN_WINDOW]
+    if any(mk in head for mk in AUTOGEN_MARKERS):
+        return True
+
+    # 4) 真实汇总型：计数句作开头行，后面还跟着大段内容。
+    #    只看前若干个非空行，避免把长正文里偶然出现的计数句误判成容器。
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for ln in lines[:5]:
+        if SUMMARY_LEAD_RE.match(ln):
+            return True
+
+    # 导航型：正文短且通篇是导航链接/入口，没有别的实质内容
+    plain = re.sub(r"\s+", " ", HTML_NOISE_RE.sub(" ", text)).strip()
     check = plain or text
     if NAV_CONTAINER_RE.search(check) and len(check) <= 400:
         stripped = NAV_CONTAINER_RE.sub("", check)
@@ -1046,6 +1103,12 @@ def main() -> int:
                     help="恒等式不等时以退出码 2 失败（默认只警告）")
     args = ap.parse_args()
 
+    # 缺 --ledger 时必须报错退出：否则裁决被无声丢弃，还白跑一次全量采集。
+    if args.record_verdict and not args.ledger:
+        print("--record-verdict 需要同时指定 --ledger <path>，否则裁决无处落盘",
+              file=sys.stderr)
+        return 1
+
     ledger = VerdictLedger(Path(args.ledger)) if args.ledger else None
     if ledger and args.record_verdict:
         for pair in args.record_verdict:
@@ -1185,11 +1248,28 @@ def main() -> int:
     # ── 恒等式机械校验 ──
     verdicts: Optional[Dict[str, int]] = None
     if args.verdicts:
+        raw: Any = None
         try:
-            verdicts = json.loads(Path(args.verdicts).read_text(encoding="utf-8")
-                                  if Path(args.verdicts).exists() else args.verdicts)
+            raw = json.loads(Path(args.verdicts).read_text(encoding="utf-8")
+                             if Path(args.verdicts).exists() else args.verdicts)
         except (json.JSONDecodeError, OSError) as exc:
             gaps.append(f"--verdicts 解析失败（{exc}）——裁决恒等式未校验")
+        # 形状校验：json.loads 可能返回 list / int / 字符串值的 dict，
+        # 直接喂给 check_identity 会在采集完全部数据之后抛 traceback。
+        if raw is not None:
+            if not isinstance(raw, dict):
+                gaps.append(f"--verdicts 需为 JSON 对象，收到 {type(raw).__name__}"
+                            f"——裁决恒等式未校验")
+            elif any(k not in VERDICT_STATES for k in raw):
+                bad = sorted(k for k in raw if k not in VERDICT_STATES)
+                gaps.append(f"--verdicts 含未知裁决态 {bad}，合法值为 {list(VERDICT_STATES)}"
+                            f"——裁决恒等式未校验")
+            elif any(isinstance(v, bool) or not isinstance(v, int) for v in raw.values()):
+                gaps.append("--verdicts 的值必须为整数"
+                            f"（收到 {[type(v).__name__ for v in raw.values()]}）"
+                            f"——裁决恒等式未校验")
+            else:
+                verdicts = {k: int(raw.get(k, 0)) for k in VERDICT_STATES}
     identity = check_identity(comments.get("counts", {}), verdicts)
     if not identity["classification_ok"]:
         gaps.append(f"分类恒等式不成立：total={identity['classification']['left']} "
@@ -1257,18 +1337,20 @@ def main() -> int:
             print(f"    - {g}", file=sys.stderr)
     print("=" * 64 + "\n", file=sys.stderr)
 
+    # 恒等式校验必须在序列化/落盘**之前**：先写出 pr_context.json 再拒绝，
+    # 磁盘上会留下一份看起来合法的上下文，调用方照读 → 门禁等于没有门禁。
+    if args.strict_identity and identity and (
+            not identity["classification_ok"] or identity["verdict_ok"] is False):
+        print("恒等式校验失败（--strict-identity）：拒绝输出 Review context 块",
+              file=sys.stderr)
+        return 2
+
     out = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.output:
         Path(args.output).write_text(out, encoding="utf-8")
         print(f"JSON 已保存: {args.output}", file=sys.stderr)
     else:
         print(out)
-
-    if args.strict_identity and identity and (
-            not identity["classification_ok"] or identity["verdict_ok"] is False):
-        print("恒等式校验失败（--strict-identity）：拒绝输出 Review context 块",
-              file=sys.stderr)
-        return 2
     return 0
 
 

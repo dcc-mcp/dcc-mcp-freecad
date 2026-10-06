@@ -67,9 +67,17 @@ finding，降格成 `ci_bot` 会让 CodeQL / secret scanning 的发现永远不�
 - **入口型** —— change-stack / walkthrough / "View reviewed changes" 这类只给导航入口的。
 
 识别点：评论体只有计数或导航链接，**没有锚定到具体 `file:line` 的 finding**。
-`collect_pr_context.py` 的 `is_container_comment()` 已实现该判定（2026-10-06）：有 `file:line` 锚点
-或正文自带 `file:line` 提示即不是容器；剥掉 HTML 注释/标签后正文为空且带自动生成标记
-（如 coderabbit 的 `review_stack_entry_start`）也算容器。
+`collect_pr_context.py` 的 `is_container_comment()` 已实现该判定（2026-10-06，真实语料修正）：
+有 `file:line` 锚点或正文自带 `file:line` 提示即不是容器；计数句作**开头行**（真实汇总是
+`**Actionable comments posted: 16**` 后接数千字，不能要求整条正文只等于计数句）；正文**开头**
+带自动生成外壳标记（`review_stack_entry_start` / `walkthrough_start` / `autofix_checkbox_start`）
+也算容器；bot 声明自己没跑的配额/状态通知同样计入。
+
+两条已踩过的坑，改动判定逻辑时必须保持：
+1. **外壳标记只认开头**（`AUTOGEN_WINDOW`）。coderabbit 的 finding 正文里也有
+   `auto-generated comment` 页脚，按正文任意位置匹配会把真实 finding 全误判成容器。
+2. **不要按长度判定**。真实 walkthrough 剥完 HTML 仍有 8000 字，早期"正文必须很短"
+   的版本在真实语料上 0/21 命中 —— 单测只喂理想短串会掩盖这一点。
 
 规则：
 
@@ -149,7 +157,9 @@ Review context:
 这两条等式现在由脚本机械校验，不再只靠自觉（2026-10-06，PIP-4283）：
 
 - 分类恒等式 `total = ai_reviewer + ci_bot + human + self_echo + container`
-- 裁决恒等式 `X = confirmed + refuted + stale + already_addressed + out_of_scope`，`X = ai_reviewer + human`
+- 裁决恒等式 `X = confirmed + refuted + stale + already_addressed + out_of_scope`，
+  `X = ai_reviewer + human + container`（`X` 必须含 container：容器评论一律计入 `out_of_scope`，
+  所以按文档规则裁决出的 `out_of_scope` 数必然包含容器数；排除它会让合规分布被判失败）
 
 `collect_pr_context.py --verdicts <json> [--strict-identity]` 会校验并把结果写进
 `comments.identity`；不等时 `--strict-identity` 以退出码 2 失败，**拒绝输出 Review context 块**。

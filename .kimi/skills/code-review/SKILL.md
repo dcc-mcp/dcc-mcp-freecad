@@ -246,8 +246,17 @@ diff 只告诉你"改了什么"，不告诉你"这条改动在真实世界里处
 后续所有 finding 都要能在这些证据里找到落点。完整规范见 `references/review-context.md`。
 
 ```python
-import subprocess, sys, json
+import subprocess, sys, json, os
 from pathlib import Path
+
+# `workspace` 只在第二步（remote 模式）里定义；PR/MR 模式走不到那里，
+# 直接用会 NameError —— 采集器还没起来就挂了。这里独立初始化一次。
+workspace = (
+    Path(os.environ["SKILL_WORKSPACE"])
+    if "SKILL_WORKSPACE" in os.environ
+    else Path.cwd() / "code_review_tmp"
+)
+workspace.mkdir(parents=True, exist_ok=True)
 
 collect_script = skill_dir / "scripts" / "collect_pr_context.py"
 result = subprocess.run(
@@ -256,6 +265,12 @@ result = subprocess.run(
      "--max-log-lines", "40"],
     capture_output=True, text=True
 )
+# 退出码：0 成功，1 参数/URL 错误，2 恒等式校验失败（--strict-identity 时）。
+# 必须检查 returncode —— 不检查会照常读一份被拒绝的上下文，门禁等于没有门禁。
+if result.returncode != 0:
+    raise RuntimeError(
+        f"collect_pr_context.py 失败（exit {result.returncode}）：{result.stderr}"
+    )
 # 摘要输出到 stderr；JSON 写入 --output
 ctx = json.loads(Path(workspace / "pr_context.json").read_text(encoding="utf-8"))
 ```
@@ -295,7 +310,10 @@ ctx = json.loads(Path(workspace / "pr_context.json").read_text(encoding="utf-8")
 
 1. 分类恒等式 `total = ai_reviewer + ci_bot + human + self_echo + container`（容器评论计入）
 2. 裁决恒等式 `X = confirmed + refuted + stale + already_addressed + out_of_scope`，
-   其中 `X = ai_reviewer + human`
+   其中 `X = ai_reviewer + human + container`
+
+`X` 必须含 `container`：契约规定容器评论一律计入 `out_of_scope`，所以按文档规则裁决出的
+`out_of_scope` 数必然包含容器数。把 container 排除在 `X` 外会让完全合规的分布被判失败。
 
 ```python
 # 把本轮裁决分布交给脚本校验；不等则 --strict-identity 以退出码 2 失败
@@ -304,7 +322,7 @@ subprocess.run([sys.executable, str(collect_script), pr_url,
                 "--verdicts", json.dumps({"confirmed": 2, "refuted": 1,
                                           "stale": 0, "already_addressed": 0,
                                           "out_of_scope": 1}),
-                "--strict-identity"])
+                "--strict-identity"], check=True)
 ```
 
 **裁决台账**（不重裁同一条 bot 意见）：加 `--ledger <path>`，脚本按

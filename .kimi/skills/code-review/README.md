@@ -60,18 +60,27 @@ openclaw skills install ./code-review.skill
 ```
 点评：
 
-【优点】
-项目将复杂流程合理拆解为多个独立 Agent，工厂函数模式统一，模块边界清晰。
-DebugCollector 的引入对排查问题很有帮助，Pydantic model_validator 对非法输入的主动拦截体现了防御性编程意识。
+Findings:
+- [P0] agent.py 和 agent_idea.py 里有 exit() 调用 — agent.py:142 / agent_idea.py:88
+  上服务会直接把进程干掉，生产路径必须改成异常向上抛或 sys.exit 之外的错误处理。
 
-【不足】
-有几个问题需要立即处理：agent.py 和 agent_idea.py 里有 exit() 调用，上服务会直接把进程干掉；
-idea_genreate_agent 这个 key 拼错了，会在运行时 ValueError；LANGFUSE_SCERET_KEY 少写了一个字母，监控会静默不生效。
+- [P1] idea_genreate_agent 这个 key 拼错了 — agent/config.py:57
+  会在运行时 ValueError。正确拼写是 idea_generate_agent。
 
-工程层面：同一组环境变量在 34 个文件里重复读取了 169 次，没有统一配置管理；
-agent/utils/ 和 agent_smart/utils/ 有 13 个同名文件各维护一份，已经开始分叉；
-agent.py 和 agent_chain.py 并行维护了两套相同调度逻辑但版本已不同步，建议尽快废弃其中一个。
+- [P1] LANGFUSE_SCERET_KEY 少写了一个字母 — agent/monitor.py:23
+  监控会静默不生效（环境变量取不到就跳过上报，不报错）。
+
+Test / CI gaps:
+- 以上三处都没有单测覆盖；exit() 与拼错 key 都是一跑就暴露的问题，应加最小回归用例。
+
+Summary:
+复杂流程拆成多个独立 Agent、工厂函数统一、模块边界清晰，DebugCollector 与 Pydantic
+model_validator 体现了防御性编程意识。但上面 P0/P1 三条会直接打挂生产进程或让监控失效，
+需要先修掉再谈工程层面的重构。
 ```
+
+> 输出顺序遵循 findings-first：问题在前，优点只在 Summary 里一句带过。
+> 先写【优点】会冲淡风险，本 skill 不采用这种顺序。
 
 ---
 

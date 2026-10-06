@@ -538,7 +538,10 @@ def analyze_microservice(root: Path, info: dict) -> dict:
         except Exception:
             continue
         if re.search(r'traceId|trace_id|requestId|request_id|X-Request-ID', text, re.IGNORECASE):
-            svc = str(Path(rel(f, root)).parts[0]) if "/" in rel(f, root) else "root"
+            # Windows 上 rel() 返回 `src\a\b.py`，`"/" in ...` 恒假 → 所有文件
+            # 塌成 "root" 服务，missing_trace 会把每个服务都报成缺 traceId。
+            parts = Path(rel(f, root)).parts
+            svc = str(parts[0]) if len(parts) > 1 else "root"
             services_with_trace.add(svc)
 
     results["services"] = info.get("services", [])
@@ -690,6 +693,13 @@ def main():
         print(f"  拼写错误:              {len(r['typos'])} 处")
         print(f"  硬编码配置:            {len(r['hardcoded'])} 处")
         print(f"  JSDoc覆盖率:           {r['jsdoc_rate']}%")
+
+    elif lang == "go":
+        # --lang 的 choices 含 go，但没有 Go 分析器。静默走 Python 兜底会打印
+        # "语言: GO" 却扫描 .py 文件 —— 显式报错，不要给出看起来正常的空结果。
+        print("⚠️  未实现 Go 分析器：本脚本只支持 rust / node / python。")
+        print("    请以 --lang python 运行，或先补 analyze_go()。")
+        return 1
 
     else:  # Python (default) or multi
         r = analyze_python(root, args.focus)
