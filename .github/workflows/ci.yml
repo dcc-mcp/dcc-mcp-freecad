@@ -45,9 +45,10 @@ jobs:
   # Real-hardware coverage: the `-m "not freecad"` contract job above never
   # exercises FreeCAD itself, so a host API break stays invisible until release.
   # This job installs a pinned official FreeCAD and runs the tests that do.
-  # The count asserted below is the number of `-m "freecad and not freecad_gui"`
-  # cases, so adding or removing one of those tests requires updating it; the
-  # guard exists so a collection failure cannot pass as a green run.
+  # It covers native, GUI and SDK workflows. The count asserted below is the
+  # number of `-m "freecad and not freecad_gui"` cases, so adding or removing
+  # one of those tests requires updating it; the guard exists so a collection
+  # failure cannot pass as a green run.
   # Installed via AppImage + `--appimage-extract`; the FreeCAD snap is unusable
   # on GitHub runners (it core-dumps).
   freecad-real:
@@ -103,7 +104,7 @@ jobs:
       - name: Real FreeCAD end-to-end
         run: |
           echo "FreeCAD ${FREECAD_REAL_VERSION} via ${FREECAD_TEST_EXECUTABLE}"
-          python -m pytest -m "freecad and not freecad_gui" -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
+          python -m pytest -m "freecad and not freecad_gui and not freecad_mcp" -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
       - name: Assert the real test executed
         if: always()
         run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 41
@@ -114,6 +115,28 @@ jobs:
       - name: Assert GUI cases executed without skips
         if: always()
         run: python3 .github/scripts/verify-freecad-run.py freecad-gui-${{ matrix.freecad_version }}.xml 38
+      - name: Install pinned SDK and software-rendered display
+        run: |
+          python -m pip install "dcc-mcp-core==0.20.41" "mcp==1.30.0" "httpx==0.28.1"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb xauth libgl1 libxkbcommon-x11-0 libxcb-xinerama0 libxcb-cursor0
+      - name: Real MCP discovery, modeling, appearance and native PNG
+        env:
+          QT_QPA_PLATFORM: xcb
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          FREECAD_E2E_ARTIFACT_DIR: ${{ github.workspace }}/freecad-mcp-${{ matrix.freecad_version }}
+        run: |
+          set +e
+          xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp" python -m pytest -m freecad_mcp -q --junitxml="${RUNNER_TEMP}/freecad-mcp.xml" >"${RUNNER_TEMP}/freecad-mcp-private.log" 2>&1
+          e2e_status=$?
+          python .github/scripts/public-e2e-junit.py "${RUNNER_TEMP}/freecad-mcp.xml" "freecad-mcp-${{ matrix.freecad_version }}.xml"
+          if [ "$e2e_status" -ne 0 ]; then
+            echo "::error::Real MCP workflow failed; see its sanitized stage report and JUnit artifact"
+          fi
+          exit "$e2e_status"
+      - name: Assert real MCP workflow executed without skips
+        if: always()
+        run: python3 .github/scripts/verify-freecad-run.py freecad-mcp-${{ matrix.freecad_version }}.xml 1
       - name: Install the FEM solver and mesher
         run: |
           sudo apt-get update
@@ -145,6 +168,8 @@ jobs:
             freecad-real-${{ matrix.freecad_version }}.xml
             freecad-gui-${{ matrix.freecad_version }}.xml
             freecad-fem-${{ matrix.freecad_version }}.xml
+            freecad-mcp-${{ matrix.freecad_version }}.xml
+            freecad-mcp-${{ matrix.freecad_version }}/
           retention-days: 7
 
   lint-and-build:

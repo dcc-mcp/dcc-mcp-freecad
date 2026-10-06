@@ -386,3 +386,13 @@ FreeCAD's notification area, which can deadlock under the offscreen platform.
 See the [headless render qualification](docs/validation/render-view.md) record
 for the host API facts this relies on, the evidence per layer, and what is
 explicitly not claimed.
+
+## Real MCP workflow validation
+
+CI already exercises real FreeCAD 1.0.2 and 1.1.4, including native GUI
+presentation persistence. The additional SDK workflow gate follows actual MCP
+discovery through modeling, a parameter-driven recompute, rollback verification,
+appearance/save/reopen and an independent native PNG witness. See the
+[coverage and artifact contract](docs/validation/mcp-e2e.md).
+The [original pneumatic-cylinder recipe](docs/demos/README.md) documents the
+separate real-UI recording and native-qualification steps.
