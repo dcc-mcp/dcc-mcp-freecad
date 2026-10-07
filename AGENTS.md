@@ -41,7 +41,7 @@ python -m pytest -m freecad_gui -v --junitxml=freecad-gui.xml
 Both lanes install a real FreeCAD first via `bash .github/scripts/install-freecad.sh`,
 then assert the run actually measured something with
 `python3 .github/scripts/verify-freecad-run.py <junitxml> <expected-count>`.
-The expected counts (25 for the headless lane, 27 for the GUI lane) are the
+The expected counts (26 for the headless lane, 27 for the GUI lane) are the
 contract: a run that collects fewer tests than the count fails instead of
 reporting a green skip. Never lower those numbers to make a lane pass.
 
