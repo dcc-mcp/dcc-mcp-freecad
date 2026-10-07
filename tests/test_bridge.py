@@ -774,7 +774,9 @@ def test_real_freecad_copy_rotation_is_absolute_for_a_primitive(tmp_path: Path):
     bridge.add_primitive(
         str(document), "box", "Turned", dimensions={"length": 20, "width": 10, "height": 5}
     )
-    bridge.transform_object(str(document), "Turned", rotation_axis=[0, 0, 1], rotation_degrees=35)
+    bridge.transform_object(
+        str(document), "Turned", translation=[0, 0, 0], rotation_axis=[0, 0, 1], rotation_degrees=35
+    )
 
     flat_copy = bridge.copy_object(
         str(document), "Flat", "FlatCopy", rotation_axis=[0, 0, 1], rotation_degrees=30
