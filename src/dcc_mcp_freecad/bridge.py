@@ -1700,7 +1700,6 @@ class FreecadBridge:
         roots = self._listing_roots(root)
         budget = _ScanBudget(_MAX_LIST_SCAN_ENTRIES)
         read_budget = _ReadBudget(_MAX_LIST_READ_BYTES)
-        target = bounded_offset + bounded_limit + 1
         matches = []
         for candidate_root, candidate in _iter_scan_files(roots, recursive, budget):
             if not matcher.match(candidate.name.lower()):
@@ -1712,8 +1711,13 @@ class FreecadBridge:
             if not stat.S_ISREG(info.st_mode) or not _within(candidate, self.allowed_roots):
                 continue
             matches.append((candidate_root, candidate, info))
-            if len(matches) >= target:
-                break
+        # Sort before anything is sliced. The walk yields files in traversal
+        # order (LIFO depth-first, subdirectories popped in reverse name order),
+        # which is not the order entries are returned in: truncating to a page
+        # first and sorting after would make ``offset`` slice a prefix of the
+        # traversal rather than of the result order, silently dropping matches
+        # and repeating others across pages. The scan budget is the only bound
+        # on ``matches``, so it stays finite.
         matches.sort(key=lambda item: (str(item[1]).lower(), str(item[1])))
 
         entries = []
