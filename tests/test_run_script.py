@@ -834,9 +834,13 @@ def test_real_freecad_script_exit_code_and_failure_survive(tmp_path: Path):
 
     ok = bridge.run_script(str(ok_script))
     assert ok["exit_code"] == 0
-    assert ok["stdout"] == "done\n"
+    # Matched as a substring, not equality: the host appends its own banner
+    # (version, licence, and a safe-mode notice) to the child's stdout, so the
+    # stream is the script's output plus the host's. Asserting equality would
+    # pin FreeCAD's banner text in this test.
+    assert "done" in ok["stdout"]
 
     failed = bridge.run_script(str(fail_script))
     assert failed["exit_code"] == 3
-    assert failed["stderr"] == "deliberate"
+    assert "deliberate" in failed["stderr"]
     assert failed["timed_out"] is False

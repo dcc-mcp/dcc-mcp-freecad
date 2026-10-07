@@ -84,6 +84,11 @@ What it does constrain:
 - **No management surface.** There is no list, read, create, or delete for
   scripts. Maintain them on the filesystem.
 
+`stdout` is the script's output **plus the host's**: FreeCADCmd writes its own
+banner - version, licence, and a safe-mode notice - to the same stream. Match
+substrings rather than comparing the whole stream, and prefer a script that
+writes its results somewhere you control.
+
 The script is responsible for its own persistence. A script that changes a
 durable document should be followed by `inspect_document` or
 `validate_document`, so the write is verified on the real file rather than
