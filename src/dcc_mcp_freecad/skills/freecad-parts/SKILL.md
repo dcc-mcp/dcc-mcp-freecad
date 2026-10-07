@@ -12,7 +12,7 @@ metadata:
   dcc-mcp:
     dcc: freecad
     layer: domain
-    version: "0.6.0"  # x-release-please-version
+    version: "0.7.0"  # x-release-please-version
     tags: [freecad, cad, standard-parts, library, assembly]
     depends: [freecad-session]
     search-hint: >-
