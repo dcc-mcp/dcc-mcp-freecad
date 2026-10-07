@@ -34,6 +34,12 @@ from dcc_mcp_core import yaml_loads
 
 from . import compat, sketch_rules
 
+# The default ``run_script`` timeout ceiling. It lives here rather than in
+# ``bridge`` because bridge imports this module, so importing the constant back
+# would be circular - and it is a declared contract number, which is this
+# module's job. ``bridge.DEFAULT_MAX_SCRIPT_TIMEOUT_SECS`` re-exports it.
+DEFAULT_MAX_SCRIPT_TIMEOUT_SECS = 300
+
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 # Declaration order also fixes the order capabilities are reported in:
@@ -59,13 +65,32 @@ INTROSPECTION_TOOLS = ("get_status", "get_capabilities")
 # Adapter-wide invariants rather than per-tool schema claims. Each names the
 # code that enforces it, so changing that code has to bring this along.
 ATOMIC_DOCUMENT_MUTATIONS = True  # FreecadBridge._mutate_document stages, then os.replace.
-ARBITRARY_PYTHON = False  # freecad_driver._METHODS whitelist; the driver never eval/exec.
+# No inline source is ever accepted: run_script takes a path, and the driver's
+# _METHODS whitelist is still the only thing the typed tools dispatch to. The
+# distinction matters, so ARBITRARY_PYTHON stays False for inline code while the
+# script-file escape hatch is declared separately under SCRIPT_EXECUTION.
+ARBITRARY_PYTHON = False  # no eval/exec of caller-supplied text anywhere in the adapter.
 DOCUMENT_SNAPSHOTS = True  # FreecadBridge create/list/restore/delete_snapshot via SnapshotStore.
 # The typed surface is the whole contract: an under-constrained sketch is refused
 # rather than reported as usable, because there is no script escape hatch to
 # repair a silently under-constrained profile afterwards. Enforced by
 # sketch_rules.assert_feature_ready, which the profile-based feature tools call.
 SKETCH_UNDERCONSTRAINED_REJECTED = True
+SCRIPT_EXECUTION = "script_file"  # FreecadBridge.run_script: a path, never source text.
+
+# How ``run_script`` is bounded. Every value here is enforced by
+# ``FreecadBridge.run_script`` / ``_script_path`` / ``_script_timeout``, and the
+# prose is part of the contract: an agent that reads this block must not come
+# away believing the tool is a sandbox.
+SCRIPT_EXECUTION_BOUNDS = {
+    "accepts": ["script_path"],
+    "sandboxed": False,
+    "isolated_process": True,
+    "loads_user_workbenches": False,
+    "loads_user_plugins": False,
+    "loads_user_macros": False,
+    "script_management": False,
+}
 
 # Where the driver's enforced limits are declared. Each entry names the tools
 # that take the property and the schema keyword that carries the bound, so the
@@ -235,6 +260,7 @@ def build_capabilities(
     parts: Optional[Mapping[str, Any]] = None,
     render: Optional[Mapping[str, Any]] = None,
     skills_dir: Optional[Any] = None,
+    max_script_timeout_secs: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Derive the whole ``get_capabilities`` payload from the tool catalog.
 
@@ -245,9 +271,19 @@ def build_capabilities(
     the bridge keeps ownership of the runtime half of the report. ``render``
     carries the same kind of block for view rendering, which depends on whether
     this host can drive OpenGL at all and so is only knowable at call time.
+
+    ``max_script_timeout_secs`` is the one bound that lives on the running
+    bridge rather than in a schema, so it is passed in the same way; the default
+    stands in when no bridge is available, which is also the state the
+    offline contract tests see.
     """
     catalog = load_tool_catalog(skills_dir)
     limits = host_limits(host_status)
+    script_timeout_ceiling = (
+        DEFAULT_MAX_SCRIPT_TIMEOUT_SECS
+        if max_script_timeout_secs is None
+        else float(max_script_timeout_secs)
+    )
     tools = []
     for tool in catalog:
         tools.append(
@@ -279,6 +315,9 @@ def build_capabilities(
         "atomic_document_mutations": ATOMIC_DOCUMENT_MUTATIONS,
         "arbitrary_python": ARBITRARY_PYTHON,
         "document_snapshots": DOCUMENT_SNAPSHOTS,
+        "script_execution": SCRIPT_EXECUTION,
+        "script_execution_bounds": dict(SCRIPT_EXECUTION_BOUNDS),
+        "max_script_timeout_secs": script_timeout_ceiling,
         "host_limited": limits,
     }
     payload["sketch_planes"] = _enum_for(catalog, "create_sketch", "plane")

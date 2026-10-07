@@ -106,7 +106,7 @@ jobs:
           python -m pytest -m "freecad and not freecad_gui" -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
       - name: Assert the real test executed
         if: always()
-        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 32
+        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 34
       - name: Real native GUI presentation persistence
         # xvfb gives the Qt offscreen platform the X display it expects, so the
         # 3D view can create a context from Mesa's software rasteriser.

@@ -27,5 +27,8 @@ Use these typed tools after creating or inspecting an `.FCStd` document with
 failure. Boolean results remain parametric and retain their operand links.
 
 Geometry import/export supports STEP, IGES, BREP, STL, and OBJ. Mesh export
-uses explicit bounded tessellation settings; no arbitrary Python or macros are
-accepted.
+uses explicit bounded tessellation settings. No inline Python is accepted here —
+the typed tools accept arguments, never source text. The one escape hatch is
+`freecad-session`'s `run_script`, which takes a **path to a script file** and
+runs it in a disposable FreeCAD process; it is not a sandbox, and it does not
+load user workbenches, plugins, or macros.

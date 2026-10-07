@@ -17,7 +17,7 @@ metadata:
     search-hint: >-
       FreeCAD status capabilities create inspect validate copy snapshot restore
       undo recover rollback FCStd document remove object dependency-aware
-      atomic save
+      atomic save run script python file escape hatch
     tools: tools.yaml
 ---
 
@@ -45,3 +45,53 @@ The store lives inside `DCC_MCP_FREECAD_ALLOWED_ROOTS` and is capped by
 `DCC_MCP_FREECAD_MAX_SNAPSHOTS` and `DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES`. When
 it is full the call is refused with `snapshot_limit_exceeded` — nothing is
 evicted behind your back. Use `delete_snapshot` to free capacity.
+
+## Escape hatch: `run_script`
+
+`run_script` is the one entry point for work no typed tool covers. It executes a
+single `.py` file in a disposable FreeCADCmd child process and returns
+`exit_code`, `stdout`, `stderr`, `stdout_truncated` / `stderr_truncated`,
+`timed_out`, `script_path`, and `script_sha256`.
+
+A **timeout is returned as an error**, not as a successful result carrying
+`timed_out: true` — `success` is `false` and `error` is `script_timeout`, with
+the pre-hang `stdout` / `stderr` and `timed_out: true` in the context so the
+caller can see how far the script got. A timeout must never look like a finished
+run. A **non-zero exit code is not an error**: the script ran and decided to
+fail, and reading `exit_code` is the caller's job.
+
+**It is not a sandbox.** The script runs as the operator's own account with that
+account's full privileges: it can read, write, and import anything that account
+can. `DCC_MCP_FREECAD_ALLOWED_ROOTS` constrains **which script may be named**,
+not **what the script may do**. Do not treat this tool as a boundary for
+untrusted code.
+
+What it does constrain:
+
+- **Path only, never source text.** `script_path` must end in `.py`, must exist,
+  is resolved (symlinks followed) and then must lie inside
+  `DCC_MCP_FREECAD_ALLOWED_ROOTS` — the same gate the document tools use. A link
+  inside a root that points outside it is refused.
+- **Vacuum mode.** The child starts with `--safe-mode` and a throwaway user
+  config, so no user workbench, plugin, or macro is loaded. State left behind by
+  a previous GUI session cannot reach this process.
+- **Its own timeout.** `timeout_secs` is capped at
+  `DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS` (300s by default), not the 1800s
+  document ceiling — a script that blocks on a modal dialog is killed in
+  minutes. The child is terminated and `success` comes back `false` with
+  `error: script_timeout`; what the script printed before it hung is preserved
+  in `stdout`, which is usually the only clue to where it blocked.
+- **No management surface.** There is no list, read, create, or delete for
+  scripts. Maintain them on the filesystem.
+
+`stdout` is the script's output **plus the host's**: FreeCADCmd writes its own
+banner - version, licence, and a safe-mode notice - to the same stream. Match
+substrings rather than comparing the whole stream, and prefer a script that
+writes its results somewhere you control. `stderr` is less reliable still: the
+host may swallow it entirely when a script exits via `SystemExit`, so treat
+`exit_code` as the authoritative outcome and stderr as best-effort detail.
+
+The script is responsible for its own persistence. A script that changes a
+durable document should be followed by `inspect_document` or
+`validate_document`, so the write is verified on the real file rather than
+trusted from the exit code.
