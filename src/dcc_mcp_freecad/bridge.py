@@ -1217,17 +1217,22 @@ class FreecadBridge:
         self,
         document_path: str,
         sketch_name: str,
-        constraint_type: str,
+        type: str,
         targets: Sequence[Mapping[str, Any]],
         value: Optional[float] = None,
         timeout_secs: float = 120,
     ) -> dict[str, Any]:
+        # ``type`` shadows the builtin, which is the name the shipped skill
+        # schema publishes and the capability lock holds this signature to, so
+        # it is kept rather than renamed: the schema is the contract an agent
+        # reads, and a method that spells the parameter differently is drift the
+        # lock exists to catch.
         return self._mutate_document(
             "sketch.add_constraint",
             document_path,
             {
                 "sketch_name": self._object_name(sketch_name),
-                "type": constraint_type,
+                "type": type,
                 "targets": [dict(item) for item in targets],
                 "value": value,
             },
