@@ -362,15 +362,38 @@ def _move_to_local(geometry, source):
     ``Part.Shape.transformGeometry`` returns a new shape and leaves the original
     alone, while ``Mesh.Mesh.transform`` mutates the mesh it is called on. So
     the shape result must be taken from the call and the mesh must not be.
+
+    The rebase is driven by where the geometry actually sits, not by
+    ``source.Placement``. A primitive keeps the two in step, but a boolean
+    result carries an identity ``Placement`` while its ``Shape`` is already baked
+    into document coordinates, so inverting ``Placement`` there is a no-op that
+    leaves the source offset in place. The bounding box minimum is the origin the
+    geometry is really expressed from, so it is the same answer for both.
     """
-    placement = getattr(source, "Placement", None)
-    if placement is None:
+    matrix = _placement_to_local_matrix(geometry, source)
+    if matrix is None:
         return geometry
-    matrix = placement.inverse().toMatrix()
     if hasattr(geometry, "transformGeometry"):
         return geometry.transformGeometry(matrix)
     geometry.transform(matrix)
     return geometry
+
+
+def _placement_to_local_matrix(geometry, source):
+    """Build the matrix that rebases ``geometry`` back onto its own origin.
+
+    Returns ``None`` when there is nothing to undo, so the caller can hand the
+    geometry back untouched instead of applying an identity transform.
+    """
+    import FreeCAD as App
+
+    bounds = getattr(geometry, "BoundBox", None)
+    if bounds is None:
+        return None
+    origin = App.Vector(bounds.XMin, bounds.YMin, bounds.ZMin)
+    if origin.Length == 0:
+        return None
+    return App.Matrix().translate(origin.negative())
 
 
 def _scaled_shape(app, shape, factors, around, tool):
