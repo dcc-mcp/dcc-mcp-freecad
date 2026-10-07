@@ -367,7 +367,7 @@ def test_real_freecad_stores_the_arc_direction_it_was_given(
     between 1.0.2 and 1.1.4.
     """
     bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
-    document = tmp_path / "arc-%d-%d.FCStd" % (start, end)
+    document = tmp_path / ("arc-%d-%d.FCStd" % (start, end))
     bridge.create_document(str(document))
     bridge.create_sketch(str(document), "ArcSketch", plane="xy", body="ArcBody")
 
