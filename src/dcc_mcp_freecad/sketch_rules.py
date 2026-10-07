@@ -201,6 +201,26 @@ def _arc(values, tool):
     if not all(math.isfinite(value) for value in (start, end, radius)):
         raise SketchSpecError("%s: arc angles and radius must be finite" % tool)
     sweep = end - start
+    # A negative sweep is refused rather than rewritten.
+    #
+    # Part::GeomArcOfCircle keeps its parameter range ascending, so it cannot
+    # record which end the caller called the start: measured on FreeCAD 1.0.2 and
+    # 1.1.4, a request for 90 -> 0 stores the 270 degree complement instead, with
+    # the start point where it was asked for and the sweep going the other way
+    # round. Reinterpreted silently, that is a profile the caller did not ask for
+    # whose endpoints still look right -- and a sketch is chained, so the next
+    # segment connecting to "the end of the arc" would land on the wrong point.
+    #
+    # Both arcs remain expressible with an ascending pair, so this refuses a
+    # spelling, not a shape: the 90 degree arc through 45 degrees is written
+    # 0 -> 90, and the 270 degree arc through 180 degrees is written 90 -> 360.
+    if sweep < 0:
+        raise SketchSpecError(
+            "%s: an arc sweep may not be negative (start %s, end %s); restate the "
+            "pair in ascending order -- %s -> %s describes the same arc, and a "
+            "sweep past 360 degrees continues from 360 (for example 90 -> 360 for "
+            "the arc through 180 degrees)" % (tool, start, end, end, start if start < 360 else 360)
+        )
     # Reject the sweep by comparing the endpoints it produces, not the sweep
     # itself. A 360 degree sweep passes a "sweep must be non-zero" check while
     # landing its end exactly on its start, which the host then reports as a
@@ -210,7 +230,7 @@ def _arc(values, tool):
             "%s: arc start and end angles describe the same point "
             "(start %s, end %s); use a circle for a full turn" % (tool, start, end)
         )
-    if abs(sweep) > 360:
+    if sweep > 360:
         raise SketchSpecError("%s: arc sweep may not exceed 360 degrees" % tool)
     cx, cy = values["cx"], values["cy"]
     points = [_polar(cx, cy, radius, angle) for angle in (start, start + sweep / 2.0, end)]
@@ -221,10 +241,6 @@ def _arc(values, tool):
         center=[cx, cy],
         radius=radius,
         angles_degrees=[start, end],
-        # The direction the adapter modelled the arc in. The host's own default
-        # is the reverse of this for a negative sweep, so it is passed
-        # explicitly rather than inherited. See _build_geometry.
-        clockwise=sweep < 0,
     )
 
 
@@ -233,7 +249,7 @@ def _same_angle(first, second):
     return abs((first - second) % 360.0) < 1e-9
 
 
-def _primitive(kind, role, points, center=None, radius=None, angles_degrees=None, clockwise=None):
+def _primitive(kind, role, points, center=None, radius=None, angles_degrees=None):
     return {
         "kind": kind,
         "type": kind,
@@ -242,7 +258,6 @@ def _primitive(kind, role, points, center=None, radius=None, angles_degrees=None
         "center": list(center) if center is not None else None,
         "radius": radius,
         "angles_degrees": list(angles_degrees) if angles_degrees is not None else None,
-        "clockwise": clockwise,
     }
 
 

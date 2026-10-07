@@ -131,7 +131,7 @@ def test_an_arc_with_no_sweep_or_more_than_a_full_turn_is_refused():
         rules.expand_geometry(dict(base, start_angle_degrees=0, end_angle_degrees=400))
 
 
-@pytest.mark.parametrize("start,end", [(0, 360), (360, 0), (-90, 270)])
+@pytest.mark.parametrize("start,end", [(0, 360), (180, 540), (-90, 270)])
 def test_an_arc_whose_ends_coincide_is_refused_whatever_the_sweep(start, end):
     """A full turn is a circle, not a degenerate arc.
 
@@ -152,16 +152,53 @@ def test_an_arc_whose_ends_coincide_is_refused_whatever_the_sweep(start, end):
         )
 
 
-@pytest.mark.parametrize(
-    "start,end,expected",
-    [(0, 90, False), (90, 0, True), (0, -90, True), (-90, 0, False)],
-)
-def test_the_arc_records_the_direction_it_was_modelled_in(start, end, expected):
-    """A negative sweep is a clockwise arc, and is recorded as one.
+@pytest.mark.parametrize("start,end", [(90, 0), (0, -90), (270, 180), (1, 0)])
+def test_a_descending_arc_pair_is_refused_not_reinterpreted(start, end):
+    """A negative sweep is refused because the host would store its complement.
 
-    The host's default sense is the other way round for a negative sweep, so
-    the direction has to travel with the geometry rather than be re-derived.
+    Measured on FreeCAD 1.0.2 and 1.1.4, Part::GeomArcOfCircle keeps its
+    parameter range ascending, so a descending pair is raised by a full turn: a
+    90 -> 0 request stores the 270 degree arc, whose endpoints still look right
+    while its midpoint lands in the opposite quadrant. Restating the pair
+    expresses the same arc, so the request is refused rather than silently
+    changed into the other one.
     """
+    with pytest.raises(rules.SketchSpecError, match="may not be negative"):
+        rules.expand_geometry(
+            {
+                "type": "arc",
+                "cx": 0,
+                "cy": 0,
+                "radius": 1,
+                "start_angle_degrees": start,
+                "end_angle_degrees": end,
+            }
+        )
+
+
+def test_the_refusal_names_the_ascending_pair_that_expresses_the_same_arc():
+    """The error has to be actionable, not just a rejection."""
+    with pytest.raises(rules.SketchSpecError) as excinfo:
+        rules.expand_geometry(
+            {
+                "type": "arc",
+                "cx": 0,
+                "cy": 0,
+                "radius": 1,
+                "start_angle_degrees": 90,
+                "end_angle_degrees": 0,
+            }
+        )
+
+    message = str(excinfo.value)
+    assert "ascending" in message
+    # The restatement: 0 -> 90 is the same arc as the rejected 90 -> 0.
+    assert "0.0 -> 90.0" in message
+
+
+@pytest.mark.parametrize("start,end", [(0, 90), (90, 360), (180, 270)])
+def test_an_ascending_arc_pair_is_accepted(start, end):
+    """Every arc remains expressible: the refusal costs a spelling, not a shape."""
     arc = rules.expand_geometry(
         {
             "type": "arc",
@@ -173,14 +210,15 @@ def test_the_arc_records_the_direction_it_was_modelled_in(start, end, expected):
         }
     )[0]
 
-    assert arc["clockwise"] is expected
+    assert arc["kind"] == "arc"
+    assert arc["angles_degrees"] == [start, end]
 
 
 def test_the_arc_midpoint_is_part_of_the_read_back():
     """The midpoint is the only compared value that differs from a complement.
 
     An arc and its complement share both endpoints, centre and radius, so a
-    read-back that skipped the midpoint matched a reversed sweep exactly.
+    read-back that skipped the midpoint matched a complementary sweep exactly.
     """
     arc = rules.expand_geometry(
         {
@@ -188,8 +226,8 @@ def test_the_arc_midpoint_is_part_of_the_read_back():
             "cx": 0,
             "cy": 0,
             "radius": 10,
-            "start_angle_degrees": 90,
-            "end_angle_degrees": 0,
+            "start_angle_degrees": 0,
+            "end_angle_degrees": 90,
         }
     )[0]
 

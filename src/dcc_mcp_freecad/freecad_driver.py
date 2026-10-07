@@ -2630,21 +2630,19 @@ def _build_geometry(app, part, primitive):
     circle = part.Circle(center, app.Vector(0.0, 0.0, 1.0), primitive["radius"])
     if kind == "arc":
         start, end = primitive["angles_degrees"]
-        # ``sense`` is always True, and the angles are passed in the order the
-        # caller modelled them.
+        # Angles are passed in ascending order and ``sense`` is always True.
         #
-        # ``sense`` is not "which way to sweep". ArcOfCirclePyImp forwards it to
-        # GC_MakeArcOfCircle, which hands it to Geom_TrimmedCurve::SetTrim; there
-        # the meaning is "should the result keep the basis circle's orientation".
-        # The basis here is a Geom_Circle, which is periodic, so SetTrim takes the
-        # periodic branch: ``sameSense = Sense`` with no swap, and only a false
-        # Sense triggers Reverse() - which flips the conic's Z axis and moves the
-        # parameter range to 2*pi - U. Passing False therefore does not sweep
-        # backwards; it returns the arc the caller asked for traversed the other
-        # way, which is why a 90 -> 0 request came back as a 270 degree arc.
+        # Measured on FreeCAD 1.0.2 and 1.1.4, Part::GeomArcOfCircle keeps its
+        # parameter range ascending, so it cannot record which end the caller
+        # called the start: a request for 90 -> 0 stores the 270 degree
+        # complement, with the start point where it was asked for and the sweep
+        # continuing the other way round to 360. Neither sense value avoids that
+        # -- True and False produce the same curve on such a pair, because the
+        # periodic branch of Geom_TrimmedCurve::SetTrim takes ``sameSense = Sense``
+        # without swapping, and the range is raised to ascending afterwards.
         #
-        # True keeps (start, end) in order and stores exactly the modelled sweep,
-        # for a negative sweep as much as a positive one.
+        # So sketch_rules refuses a negative sweep outright rather than let this
+        # reinterpret one, and every arc reaching here is ascending.
         return part.ArcOfCircle(circle, math.radians(start), math.radians(end), True)
     return circle
 

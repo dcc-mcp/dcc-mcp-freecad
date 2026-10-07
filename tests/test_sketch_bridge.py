@@ -352,7 +352,7 @@ def test_real_freecad_constrains_a_circle_by_radius_and_position(tmp_path: Path)
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
-@pytest.mark.parametrize("start,end,mid_quadrant", [(0, 90, 1), (90, 0, 1), (180, 270, 3)])
+@pytest.mark.parametrize("start,end,mid_quadrant", [(0, 90, 1), (90, 360, 3), (180, 270, 3)])
 def test_real_freecad_stores_the_arc_direction_it_was_given(
     tmp_path: Path, start, end, mid_quadrant
 ):
@@ -401,3 +401,45 @@ def test_real_freecad_stores_the_arc_direction_it_was_given(
     info = bridge.get_sketch_info(str(document), "ArcSketch")
     assert info["geometry"][0]["kind"] == "arc"
     assert info["topology"]["edges"] == 1, info["topology"]
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_refuses_a_descending_arc_pair(tmp_path: Path):
+    """A negative sweep is refused on a real host, not silently complemented.
+
+    Part::GeomArcOfCircle keeps its parameter range ascending on 1.0.2 and 1.1.4
+    alike, so a descending pair would be stored as the complementary arc - whose
+    endpoints still match the request. The refusal has to happen before the host
+    is reached, and the error has to carry the restatement rule so an agent can
+    recover in one rewritten call.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "arc-descending.FCStd"
+    bridge.create_document(str(document))
+    bridge.create_sketch(str(document), "ArcSketch", plane="xy", body="ArcBody")
+
+    with pytest.raises(BridgeError) as excinfo:
+        bridge.add_sketch_geometry(
+            str(document),
+            "ArcSketch",
+            [
+                {
+                    "type": "arc",
+                    "cx": 0,
+                    "cy": 0,
+                    "radius": 10,
+                    "start_angle_degrees": 90,
+                    "end_angle_degrees": 0,
+                }
+            ],
+        )
+
+    message = str(excinfo.value).lower()
+    assert "negative" in message
+    # The refusal has to be actionable: the restated pair, so the next call works.
+    assert "ascending" in message
+
+    # Refused, so nothing reached the sketch and the document bytes are unchanged.
+    info = bridge.get_sketch_info(str(document), "ArcSketch")
+    assert info["geometry_count"] == 0, info

@@ -38,15 +38,23 @@ unconstrained degrees of freedom is never reported as usable for a feature.
 ## Arc direction
 
 An `arc` is specified by `start_angle_degrees` and `end_angle_degrees`, and the
-**sign of the sweep decides the direction**: `0 -> 90` is anticlockwise, `90 -> 0`
-is clockwise. Both are stored as the sweep they describe — the start point is the
-angle you passed as `start`, not whichever end happens to be lower.
+pair **must be ascending**: `start` is below `end`, and the arc is swept from
+`start` to `end` anticlockwise.
 
-Both directions are stored as the arc you asked for, and the read-back compares
-the start point, the midpoint and the end point, so a request that came back as
-the complementary arc is reported as a mismatch rather than a success. An arc
-whose start and end land on the same point is refused — use `circle` for a full
-turn.
+A descending pair is **refused**, not reinterpreted. FreeCAD stores an arc's
+parameter range in ascending order and cannot record which end you called the
+start, so a `90 -> 0` request would come back as the complementary 270° arc —
+with both endpoints looking exactly as requested while the body of the arc runs
+the other way round. The restated pair expresses the same arc:
+
+| You want | Write |
+|---|---|
+| the 90° arc through 45° | `0 -> 90` |
+| the 270° arc through 180° | `90 -> 360` |
+
+The read-back compares the start point, the midpoint and the end point, so an
+arc is only ever reported as stored if all three match. An arc whose start and
+end land on the same point is refused — use `circle` for a full turn.
 
 ## Constraints are the contract
 
