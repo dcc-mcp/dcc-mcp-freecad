@@ -41,7 +41,7 @@ python -m pytest -m freecad_gui -v --junitxml=freecad-gui.xml
 Both lanes install a real FreeCAD first via `bash .github/scripts/install-freecad.sh`,
 then assert the run actually measured something with
 `python3 .github/scripts/verify-freecad-run.py <junitxml> <expected-count>`.
-The expected counts are asserted in `.github/workflows/ci.yml` (38 for the
+The expected counts are asserted in `.github/workflows/ci.yml` (40 for the
 headless lane, 38 for the GUI lane): a run that collects fewer tests than the
 count fails instead of reporting a green skip. Never lower those numbers to make
 a lane pass, and when a lane gains tests, raise the count in the same change --
