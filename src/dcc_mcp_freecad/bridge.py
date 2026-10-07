@@ -902,13 +902,19 @@ class FreecadBridge:
                     str(script),
                 ]
             else:
+                # The script path is positional, with no flag before it.
+                # FreeCADCmd accepts only its own fixed option set followed by a
+                # script file and that file's arguments - ``--script`` is not one
+                # of its options, so a flag here makes the call fail with
+                # "unrecognised option" before the runner is ever reached. The
+                # packaged driver follows the same shape, passing its request and
+                # result paths positionally after ``--pass``.
                 command = [
                     self.executable,
                     "--safe-mode",
                     "--user-cfg",
                     str(config_path),
                     str(runner_path),
-                    "--script",
                     str(script),
                 ]
             started = time.monotonic()

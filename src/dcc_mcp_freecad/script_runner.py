@@ -56,10 +56,15 @@ def _parse_args(argv: list[str]) -> tuple[str, list[str]]:
     The python-module backend is launched as
     ``python -I script_runner.py <module_directory> <script.py>`` because it
     needs the native library location handed to it, while FreeCADCmd is launched
-    as ``FreeCADCmd ... script_runner.py --script <script.py>`` because the
-    library is already importable there. ``--script`` is accepted but optional in
-    the first form so one parser serves both.
+    as ``FreeCADCmd ... script_runner.py <script.py>`` because the library is
+    already importable there. The script is positional in both: FreeCADCmd
+    accepts only its own option set followed by a script file, so a flag of our
+    own before the path is rejected as an unrecognised option. ``--script`` is
+    still tolerated so the runner can be invoked by hand while debugging.
     """
+    # ``--script`` is accepted but ignored: the wrapper now passes the script
+    # positionally because FreeCADCmd rejects unknown flags, and the flag is kept
+    # so the runner stays directly invocable for debugging.
     arguments = [item for item in argv[1:] if item != SCRIPT_FLAG]
     if len(arguments) == 2:
         return arguments[0], arguments[1]

@@ -353,7 +353,8 @@ def test_the_child_runs_in_safe_mode_with_a_temporary_user_config(tmp_path, monk
     """
     script = write_script(tmp_path)
     install(monkeypatch, FakeProcess())
-    make_bridge(tmp_path).run_script(str(script))
+    bridge = make_bridge(tmp_path)
+    bridge.run_script(str(script))
 
     command, kwargs = FakeProcess.last
     assert command[0] == "fake-freecadcmd"
@@ -361,7 +362,12 @@ def test_the_child_runs_in_safe_mode_with_a_temporary_user_config(tmp_path, monk
     assert "--user-cfg" in command
     config = Path(command[command.index("--user-cfg") + 1])
     assert config.parent == Path(kwargs["cwd"])
-    assert command[-2:] == ["--script", str(script)]
+    # Positional, no flag: FreeCADCmd rejects "--script" as an unrecognised
+    # option, which fails the call before the runner is ever reached. Asserted
+    # here because it is invisible locally - only a real host rejects it.
+    assert command[-1] == str(script)
+    assert "--script" not in command
+    assert command[-2] == str(bridge.driver_path.with_name("script_runner.py"))
 
 
 def test_the_packaged_runner_is_used_not_a_caller_path(tmp_path, monkeypatch):
@@ -380,7 +386,8 @@ def test_the_packaged_runner_is_used_not_a_caller_path(tmp_path, monkeypatch):
     bridge.run_script(str(script))
 
     command, _kwargs = FakeProcess.last
-    assert Path(command[-3]) == bridge.driver_path.with_name("script_runner.py")
+    assert Path(command[-2]) == bridge.driver_path.with_name("script_runner.py")
+    assert command[-1] == str(script)
 
 
 def test_run_script_needs_an_executable(tmp_path):
@@ -645,6 +652,25 @@ def test_the_module_directory_outranks_site_packages(tmp_path):
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "module"
+
+
+def test_the_script_is_passed_positionally_with_no_flag(tmp_path, monkeypatch):
+    """FreeCADCmd accepts no flag of ours before the script path.
+
+    It parses only its own fixed option set followed by a script file, so
+    ``--script <path>`` is rejected with "unrecognised option" and the call dies
+    before the runner starts. Nothing in the fake-child tests can see this - the
+    fake accepts any argv - which is exactly why it reached a real host. The
+    regression is pinned here because the shape is now load-bearing and looks
+    arbitrary otherwise.
+    """
+    script = write_script(tmp_path)
+    install(monkeypatch, FakeProcess())
+    make_bridge(tmp_path).run_script(str(script))
+
+    command, _kwargs = FakeProcess.last
+    assert command[-1] == str(script)
+    assert "--script" not in command
 
 
 def test_the_runner_rejects_a_bad_argv():
