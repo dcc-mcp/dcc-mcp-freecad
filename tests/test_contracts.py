@@ -237,7 +237,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 35
+    assert len(payload["tools"]) == len(catalog) == 36
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -361,7 +361,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 35
+    assert len(catalog) == 36
 
 
 def test_the_sketch_errors_are_exported_and_state_error_is_the_callers_one():

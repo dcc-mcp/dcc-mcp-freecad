@@ -181,6 +181,71 @@ def test_paging_advances_over_a_stable_cursor(tmp_path: Path):
     assert third["next_offset"] is None
 
 
+def test_paging_over_subdirectories_neither_drops_nor_repeats(tmp_path: Path):
+    """A page must be a window on the sorted result, not on the walk order.
+
+    The walk yields files depth-first with subdirectories popped in reverse
+    name order, which is not the order entries are returned in. Slicing a page
+    out of the walk and sorting afterwards silently drops matches and repeats
+    others across pages, and it bites at the defaults: any subdirectory holding
+    more than ``limit`` documents is enough.
+    """
+    root = tmp_path / "allowed"
+    for directory in ("alpha", "zeta"):
+        for index in range(60):
+            _write(root, "%s/f-%03d.FCStd" % (directory, index))
+    _write(root, "flat.FCStd")
+    bridge = FakeFreecad(root)
+
+    truth = sorted(str(path) for path in root.rglob("*.FCStd"))
+    assert len(truth) == 121
+
+    seen = []
+    offset = 0
+    pages = 0
+    while True:
+        listing = bridge.list_documents(limit=100, offset=offset)
+        pages += 1
+        seen.extend(entry["absolute_path"] for entry in listing["entries"])
+        if not listing["truncated"] or listing["next_offset"] is None:
+            break
+        offset = listing["next_offset"]
+        # A page that never advances would loop forever on a stable cursor.
+        assert pages < 20, "paging did not converge"
+
+    assert pages == 2
+    assert len(seen) == len(truth)
+    assert len(set(seen)) == len(truth), "paging repeated entries"
+    assert set(seen) == set(truth), "paging dropped entries"
+    assert seen == truth, "paging did not return one globally sorted sequence"
+
+
+def test_paging_with_an_awkward_page_size_covers_every_document(tmp_path: Path):
+    """The same guarantee at a page size that splits every subdirectory."""
+    root = tmp_path / "allowed"
+    for directory in ("a", "b", "c"):
+        for index in range(50):
+            _write(root, "%s/f-%03d.FCStd" % (directory, index))
+    bridge = FakeFreecad(root)
+
+    truth = sorted(str(path) for path in root.rglob("*.FCStd"))
+    assert len(truth) == 150
+
+    seen = []
+    offset = 0
+    pages = 0
+    while True:
+        listing = bridge.list_documents(limit=7, offset=offset)
+        pages += 1
+        seen.extend(entry["absolute_path"] for entry in listing["entries"])
+        if not listing["truncated"] or listing["next_offset"] is None:
+            break
+        offset = listing["next_offset"]
+        assert pages < 100, "paging did not converge"
+
+    assert seen == truth
+
+
 def test_offset_past_the_end_returns_an_empty_page(tmp_path: Path):
     root = tmp_path / "allowed"
     _write(root, "only.FCStd")
