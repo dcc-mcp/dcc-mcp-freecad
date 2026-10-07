@@ -659,6 +659,51 @@ def _named_object(bridge, document, name):
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_zz_diagnostic_placement_api(tmp_path: Path):
+    """TEMPORARY diagnostic: print how the host's Placement API actually behaves."""
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "diag.FCStd"
+    bridge.create_document(str(document))
+    bridge.add_primitive(
+        str(document), "box", "B", dimensions={"length": 20, "width": 10, "height": 5}
+    )
+    bridge.transform_object(str(document), "B", translation=[100, 40, 0])
+    lines = bridge._invoke("system.status", {}, 30)
+    code = r"""
+import FreeCAD as App, Part, json
+doc = App.openDocument("%s")
+src = doc.getObject("B")
+report = {}
+report["source_bbox"] = [src.Shape.BoundBox.XMin, src.Shape.BoundBox.YMin, src.Shape.BoundBox.ZMin]
+report["placement_base"] = list(src.Placement.Base)
+report["placement_type"] = type(src.Placement).__name__
+inv = src.Placement.inverse()
+report["inverse_type"] = type(inv).__name__
+report["inverse_base"] = list(getattr(inv, "Base", [None])) if hasattr(inv, "Base") else "no Base"
+report["inverse_toMatrix_type"] = type(inv.toMatrix()).__name__
+report["inverse_matrix"] = [list(row) for row in inv.toMatrix().A]
+report["placement_matrix"] = [list(row) for row in src.Placement.toMatrix().A]
+shape = src.Shape.copy()
+moved = shape.transformGeometry(inv.toMatrix())
+report["after_inverse_bbox"] = [moved.BoundBox.XMin, moved.BoundBox.YMin, moved.BoundBox.ZMin]
+report["transformGeometry_returned_new"] = moved is not shape
+report["original_unchanged_bbox"] = [shape.BoundBox.XMin, shape.BoundBox.YMin, shape.BoundBox.ZMin]
+print("DIAG_BEGIN")
+print(json.dumps(report, default=str))
+print("DIAG_END")
+""" % str(document)
+    path = tmp_path / "diag.py"
+    path.write_text(code, encoding="utf-8")
+    import subprocess
+
+    out = subprocess.run([_real_freecad(), str(path)], capture_output=True, text=True, timeout=600)
+    print("DIAG STDOUT:", out.stdout[-3000:])
+    print("DIAG STDERR:", out.stderr[-2000:])
+    raise AssertionError("DIAGNOSTIC - read the printed output")
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
 def test_real_freecad_copy_places_every_source_type_the_same_way(tmp_path: Path):
     """``translation`` must mean the same thing whatever the source is made of.
 
