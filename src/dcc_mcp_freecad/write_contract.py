@@ -73,12 +73,18 @@ MUTATING_TOOLS = (
     "sketch.create",
     "sketch.add_geometry",
     "sketch.add_constraint",
+    # A solve writes a solver input, logs and results. It never writes the
+    # caller's document, but it produces artefacts a caller is told to read, so
+    # it owes the same proof that they exist and agree with the request.
+    "analysis.run_fem",
 )
 
 # Tools that observe state and change nothing. Kept here so the classification
 # test can prove no method is left unclassified.
 READ_ONLY_TOOLS = (
     "system.status",
+    "system.fem_probe",
+    "analysis.list_faces",
     "document.inspect",
     "document.validate",
     "sketch.info",

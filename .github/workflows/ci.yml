@@ -114,6 +114,28 @@ jobs:
       - name: Assert GUI cases executed without skips
         if: always()
         run: python3 .github/scripts/verify-freecad-run.py freecad-gui-${{ matrix.freecad_version }}.xml 38
+      - name: Install the FEM solver and mesher
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends calculix-ccx gmsh
+          command -v ccx
+          command -v gmsh
+      - name: Real FEM cantilever against the analytic solution
+        # --basetemp keeps the solver work directories inside the workspace so
+        # they can be uploaded. A failed solve leaves the .inp, the .frd and the
+        # ccx logs there, and those are what say why it produced nothing.
+        run: python -m pytest -m freecad_fem -v --basetemp=fem-work-${{ matrix.freecad_version }} --junitxml=freecad-fem-${{ matrix.freecad_version }}.xml
+      - name: Assert FEM cases executed without skips
+        if: always()
+        run: python3 .github/scripts/verify-freecad-run.py freecad-fem-${{ matrix.freecad_version }}.xml 4
+      - name: Upload FEM solver work directories
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fem-solver-work-${{ matrix.freecad_version }}
+          path: fem-work-${{ matrix.freecad_version }}
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload real run report
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -122,6 +144,7 @@ jobs:
           path: |
             freecad-real-${{ matrix.freecad_version }}.xml
             freecad-gui-${{ matrix.freecad_version }}.xml
+            freecad-fem-${{ matrix.freecad_version }}.xml
           retention-days: 7
 
   lint-and-build:

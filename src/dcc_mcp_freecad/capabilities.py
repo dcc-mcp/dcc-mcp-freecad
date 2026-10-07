@@ -54,6 +54,7 @@ SKILL_NAMES = (
     "freecad-modify",
     "freecad-parts",
     "freecad-sketch",
+    "freecad-analysis",
 )
 
 # The entry points an agent is already holding when it asks what this adapter

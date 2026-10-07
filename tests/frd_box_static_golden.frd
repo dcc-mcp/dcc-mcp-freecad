@@ -1,0 +1,27 @@
+# Excerpt of FreeCAD's official CalculiX golden result file
+# src/Mod/Fem/femtest/data/calculix/box_static.frd (ccx 2.11, static, 280 nodes).
+# Vendored as the positive anchor for _frd_has_results: it preserves the real
+# ordering, in which 1PSTEP precedes the 100CL header it belongs to and is NOT
+# adjacent to it. Hand-written fixtures got this backwards and let a detector
+# that fails on real output pass the tests. Value lines are truncated for size;
+# only the block structure matters to the parser. Do not reorder these lines.
+    1C
+    1UUSER
+    1UDATE              07.february.2018
+    1UTIME              13:19:11
+    1UHOST
+    1UPGM               CalculiX
+ -1       279 2.50000E+00 3.75000E+00
+ -1       280 1.25000E+00 7.50000E+00
+ -3
+    3C                           129                                     1
+ -1         1    6    0    1
+    1PSTEP                         1           1           1
+  100CL  101 1.000000000         280                     0    1           1
+ -4  DISP        4    1
+ -5  D1          1    2    1    0
+ -5  D2          1    2    2    0
+ -5  D3          1    2    3    0
+ -5  ALL         1    2    0    0    1ALL
+ -1         1 0.00000E+00 0.00000E+00
+ -1         2 0.00000E+00 0.00000E+00

@@ -791,6 +791,9 @@ class FreecadBridge:
                 state = error.get("sketch_state")
                 if isinstance(state, dict):
                     raise SketchStateError(message, error.get("code"), state)
+                fem_error = error.get("fem_error")
+                if isinstance(fem_error, dict):
+                    raise FemAnalysisError(fem_error, message)
                 code = error.get("code")
                 raise BridgeError(message, str(code) if code else None)
             result = payload.get("result")
@@ -1076,6 +1079,154 @@ class FreecadBridge:
         )
         return result
 
+    def fem_capabilities(self, timeout_secs: float = 60) -> dict[str, Any]:
+        """Report what this host can actually solve, and why not when it cannot.
+
+        A structural solve depends on two binaries the FreeCAD installation does
+        not necessarily own (CalculiX and Gmsh). Reporting the tool as available
+        when the solver is missing is the failure this exists to prevent: the
+        call would succeed on a meshed document and fail on the first real one,
+        or worse, report a result for an analysis that never ran.
+        """
+        try:
+            probe = self._invoke("system.fem_probe", {}, timeout_secs)
+        except BridgeError as exc:
+            return {
+                "status": "probe_failed",
+                "message": str(exc),
+                "available": False,
+                "objects_constructible": {
+                    "ok": False,
+                    "message": "the probe itself failed: %s" % exc,
+                    "attempts": [],
+                },
+                "tools": {
+                    "run_fem_analysis": {
+                        "available": False,
+                        "status": "host_limited",
+                        "reason": str(exc),
+                        "remediation": [],
+                    }
+                },
+            }
+        available = bool(probe.get("available"))
+        return {
+            "status": probe.get("status"),
+            "available": available,
+            "host_version": probe.get("host_version"),
+            "fem_workbench": probe.get("fem_workbench"),
+            "solver": probe.get("solver"),
+            "mesher": probe.get("mesher"),
+            "objects_constructible": probe.get("objects_constructible"),
+            "tools": {
+                "run_fem_analysis": {
+                    "available": available,
+                    "status": "ready" if available else "host_limited",
+                    "reason": None if available else " ".join(probe.get("remediation") or ()),
+                    "blocking": probe.get("blocking") or [],
+                }
+            },
+        }
+
+    def list_faces(
+        self, document_path: str, object_name: str, timeout_secs: float = 120
+    ) -> dict[str, Any]:
+        """List an object's faces with the references this host resolves.
+
+        An FEM restraint or load is applied to a named sub-element, and
+        sub-element naming moved between FreeCAD release lines. Returning the
+        names along with whether the host resolves each one lets a caller pick a
+        reference that provably exists instead of one that silently applies to
+        nothing.
+        """
+        document = self._document_path(document_path)
+        return self._invoke(
+            "analysis.list_faces",
+            {"document_path": str(document), "object_name": self._object_name(object_name)},
+            timeout_secs,
+        )
+
+    def run_fem_analysis(
+        self,
+        document_path: str,
+        analysis_name: Optional[str] = None,
+        target_object: Optional[str] = None,
+        material: Optional[Mapping[str, Any]] = None,
+        fixed_faces: Optional[Sequence[str]] = None,
+        load: Optional[Mapping[str, Any]] = None,
+        mesh_size: Optional[Mapping[str, Any]] = None,
+        timeout_secs: float = 600,
+    ) -> dict[str, Any]:
+        """Solve one static structural case without touching the source document.
+
+        The document is staged into a fresh solver work directory and only that
+        copy is opened, so the source is never written. The work directory is
+        deliberately left on disk afterwards: it holds the solver input, logs and
+        results that make a reported number auditable.
+
+        Every quantity this call returns carries its unit, and the units are
+        proven rather than assumed: the driver identifies the unit schema from
+        the node coordinates of the generated input and sums its ``*CLOAD``
+        block to confirm the applied force is the one that was requested.
+        """
+        document = self._document_path(document_path)
+        timeout = self._timeout(timeout_secs)
+        if analysis_name is None and target_object is None:
+            raise BridgeError("run_fem_analysis requires analysis_name or target_object")
+        if analysis_name is not None:
+            self._object_name(str(analysis_name))
+        if target_object is not None:
+            self._object_name(str(target_object))
+        # The solver work directory holds a copy of the caller's document plus
+        # the solver's input, logs and results, so it is created inside an
+        # allowed root like every other path here rather than in the system temp
+        # directory: a readable copy of the work must not be written somewhere
+        # the operator did not sanction. It is deliberately not deleted, because
+        # solver_workdir is part of the returned result and callers inspect it.
+        workdir = Path(
+            tempfile.mkdtemp(prefix="dcc-mcp-freecad-fem-", dir=str(self.allowed_roots[0]))
+        )
+        staged = workdir / document.name
+        before = sha256_file(document)
+        try:
+            shutil.copy2(str(document), str(staged))
+            request = {
+                "document_path": str(staged),
+                "workdir": str(workdir),
+                # Leave headroom so the driver reports a structured timeout with
+                # partial logs before this process's own deadline kills it.
+                "solver_timeout_secs": max(1.0, timeout - 30.0),
+                "analysis_name": analysis_name,
+                "target_object": target_object,
+                "material": dict(material) if material is not None else None,
+                "fixed_faces": list(fixed_faces or ()),
+                "load": dict(load) if load is not None else None,
+                "mesh_size": dict(mesh_size) if mesh_size is not None else None,
+            }
+            try:
+                result = self._invoke("analysis.run_fem", request, timeout)
+            except BaseException as exc:
+                raise _unstage_failure(exc, staged, document) from None
+            result.update(
+                {
+                    "document_path": str(document),
+                    "document_bytes": document.stat().st_size,
+                    "source_document_sha256": before,
+                    "solver_workdir": str(workdir),
+                }
+            )
+            return result
+        finally:
+            # The check runs only when nothing else is propagating, so a real
+            # solver failure keeps its own message instead of being replaced.
+            if sys.exc_info()[0] is None:
+                changed = _assert_source_unchanged(document, before)
+                if changed:
+                    raise BridgeError(
+                        "run_fem_analysis %s; a solve stages a copy into its work "
+                        "directory and must only read the source" % changed
+                    )
+
     def capabilities(self) -> dict[str, Any]:
         # Every declaration below is derived from skills/*/tools.yaml and from
         # the suffix sets enforced by _input_path / _output_path, so the
@@ -1090,6 +1241,10 @@ class FreecadBridge:
             parts={
                 "part_extensions": sorted(parts_library.PART_SUFFIXES),
                 "parts_library": self._parts_library_capability(),
+                # A tool that needs an external solver is reported per tool
+                # rather than globally: "the adapter supports FEM" is not an
+                # answer a caller can act on when the solver is missing.
+                "fem": self.fem_capabilities(),
             },
             render={"render_view": self._render_capability(self.status())},
             max_script_timeout_secs=self.max_script_timeout_secs,
@@ -2327,3 +2482,52 @@ class FreecadBridge:
 
 def get_bridge() -> FreecadBridge:
     return FreecadBridge.from_env()
+
+
+def _assert_source_unchanged(document: Path, expected_sha256: str) -> Optional[str]:
+    """Report how a solve changed its source document, or None when intact.
+
+    A structural solve is a read of the caller's document. It stages a copy into
+    the solver work directory and analyses that, so any change to the source is
+    the failure this guard exists to name loudly instead of quietly accepting.
+    """
+    if not document.is_file():
+        return "the source document no longer exists"
+    actual = sha256_file(document)
+    if actual != expected_sha256:
+        return "the source document changed (sha256 %s -> %s)" % (
+            expected_sha256[:12],
+            actual[:12],
+        )
+    return None
+
+
+class FemAnalysisError(BridgeError):
+    """A structured FEM failure reported by the host.
+
+    Raised instead of a plain :class:`BridgeError` so a caller can branch on
+    ``error_code``. The codes are not interchangeable: a missing solver needs an
+    install, a timed-out run needs a coarser mesh or a bigger budget, and an
+    unverifiable unit schema needs a preference change. Re-deriving that from a
+    sentence is how a caller ends up retrying a permanent failure.
+    """
+
+    def __init__(self, payload: Mapping[str, Any], message: str):
+        super().__init__(message)
+        self.payload = dict(payload)
+
+    @property
+    def error_code(self) -> Any:
+        return self.payload.get("error_code")
+
+    @property
+    def remediation(self) -> Any:
+        return self.payload.get("remediation")
+
+    @property
+    def details(self) -> Any:
+        return self.payload.get("details")
+
+    @property
+    def host_version(self) -> Any:
+        return self.payload.get("host_version")
