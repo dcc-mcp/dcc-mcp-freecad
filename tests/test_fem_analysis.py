@@ -175,12 +175,15 @@ def test_real_cantilever_matches_the_analytic_solution(tmp_path: Path):
     # The load must have been applied along the requested axis, not against it.
     # Magnitudes alone cannot see this: a cantilever loaded in +Z deflects as far
     # as one loaded in -Z, so a magnitude-only check passes on a reversed load.
-    # The tip moves along -Z here, so the component on that axis is negative and
-    # its magnitude is the deflection.
+    #
+    # The signed component is the displacement projected onto the requested load
+    # direction, so positive means the tip moved *with* the load. A negative value
+    # means motion opposed the load -- the load was applied against what was
+    # asked for, which is the failure this check exists to catch.
     axis_displacement = result["axis_displacement"]["value"]
-    assert axis_displacement < 0, (
-        "the tip displaced %+.6f mm along the requested -Z load axis; a positive value means "
-        "the load was applied against the requested direction" % axis_displacement
+    assert axis_displacement > 0, (
+        "the tip displaced %+.6f mm against the requested -Z load axis; a negative value "
+        "means the load was applied against the requested direction" % axis_displacement
     )
     assert abs(axis_displacement) == pytest.approx(expected_deflection, rel=0.10), (
         "the signed tip displacement %+.6f mm does not match the analytic %.6f mm"

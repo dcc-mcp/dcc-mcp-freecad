@@ -4953,6 +4953,21 @@ def _fem_call(fea, names, version, failure_code, what):
 
 
 def _setup_working_dir(fea, workdir):
+    """Point the solver driver at our working directory.
+
+    Both routes are used because they are not equivalent across hosts: the
+    solver object's ``WorkingDir`` property is what some versions read, while
+    ``setup_working_dir()`` is upstream's own entry point and is what
+    ``FemToolsCcx.run()`` calls. Relying on only one leaves the solver writing
+    to its own default location, where the mesher's output is then not the file
+    we go on to read.
+    """
+    solver = getattr(fea, "solver", None)
+    if solver is not None and hasattr(solver, "WorkingDir"):
+        try:
+            solver.WorkingDir = workdir
+        except Exception:
+            pass
     function = getattr(fea, "setup_working_dir", None)
     if not callable(function):
         return None
@@ -4960,6 +4975,13 @@ def _setup_working_dir(fea, workdir):
         function(workdir)
     except TypeError:
         function()
+    # Fall back to the attribute when the call form is not accepted, so the
+    # driver still resolves its input and results inside our directory.
+    if getattr(fea, "working_dir", None) != str(workdir):
+        try:
+            fea.working_dir = str(workdir)
+        except Exception:
+            pass
     return "setup_working_dir"
 
 
@@ -5091,12 +5113,16 @@ def _run_ccx(binary, input_path, workdir, timeout, version):
             universal_newlines=True,
             timeout=timeout,
         )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
+        stdout = _decode_stream(completed.stdout)
+        stderr = _decode_stream(completed.stderr)
         returncode = completed.returncode
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or "" if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr or "" if isinstance(exc.stderr, str) else ""
+        # On POSIX the timeout path leaves the captured output as bytes even
+        # when universal_newlines is set, so decode rather than discard it --
+        # the remediation below promises the partial output, and throwing it
+        # away leaves an empty log where the caller was told to look.
+        stdout = _decode_stream(exc.stdout)
+        stderr = _decode_stream(exc.stderr)
         _write_fem_logs(workdir, stdout, stderr)
         raise _fem_error(
             contract.FemError.ERROR_SOLVER_TIMEOUT,
@@ -5163,6 +5189,22 @@ def _run_ccx(binary, input_path, workdir, timeout, version):
         "stderr_tail": stderr[-_FEM_LOG_TAIL:],
         "frd_file": frd_path if os.path.isfile(frd_path) else None,
     }
+
+
+def _decode_stream(value):
+    """Return solver output as text, accepting bytes, str or None.
+
+    subprocess hands back bytes on some paths and str on others, and None when
+    nothing was captured; all three have to survive, because dropping the bytes
+    silently loses the output the error message promises.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 def _write_fem_logs(workdir, stdout, stderr):
@@ -5271,6 +5313,32 @@ def _result_object(analysis):
     return None
 
 
+def _result_nodes(result):
+    """Return the node mapping of a result object, or ``None``.
+
+    ``result.Mesh`` is not the mesh. Upstream builds a ``MeshResult`` document
+    object and assigns the mesh to its ``FemMesh`` property
+    (``importCcxFrdResults.py``), so the object reached through ``Mesh`` has no
+    ``Nodes`` attribute of its own -- reading it there yields nothing and the
+    node count collapses to zero even when the solve produced a full result.
+
+    Both spellings are accepted so this works whether the mesh object or the raw
+    mesh is handed over, and ``NodeNumbers`` is tried last because a result can
+    expose it directly.
+    """
+    mesh_object = getattr(result, "Mesh", None)
+    for candidate in (
+        getattr(mesh_object, "FemMesh", None),
+        mesh_object,
+        getattr(result, "FemMesh", None),
+    ):
+        nodes = getattr(candidate, "Nodes", None)
+        if nodes is not None:
+            return nodes
+    nodes = getattr(result, "NodeNumbers", None)
+    return nodes if nodes is not None else None
+
+
 def _extract_results(result, axis=None):
     """Pull bounded, finite scalars out of a FreeCAD FEM result object.
 
@@ -5279,8 +5347,7 @@ def _extract_results(result, axis=None):
     magnitude alone cannot distinguish a load applied along an axis from the
     same load applied against it.
     """
-    mesh = getattr(result, "Mesh", None)
-    nodes = getattr(mesh, "Nodes", None)
+    nodes = _result_nodes(result)
     node_count = len(nodes) if nodes is not None else int(getattr(result, "NodeCount", 0) or 0)
     von_mises = [float(item) for item in (getattr(result, "vonMises", None) or ())]
     vectors = getattr(result, "DisplacementVectors", None) or ()

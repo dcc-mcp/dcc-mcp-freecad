@@ -711,3 +711,67 @@ def test_solver_output_reaches_the_logged_message():
     # the structured fields must survive for callers that branch on them
     assert error.details["solver_workdir"] == "/tmp/wd"
     assert error.error_code == fem_contract.FemError.ERROR_RESULTS_MISSING
+
+
+class _FakeFemMesh:
+    def __init__(self, count):
+        self.Nodes = {index: () for index in range(1, count + 1)}
+
+
+class _FakeMeshResult:
+    """Stands in for the MeshResult document object upstream assigns to .Mesh.
+
+    It is a Fem::FemMeshObjectPython: the mesh is under .FemMesh and the object
+    itself has no .Nodes, which is what made every solve look like it returned
+    no results.
+    """
+
+    def __init__(self, count):
+        self.FemMesh = _FakeFemMesh(count)
+
+
+class _FakeResult:
+    def __init__(self, count):
+        self.Mesh = _FakeMeshResult(count)
+        self.NodeCount = 0
+        self.vonMises = []
+        self.DisplacementVectors = []
+
+
+def test_result_nodes_are_read_through_the_mesh_result_object():
+    """`result.Mesh` is a document object, not the mesh.
+
+    Upstream builds a MeshResult and puts the mesh on its FemMesh property, so
+    reading .Mesh.Nodes finds nothing and the node count collapses to zero --
+    reporting a successful solve as an empty result.
+    """
+    result = _FakeResult(11384)
+
+    nodes = freecad_driver._result_nodes(result)
+    assert nodes is not None
+    assert len(nodes) == 11384
+    assert freecad_driver._extract_results(result)["node_count"] == 11384
+
+
+def test_a_result_without_a_mesh_has_no_nodes():
+    """With no mesh anywhere, the caller's fail-closed check still fires."""
+
+    class _Empty:
+        Mesh = None
+
+    assert freecad_driver._result_nodes(_Empty()) is None
+
+
+def test_timeout_output_is_kept_when_the_stream_is_bytes():
+    """A timed-out solve must still report what it managed to produce.
+
+    The POSIX timeout path leaves the captured output as bytes even with
+    universal_newlines set. Dropping it silently writes an empty log and leaves
+    the caller with a message that promises partial output it does not have.
+    """
+    assert freecad_driver._decode_stream(b"*ERROR in ecp: element 12") == (
+        "*ERROR in ecp: element 12"
+    )
+    assert freecad_driver._decode_stream("Job finished") == "Job finished"
+    assert freecad_driver._decode_stream(None) == ""
+    assert freecad_driver._decode_stream(b"") == ""
