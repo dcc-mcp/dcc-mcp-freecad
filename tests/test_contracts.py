@@ -34,8 +34,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 30
-    assert len({tool["name"] for tool in tools}) == 30
+    assert len(tools) == 33
+    assert len({tool["name"] for tool in tools}) == 33
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -233,7 +233,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 30
+    assert len(payload["tools"]) == len(catalog) == 33
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -306,7 +306,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 30
+    assert len(catalog) == 33
 
 
 def _replace(path: Path, old: str, new: str) -> None:
