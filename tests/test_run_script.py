@@ -20,7 +20,9 @@ the containment that exists, and deliberately assert no more than that.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -232,6 +234,97 @@ def test_a_hanging_script_is_killed_and_reported_as_a_timeout(tmp_path, monkeypa
     assert process.terminated is True
 
 
+def test_a_timeout_carries_what_the_script_printed_before_it_was_killed(tmp_path, monkeypatch):
+    """``timed_out`` must be reachable, and it must carry the pre-hang output.
+
+    The flag used to be dead code: it was set and then the exception was raised,
+    so the return block that reported it never ran. That left the single worst
+    failure mode - a script blocked on a modal dialog - identifiable only by
+    matching the error's message text, and threw away the trace of how far the
+    script got, which is the only clue to what blocked it.
+
+    The regression this guards against is subtler than "field missing": it is
+    "field present but always False". Asserting on the exception payload rather
+    than a return value is what makes the difference observable.
+    """
+    script = write_script(tmp_path, body="print('reached-stage-2')\n")
+    process = FakeProcess(hang=True, stdout="reached-stage-2\n", stderr="warn: blocking\n")
+    install(monkeypatch, process)
+
+    class Clock:
+        calls = 0
+
+        @classmethod
+        def monotonic(cls):
+            cls.calls += 1
+            return 0.0 if cls.calls < 3 else 10_000.0
+
+    monkeypatch.setattr("dcc_mcp_freecad.bridge.time.monotonic", Clock.monotonic)
+
+    with pytest.raises(BridgeTimeoutError) as raised:
+        make_bridge(tmp_path).run_script(str(script), timeout_secs=1)
+
+    partial = raised.value.partial
+    assert raised.value.timed_out is True
+    assert partial["timed_out"] is True
+    assert partial["stdout"] == "reached-stage-2\n"
+    assert partial["stderr"] == "warn: blocking\n"
+    # The child was killed, so there is no exit status to report - and reporting
+    # one would let a caller read the kill as a completed run.
+    assert partial["exit_code"] is None
+    assert partial["script_path"] == str(script)
+    assert len(partial["script_sha256"]) == 64
+
+
+def test_the_skill_layer_reports_a_timeout_as_an_error_not_a_success(monkeypatch):
+    """A timeout must never travel as a success.
+
+    ``bridge_success`` reports success unconditionally, so returning a dict with
+    ``timed_out: True`` would tell a caller that ignores the flag that the script
+    finished - which is the exact lie this tool must not tell. It is therefore an
+    error carrying the partial payload, with a stable ``error_code`` so the
+    caller branches on a key instead of matching prose.
+    """
+    import dcc_mcp_freecad.skill_tools as skill_tools
+
+    class TimedOutBridge:
+        def run_script(self, **_kwargs):
+            raise BridgeTimeoutError(
+                "exceeded", partial={"timed_out": True, "stdout": "partial", "exit_code": None}
+            )
+
+    monkeypatch.setattr(skill_tools, "get_bridge", lambda: TimedOutBridge())
+    result = skill_tools.script_main("run_script", "FreeCAD script executed.")(script_path="x.py")
+
+    assert result["success"] is False
+    assert result["error"] == "script_timeout"
+    context = result["context"]
+    assert context["timed_out"] is True
+    assert context["stdout"] == "partial"
+    assert context["exit_code"] is None
+
+
+def test_a_non_zero_exit_is_still_a_result_not_an_error(monkeypatch):
+    """A script that ran and failed is not an adapter fault.
+
+    This is the other half of the timeout rule and stops it being over-applied:
+    only a *timeout* is an error outcome. A script that completed with a non-zero
+    status is reported the same way a successful one is, so the caller reads
+    ``exit_code`` and decides.
+    """
+    import dcc_mcp_freecad.skill_tools as skill_tools
+
+    class FailingBridge:
+        def run_script(self, **_kwargs):
+            return {"exit_code": 3, "stdout": "", "stderr": "boom", "timed_out": False}
+
+    monkeypatch.setattr(skill_tools, "get_bridge", lambda: FailingBridge())
+    result = skill_tools.script_main("run_script", "FreeCAD script executed.")(script_path="x.py")
+
+    assert result["success"] is True
+    assert result["context"]["exit_code"] == 3
+
+
 def test_long_output_is_truncated_with_an_explicit_flag(tmp_path, monkeypatch):
     """A cut stream must say it was cut.
 
@@ -393,6 +486,153 @@ def test_the_runner_keeps_the_module_directory_behind_stdlib(tmp_path):
     assert completed.stdout.strip() == '{"ok": true}'
 
 
+def test_the_runner_honours_a_pep_263_encoding_declaration(tmp_path):
+    """A legacy-encoded script must run, not fail to decode.
+
+    The escape hatch exists for the long tail the typed tools do not cover, and
+    older GBK/Big5/latin-1 scripts with a coding cookie are squarely in it. A
+    hardcoded UTF-8 read rejects them before one line executes, and reports a
+    script's encoding as an adapter-side ``UnicodeDecodeError`` - which reads as
+    "the runner is broken" rather than "your file declares an encoding we
+    ignored". Plain ``python x.py`` accepts these files, so the difference is
+    observable to anyone who tries the same script both ways.
+    """
+    runner = Path(bridge_module.__file__).with_name("script_runner.py")
+    latin1 = tmp_path / "legacy.py"
+    latin1.write_bytes("# -*- coding: latin-1 -*-\nprint('caf\xe9')\n".encode("latin-1"))
+    gbk = tmp_path / "legacy_gbk.py"
+    gbk.write_bytes("# -*- coding: gbk -*-\nprint('\u4e2d\u6587')\n".encode("gbk"))
+
+    latin1_run = subprocess.run(
+        [sys.executable, str(runner), "--script", str(latin1)],
+        capture_output=True,
+        text=True,
+    )
+    assert latin1_run.returncode == 0, latin1_run.stderr
+    assert latin1_run.stdout.strip() == "caf\u00e9"
+
+    gbk_run = subprocess.run(
+        [sys.executable, str(runner), "--script", str(gbk)],
+        capture_output=True,
+        text=True,
+    )
+    assert gbk_run.returncode == 0, gbk_run.stderr
+    assert gbk_run.stdout.strip() == "\u4e2d\u6587"
+
+
+def test_script_sha256_is_the_content_that_ran_not_the_file_afterwards(tmp_path, monkeypatch):
+    """The audit hash is taken before the child starts.
+
+    A digest computed after execution fingerprints whatever the file now holds,
+    so a script that rewrites itself is reported under the hash of its
+    replacement - an audit field that points at the wrong bytes is worse than no
+    hash, because it looks like evidence.
+    """
+    script = write_script(tmp_path, body="print('first')\n")
+    before = hashlib.sha256(script.read_bytes()).hexdigest()
+
+    def rewrite_then_return(command, **kwargs):
+        script.write_text("print('rewritten')\n", encoding="utf-8")
+        return FakeProcess(stdout="ok\n")(command, **kwargs)
+
+    install(monkeypatch, rewrite_then_return)
+    result = make_bridge(tmp_path).run_script(str(script))
+
+    assert result["script_sha256"] == before
+    assert result["script_sha256"] != hashlib.sha256(script.read_bytes()).hexdigest()
+
+
+def test_the_child_inherits_no_stdin(tmp_path, monkeypatch):
+    """The child must not inherit this process's stdin.
+
+    Under MCP stdio the adapter's own stdin *is* the protocol stream; a child
+    that inherited it could consume bytes belonging to the protocol, or block
+    waiting on input the protocol will never send.
+    """
+    script = write_script(tmp_path)
+    install(monkeypatch, FakeProcess())
+    make_bridge(tmp_path).run_script(str(script))
+
+    _command, kwargs = FakeProcess.last
+    assert kwargs["stdin"] == subprocess.DEVNULL
+
+
+def test_the_child_is_forced_offscreen(tmp_path, monkeypatch):
+    """QT_QPA_PLATFORM=offscreen keeps a script from opening a real window.
+
+    A script that touched platform input would otherwise be able to raise a
+    window on the operator's desktop - or hang on one in a headless session.
+    """
+    script = write_script(tmp_path)
+    install(monkeypatch, FakeProcess())
+    make_bridge(tmp_path).run_script(str(script))
+
+    _command, kwargs = FakeProcess.last
+    assert kwargs["env"]["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_the_python_module_backend_drops_pythonhome(tmp_path, monkeypatch):
+    """PYTHONHOME must not reach the child on the python-module backend.
+
+    Dropping PYTHONPATH alone leaves PYTHONHOME able to redirect the interpreter
+    at a different stdlib - the same caller-controlled-interpreter problem the
+    PATH removal is there to prevent, via a variable that is easy to overlook.
+    """
+    directory = tmp_path / "mod"
+    directory.mkdir()
+    (directory / "FreeCAD.so").write_bytes(b"")
+    bridge = FreecadBridge(
+        executable=sys.executable,
+        module_directory=str(directory),
+        backend="python-module",
+        allowed_roots=[tmp_path],
+    )
+    script = write_script(tmp_path)
+    install(monkeypatch, FakeProcess())
+    monkeypatch.setenv("PYTHONPATH", "/not-inherited")
+    monkeypatch.setenv("PYTHONHOME", "/not-inherited")
+
+    bridge.run_script(str(script))
+
+    _command, kwargs = FakeProcess.last
+    assert kwargs["env"].get("PYTHONPATH") is None
+    assert kwargs["env"].get("PYTHONHOME") is None
+
+
+def test_the_module_directory_outranks_site_packages(tmp_path):
+    """The native library must be found before any installed copy.
+
+    Two directions both matter. Too early and a ``json.py`` next to the script is
+    imported by the runner itself, so a script bug reports as an adapter crash;
+    too late and a differently-ABI FreeCAD installed in site-packages wins. The
+    first direction already had a test; this covers the second by putting a
+    decoy where site-packages would be and asserting the runner still imports the
+    real stdlib, which only happens if the splice landed ahead of it.
+    """
+    runner = Path(bridge_module.__file__).with_name("script_runner.py")
+    site = tmp_path / "site-packages"
+    site.mkdir()
+    (site / "probe_marker.py").write_text("value = 'site'\n", encoding="utf-8")
+    module = tmp_path / "mod"
+    module.mkdir()
+    (module / "probe_marker.py").write_text("value = 'module'\n", encoding="utf-8")
+    script = write_script(
+        tmp_path,
+        body="import probe_marker\nprint(probe_marker.value)\n",
+    )
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(site)
+    completed = subprocess.run(
+        [sys.executable, str(runner), str(module), "--script", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "module"
+
+
 def test_the_runner_rejects_a_bad_argv():
     runner = Path(bridge_module.__file__).with_name("script_runner.py")
     completed = subprocess.run(
@@ -496,3 +736,67 @@ def test_run_script_is_declared_in_the_session_catalog():
     assert tool["source_file"] == "scripts/run_script.py"
     assert (skills / "freecad-session" / "scripts" / "run_script.py").is_file()
     assert "not a sandbox" in tool["description"]
+
+
+def _real_freecad() -> str:
+    return os.environ.get("FREECAD_TEST_EXECUTABLE", "")
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_script_runs_in_the_vacuum_child(tmp_path: Path):
+    """The escape hatch works on a real host, not only against a faked child.
+
+    Every other test here asserts on the argv the wrapper builds; this one
+    asserts the host actually accepts it. Two things are only observable here:
+
+    * FreeCADCmd really does accept ``--user-cfg <call temp dir>`` pointing at a
+      directory that does not exist yet, which is the whole basis of vacuum mode.
+    * A script really can import ``FreeCAD`` and report the host version back,
+      proving the child is a working FreeCAD interpreter and not a shell that
+      happened to start.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    script = tmp_path / "probe.py"
+    script.write_text(
+        "import FreeCAD\n"
+        "print('version=' + '.'.join(str(part) for part in FreeCAD.Version()[:3]))\n",
+        encoding="utf-8",
+    )
+
+    result = bridge.run_script(str(script))
+
+    assert result["exit_code"] == 0, result["stderr"]
+    assert result["timed_out"] is False
+    assert "version=" in result["stdout"]
+    # The child is a real FreeCAD, so it must report the same version the typed
+    # path sees - otherwise the script ran in some other interpreter.
+    assert result["stdout"].split("version=")[1].split()[0] == bridge.status()["version"]
+    assert len(result["script_sha256"]) == 64
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_script_exit_code_and_failure_survive(tmp_path: Path):
+    """A failing script is a result carrying its status, not an adapter error.
+
+    On a real host this also confirms FreeCAD's own exit path is what reports the
+    status: the child writes no result file for the script path, so a non-zero
+    exit is the only signal - and it has to arrive intact.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    ok_script = tmp_path / "ok.py"
+    ok_script.write_text("print('done')\n", encoding="utf-8")
+    fail_script = tmp_path / "fail.py"
+    fail_script.write_text(
+        "import sys\nsys.stderr.write('deliberate')\nsys.exit(3)\n", encoding="utf-8"
+    )
+
+    ok = bridge.run_script(str(ok_script))
+    assert ok["exit_code"] == 0
+    assert ok["stdout"] == "done\n"
+
+    failed = bridge.run_script(str(fail_script))
+    assert failed["exit_code"] == 3
+    assert failed["stderr"] == "deliberate"
+    assert failed["timed_out"] is False

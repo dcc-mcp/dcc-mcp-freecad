@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tokenize
 
 SCRIPT_FLAG = "--script"
 
@@ -100,7 +101,14 @@ def main(argv: list[str]) -> int:
     if not os.path.isfile(script_path):
         sys.stderr.write("script runner: no such file: %s\n" % script_path)
         return 2
-    with open(script_path, "r", encoding="utf-8") as stream:
+    # tokenize.open honours a PEP 263 coding declaration, which a hardcoded
+    # UTF-8 read does not. This matters more here than it would elsewhere: the
+    # whole point of this entry point is to run long-tail scripts the typed tools
+    # never anticipated, and legacy GBK/Big5/latin-1 files with a coding cookie
+    # are exactly that population. Reading them as UTF-8 fails before a single
+    # line executes, and surfaces as an adapter-side UnicodeDecodeError - a
+    # script's encoding problem reported as if the runner were broken.
+    with tokenize.open(script_path) as stream:
         source = stream.read()
     code = compile(source, script_path, "exec")
     # The script's own directory is appended so the script can import siblings.

@@ -1,8 +1,8 @@
 from dcc_mcp_core.skill import run_main
 
-from dcc_mcp_freecad.skill_tools import bridge_main
+from dcc_mcp_freecad.skill_tools import script_main
 
-main = bridge_main("run_script", "FreeCAD script executed.")
+main = script_main("run_script", "FreeCAD script executed.")
 
 
 if __name__ == "__main__":

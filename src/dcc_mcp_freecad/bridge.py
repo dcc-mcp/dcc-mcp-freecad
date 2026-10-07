@@ -105,7 +105,29 @@ class BridgeError(RuntimeError):
 
 
 class BridgeTimeoutError(BridgeError):
-    """FreeCADCmd exceeded the configured deadline."""
+    """FreeCADCmd exceeded the configured deadline.
+
+    ``partial`` carries whatever the child had already written before it was
+    killed. A timeout is the one failure where the output *before* the failure is
+    the most valuable thing the call produced: a script blocked on a modal dialog
+    has usually printed where it got to, and that trace is the only clue to what
+    blocked it. Without it the caller learns only "it hung", and the answer to
+    "where" is gone with the terminated process.
+
+    ``timed_out`` is always ``True`` here, and is carried explicitly rather than
+    inferred from the exception type so the skill layer can hand it to the caller
+    without importing this module's exception hierarchy.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        partial: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, code)
+        self.partial = dict(partial or {})
+        self.timed_out = True
 
 
 class RenderVerificationError(BridgeError):
@@ -274,6 +296,25 @@ def _transport_fields(
         "stdout_truncated": len(stdout) > OUTPUT_LIMIT,
         "stderr_truncated": len(stderr) > OUTPUT_LIMIT,
     }
+
+
+def _captured(started: float, exit_code: Optional[int], stdout_file, stderr_file) -> dict[str, Any]:
+    """Build the transport block straight from a child's open stream files.
+
+    Same shape as :func:`_transport_fields`, for the one case where the streams
+    have to be read while the child is still alive - so a timeout can report what
+    the script printed before it was killed instead of discarding it.
+    """
+    stdout_file.flush()
+    stderr_file.flush()
+    stdout_file.seek(0)
+    stderr_file.seek(0)
+    return _transport_fields(
+        started,
+        exit_code,
+        stdout_file.read(OUTPUT_LIMIT + 1),
+        stderr_file.read(OUTPUT_LIMIT + 1),
+    )
 
 
 _OUTPUT_EXISTS_MESSAGE = "Output already exists; set overwrite=true to replace it"
@@ -824,6 +865,13 @@ class FreecadBridge:
         ``script_sha256`` is returned so a caller can tell two different
         scripts apart, and ``exit_code`` so a script that reports success on
         stdout but fails is not mistaken for a clean run.
+
+        A deadline overrun raises :class:`BridgeTimeoutError` rather than
+        returning, because the alternative - returning a payload whose
+        ``timed_out`` the caller might ignore - reports a hang as a completed
+        run. The exception carries ``partial``, the transport block plus the
+        output captured before the child was killed: with a script blocked on a
+        modal dialog, that output is the only evidence of where it stopped.
         """
         if not self.executable:
             raise BridgeError("FreeCADCmd was not found; set DCC_MCP_FREECAD_EXECUTABLE")
@@ -836,6 +884,11 @@ class FreecadBridge:
         if not runner_path.is_file():
             raise BridgeError("Packaged FreeCAD script runner is missing")
         script = self._script_path(script_path)
+        # Hashed before the child starts, so the digest is a fingerprint of what
+        # was executed rather than of whatever the file looks like afterwards. A
+        # script that rewrites itself would otherwise be reported under the hash
+        # of its replacement, which makes the audit field actively misleading.
+        script_sha256 = sha256_file(script)
         timeout = self._script_timeout(timeout_secs)
         with tempfile.TemporaryDirectory(prefix="dcc-mcp-freecad-") as temp_dir_value:
             temp_dir = Path(temp_dir_value)
@@ -899,7 +952,23 @@ class FreecadBridge:
                                 timed_out = True
                                 raise BridgeTimeoutError(
                                     "FreeCAD %s backend exceeded the %.1f second script timeout"
-                                    % (self.backend, timeout)
+                                    % (self.backend, timeout),
+                                    # Read the child's streams *before* it is
+                                    # terminated: a script blocked on a modal
+                                    # dialog has usually already printed where it
+                                    # got to, and that trace is the only answer to
+                                    # "what was it doing when it hung".
+                                    partial={
+                                        "script_path": str(script),
+                                        "script_sha256": script_sha256,
+                                        "timed_out": True,
+                                        **_captured(
+                                            started,
+                                            None,
+                                            stdout_file,
+                                            stderr_file,
+                                        ),
+                                    },
                                 )
                             time.sleep(0.05)
                     except BaseException:
@@ -916,7 +985,7 @@ class FreecadBridge:
                     stderr = stderr_file.read(OUTPUT_LIMIT + 1)
         return {
             "script_path": str(script),
-            "script_sha256": sha256_file(script),
+            "script_sha256": script_sha256,
             "timed_out": timed_out,
             **_transport_fields(started, process.returncode, stdout, stderr),
         }

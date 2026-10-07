@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from dcc_mcp_core.skill import skill_entry, skill_error, skill_success
 
-from .bridge import get_bridge
+from .bridge import BridgeTimeoutError, get_bridge
 from .snapshots import SnapshotError
 
 
@@ -61,5 +61,44 @@ def snapshot_main(method: str, message: str) -> Callable[..., dict[str, Any]]:
                 **error.details,
             )
         return bridge_success(message, "snapshot_readback", result)
+
+    return main
+
+
+def script_main(method: str, message: str) -> Callable[..., dict[str, Any]]:
+    """Bridge entry for ``run_script``, which can fail by exceeding its deadline.
+
+    A timeout is the one script outcome that must not travel as a success. The
+    wrapper cannot simply return the partial result with ``timed_out: True``
+    either, because ``bridge_success`` reports success unconditionally - so a
+    caller that ignored the flag would be told the script finished. It is
+    therefore returned as an error carrying the partial payload, which keeps
+    ``timed_out`` both programmatic (an ``error_code``, not prose to match) and
+    accompanied by what the script printed before it was killed.
+
+    A non-zero exit is *not* an error: the script ran to completion and decided
+    to fail, and that is the caller's business to interpret from ``exit_code``.
+    """
+
+    @skill_entry
+    def main(**kwargs: Any) -> dict[str, Any]:
+        try:
+            result = getattr(get_bridge(), method)(**kwargs)
+        except BridgeTimeoutError as error:
+            return skill_error(
+                str(error),
+                "script_timeout",
+                prompt=(
+                    "The script exceeded its timeout and was terminated. Read stdout for how "
+                    "far it got, or raise timeout_secs if the work genuinely needs longer."
+                ),
+                possible_solutions=[
+                    "Read stdout in this result to see how far the script got.",
+                    "Raise timeout_secs, up to DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS.",
+                    "Check for a modal dialog or prompt the script is blocked on.",
+                ],
+                **error.partial,
+            )
+        return bridge_success(message, "script_exit_code", result)
 
     return main

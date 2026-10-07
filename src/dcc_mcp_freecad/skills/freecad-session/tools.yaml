@@ -327,7 +327,10 @@ tools:
       is accepted, never source text. The script is responsible for its own
       persistence; stdout/stderr are truncated at 65536 characters per stream
       with *_truncated flags, and exit_code is reported on success as well as on
-      failure. A hang is killed at the deadline and reported as a timeout.
+      failure. A hang is killed at the deadline and returned as an error with
+      error code script_timeout, carrying timed_out: true and whatever the
+      script printed before it was terminated; a non-zero exit code is a normal
+      result, not an error.
     source_file: scripts/run_script.py
     input_schema:
       type: object

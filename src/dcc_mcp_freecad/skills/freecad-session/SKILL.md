@@ -53,6 +53,13 @@ single `.py` file in a disposable FreeCADCmd child process and returns
 `exit_code`, `stdout`, `stderr`, `stdout_truncated` / `stderr_truncated`,
 `timed_out`, `script_path`, and `script_sha256`.
 
+A **timeout is returned as an error**, not as a successful result carrying
+`timed_out: true` — `success` is `false` and `error` is `script_timeout`, with
+the pre-hang `stdout` / `stderr` and `timed_out: true` in the context so the
+caller can see how far the script got. A timeout must never look like a finished
+run. A **non-zero exit code is not an error**: the script ran and decided to
+fail, and reading `exit_code` is the caller's job.
+
 **It is not a sandbox.** The script runs as the operator's own account with that
 account's full privileges: it can read, write, and import anything that account
 can. `DCC_MCP_FREECAD_ALLOWED_ROOTS` constrains **which script may be named**,
@@ -71,7 +78,9 @@ What it does constrain:
 - **Its own timeout.** `timeout_secs` is capped at
   `DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS` (300s by default), not the 1800s
   document ceiling — a script that blocks on a modal dialog is killed in
-  minutes. A hang is reported as a timeout with `timed_out: true`.
+  minutes. The child is terminated and `success` comes back `false` with
+  `error: script_timeout`; what the script printed before it hung is preserved
+  in `stdout`, which is usually the only clue to where it blocked.
 - **No management surface.** There is no list, read, create, or delete for
   scripts. Maintain them on the filesystem.
 

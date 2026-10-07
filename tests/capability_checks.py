@@ -31,14 +31,20 @@ _ACCEPTED_KINDS = (
     inspect.Parameter.KEYWORD_ONLY,
 )
 
-# scripts/*.py all funnel into one of three shapes that name the bridge method
+# scripts/*.py all funnel into one of four shapes that name the bridge method
 # they dispatch to -- ``bridge_main(...)`` for the document tools,
-# ``snapshot_main(...)`` for the snapshot tools (which differ only in how they
-# turn a refusal into a result), and a plain ``get_bridge().<method>(...)``
-# call for the parts tools, which format their own successes and refusals --
-# so the method a tool actually executes is readable from its source file.
+# ``snapshot_main(...)`` for the snapshot tools and ``script_main(...)`` for the
+# script tool (which differ from the first only in how they turn a refusal or a
+# timeout into a result), and a plain ``get_bridge().<method>(...)`` call for the
+# parts tools, which format their own successes and refusals -- so the method a
+# tool actually executes is readable from its source file.
+#
+# Every wrapper shape has to be listed here or its tool is silently dropped from
+# this lock: ``declaration_problems`` reports a script that matches nothing, and
+# that report then fails the *undrifted* baseline, which looks like drift in the
+# catalog rather than a missing case in the regex.
 _BRIDGE_METHOD = re.compile(
-    r'(?:(?:bridge|snapshot)_main\(\s*"|get_bridge\(\)\.)([A-Za-z_][A-Za-z0-9_]*)'
+    r'(?:(?:bridge|snapshot|script)_main\(\s*"|get_bridge\(\)\.)([A-Za-z_][A-Za-z0-9_]*)'
 )
 
 
