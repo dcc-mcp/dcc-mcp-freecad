@@ -442,4 +442,4 @@ def test_real_freecad_refuses_a_descending_arc_pair(tmp_path: Path):
 
     # Refused, so nothing reached the sketch and the document bytes are unchanged.
     info = bridge.get_sketch_info(str(document), "ArcSketch")
-    assert info["geometry_count"] == 0, info
+    assert info["sketch"]["geometry_count"] == 0, info
