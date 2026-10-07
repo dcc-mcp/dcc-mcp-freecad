@@ -49,8 +49,19 @@ Re-run the generator after changing the catalog.
 - Return object links, placements, shape/mesh topology counts, volume, area,
   bounding boxes, file size, and SHA-256 provenance.
 
-No arbitrary Python, macros, module paths, or FreeCAD command-line flags are
-accepted. The adapter invokes only its packaged method-dispatch driver.
+No inline Python, module paths, or FreeCAD command-line flags are accepted, and
+the typed tools dispatch only through the packaged method-dispatch driver.
+
+The single exception is `run_script`, an escape hatch for work no typed tool
+covers. It accepts a **path to a `.py` file** — never source text — resolves it,
+requires it to lie inside `DCC_MCP_FREECAD_ALLOWED_ROOTS`, and runs it in a
+disposable FreeCADCmd child started with `--safe-mode` and a throwaway user
+config, so no user workbench, plugin, or macro is loaded. **It is not a
+sandbox**: the script runs as the operator's account with that account's full
+privileges, and allowed roots constrain only which file may be named. Its own
+timeout ceiling (`DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS`, 300s by default) is
+far below the 1800s document ceiling, so a script that hangs is killed in
+minutes. There is no script management surface.
 
 ## Requirements
 

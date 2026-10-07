@@ -316,6 +316,40 @@ tools:
       - arguments: {document_path: "projects/enclosure.FCStd", snapshot_id: "20261007T021530.123456Z-a1b2c3d4e5f6"}
     next-tools: {on-success: [inspect_document, validate_document], on-failure: [list_snapshots]}
 
+  - name: run_script
+    description: >-
+      Execute one caller-supplied .py file inside a disposable, isolated
+      FreeCADCmd child process. This is the escape hatch for work no typed tool
+      covers, and it is not a sandbox: the script runs as the operator's account
+      with that account's full privileges, and allowed roots constrain only
+      which file may be named. The child starts with --safe-mode and a throwaway
+      user config, so no user workbench, plugin, or macro is loaded. Only a path
+      is accepted, never source text. The script is responsible for its own
+      persistence; stdout/stderr are truncated at 65536 characters per stream
+      with *_truncated flags, and exit_code is reported on success as well as on
+      failure. A hang is killed at the deadline and reported as a timeout.
+    source_file: scripts/run_script.py
+    input_schema:
+      type: object
+      required: [script_path]
+      properties:
+        script_path:
+          type: string
+          minLength: 1
+          description: Path to an existing .py file. Resolved (symlinks followed) and then required to lie inside DCC_MCP_FREECAD_ALLOWED_ROOTS, the same gate every other path argument goes through.
+        timeout_secs: {type: number, minimum: 1, maximum: 300, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 300
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: true, deferred_hint: true}
+    call_examples:
+      - arguments: {script_path: "scripts/batch_export.py"}
+    next-tools: {on-success: [inspect_document], on-failure: [get_status]}
+
   - name: delete_snapshot
     description: Delete one snapshot to free store capacity. The source document is never touched. Refuses unknown ids; orphaned files without metadata must be removed from the store directory manually.
     source_file: scripts/delete_snapshot.py

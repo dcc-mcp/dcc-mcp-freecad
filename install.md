@@ -15,8 +15,18 @@ before changing an installation.
 - Existing directories for every entry in `DCC_MCP_FREECAD_ALLOWED_ROOTS`.
 
 FreeCAD is an external OS-managed application. The adapter invokes only its
-packaged typed driver; it does not accept arbitrary Python, macros, module
-paths, or additional FreeCAD command-line flags.
+packaged typed driver and does not accept inline Python, module paths, or
+additional FreeCAD command-line flags.
+
+The one escape hatch is `run_script`, which executes a caller-named `.py` file
+in a disposable child process. It takes a path, never source text, and requires
+that path to resolve inside `DCC_MCP_FREECAD_ALLOWED_ROOTS`. **It is not a
+sandbox** — the script runs as the operator's account with that account's full
+privileges, so allowed roots limit which script can be named, not what it can
+do. Keep `DCC_MCP_FREECAD_ALLOWED_ROOTS` confined to the task's workspace.
+Scripts are bounded by `DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS` (300s by
+default), well under the 1800s document ceiling, so a hanging script is killed
+in minutes.
 
 ## Supported versions
 

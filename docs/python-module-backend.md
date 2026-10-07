@@ -1,6 +1,8 @@
 # Explicit isolated native-library backend
 
-The default remains FreeCADCmd. An operator may opt into a separate compatible Python interpreter that imports the installed native FreeCAD library. There is no automatic fallback after a CLI failure, no host upgrade, no arbitrary macro/tool argument, and no access to an existing GUI session. An explicit presentation-copy request initializes native GUI view providers only inside its isolated child process.
+The default remains FreeCADCmd. An operator may opt into a separate compatible Python interpreter that imports the installed native FreeCAD library. There is no automatic fallback after a CLI failure, no host upgrade, no inline Python argument, and no access to an existing GUI session. An explicit presentation-copy request initializes native GUI view providers only inside its isolated child process.
+
+`run_script` works on this backend too: the caller-named `.py` file runs in the same disposable interpreter, with user site and `PYTHONPATH` ignored and `HOME`/`XDG`/FreeCAD user-home pointed at that call's temporary directory. It is not a sandbox — the script runs as the operator's account with that account's full privileges, and `DCC_MCP_FREECAD_ALLOWED_ROOTS` constrains only which file may be named.
 
 Set `DCC_MCP_FREECAD_BACKEND=python-module`, `DCC_MCP_FREECAD_PYTHON` to an explicit compatible interpreter, and `DCC_MCP_FREECAD_MODULE_DIRECTORY` to the installed directory containing FreeCAD.so / FreeCAD.pyd. Keep `DCC_MCP_FREECAD_ALLOWED_ROOTS` confined to the task's workspace. Library/interpreter paths are launch configuration, not MCP tool parameters. Compatibility depends on the native library's Python/compiler ABI; only the recorded Linux configuration is qualified here.
 

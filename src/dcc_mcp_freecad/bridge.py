@@ -17,7 +17,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
 from . import parts_library, raster, sketch_rules
-from .capabilities import build_capabilities
+from .capabilities import DEFAULT_MAX_SCRIPT_TIMEOUT_SECS, build_capabilities
 from .presentation import (
     DEFAULT_RENDER_HEIGHT,
     DEFAULT_RENDER_WIDTH,
@@ -71,6 +71,23 @@ _RENDER_REMEDIATION = {
         "that frame_margin is not so large the model falls below the detection threshold."
     ),
 }
+
+# ``run_script`` is the one entry point this adapter gives a caller for work
+# none of its typed tools cover, so it gets its own timeout ceiling instead of
+# inheriting the 1800s document default. A modal dialog opened by a script
+# (upstream #148) is the failure mode being bounded: the worst case degrades to
+# "the call hung until the deadline killed it", and half an hour of that is not
+# a recoverable wait for an agent or an operator. Setting the env var is the
+# documented way to widen it for a long offline batch.
+#
+# The default is owned by ``capabilities`` (see the note there) and re-exported
+# so the number an operator configures and the number the capability block
+# advertises have exactly one definition.
+MAX_SCRIPT_TIMEOUT_SECS = 1_800
+SCRIPT_SUFFIXES = {".py"}
+# The script runner is a packaged module next to freecad_driver.py, so it is
+# covered by the same "packaged driver is missing" check and ships in the wheel.
+SCRIPT_RUNNER_NAME = "script_runner.py"
 
 
 class BridgeError(RuntimeError):
@@ -230,6 +247,35 @@ def _unstage_failure(error: BaseException, staged: Path, final: Path) -> BaseExc
     return error
 
 
+OUTPUT_LIMIT = 65_536
+
+
+def _transport_fields(
+    started: float,
+    exit_code: Optional[int],
+    stdout: str = "",
+    stderr: str = "",
+) -> dict[str, Any]:
+    """Build the per-call transport block: timing, exit status, captured I/O.
+
+    Defined once so the typed driver path and the script path report a child
+    process the same way. ``exit_code`` is reported on success as well as on
+    failure: a driver that writes a result file and then exits non-zero is a
+    real outcome a caller has to be able to see, not a transport detail to be
+    swallowed. ``stdout``/``stderr`` are truncated at ``OUTPUT_LIMIT`` with an
+    explicit ``*_truncated`` flag rather than silently cut, so a caller can tell
+    "that is all it printed" from "there was more".
+    """
+    return {
+        "duration_secs": round(time.monotonic() - started, 3),
+        "exit_code": exit_code,
+        "stdout": stdout[:OUTPUT_LIMIT],
+        "stderr": stderr[:OUTPUT_LIMIT],
+        "stdout_truncated": len(stdout) > OUTPUT_LIMIT,
+        "stderr_truncated": len(stderr) > OUTPUT_LIMIT,
+    }
+
+
 _OUTPUT_EXISTS_MESSAGE = "Output already exists; set overwrite=true to replace it"
 
 
@@ -342,6 +388,7 @@ class FreecadBridge:
         snapshot_directory: Optional[str] = None,
         max_snapshots: int = DEFAULT_MAX_SNAPSHOTS,
         max_snapshot_bytes: int = DEFAULT_MAX_SNAPSHOT_BYTES,
+        max_script_timeout_secs: float = DEFAULT_MAX_SCRIPT_TIMEOUT_SECS,
     ):
         if backend not in {"freecadcmd", "python-module"}:
             raise ValueError("FreeCAD backend must be freecadcmd or python-module")
@@ -377,6 +424,13 @@ class FreecadBridge:
         self.snapshot_directory = self._snapshot_directory(snapshot_directory)
         self.max_snapshots = max(1, int(max_snapshots))
         self.max_snapshot_bytes = max(1, int(max_snapshot_bytes))
+        # A script ceiling is allowed to be lower than the document ceiling but
+        # never higher: the point of the separate knob is to bound the escape
+        # hatch more tightly than the typed tools, not to open a second, wider
+        # limit behind the same process.
+        self.max_script_timeout_secs = min(
+            float(MAX_SCRIPT_TIMEOUT_SECS), max(1.0, float(max_script_timeout_secs))
+        )
 
     def _snapshot_directory(self, override: Optional[str]) -> Path:
         """Resolve the snapshot store, reusing the allowed-roots gate.
@@ -446,10 +500,17 @@ class FreecadBridge:
         max_snapshot_bytes = int(
             os.environ.get("DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES", str(DEFAULT_MAX_SNAPSHOT_BYTES))
         )
+        max_script_timeout_secs = float(
+            os.environ.get(
+                "DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS", str(DEFAULT_MAX_SCRIPT_TIMEOUT_SECS)
+            )
+        )
         if max_document_bytes <= 0 or max_timeout_secs <= 0:
             raise ValueError("FreeCAD document and timeout limits must be positive")
         if max_snapshots <= 0 or max_snapshot_bytes <= 0:
             raise ValueError("FreeCAD snapshot limits must be positive")
+        if max_script_timeout_secs <= 0:
+            raise ValueError("FreeCAD script timeout limit must be positive")
         return cls(
             executable or selected_executable or None,
             allowed_roots=roots,
@@ -460,6 +521,7 @@ class FreecadBridge:
             snapshot_directory=os.environ.get("DCC_MCP_FREECAD_SNAPSHOT_DIR") or None,
             max_snapshots=max_snapshots,
             max_snapshot_bytes=max_snapshot_bytes,
+            max_script_timeout_secs=max_script_timeout_secs,
         )
 
     @staticmethod
@@ -693,16 +755,171 @@ class FreecadBridge:
             result = payload.get("result")
             if not isinstance(result, dict):
                 result = {"result": result}
-            result.update(
-                {
-                    "duration_secs": round(time.monotonic() - started, 3),
-                    "stdout": stdout[:65_536],
-                    "stderr": stderr[:65_536],
-                    "stdout_truncated": len(stdout) > 65_536,
-                    "stderr_truncated": len(stderr) > 65_536,
-                }
-            )
+            result.update(_transport_fields(started, process.returncode, stdout, stderr))
             return result
+
+    def _script_path(self, value: str) -> Path:
+        """Resolve a script the caller is allowed to name.
+
+        The gate is the same one every other path here goes through. Symbolic
+        links are resolved *before* the check rather than after, so a link
+        inside an allowed root that points at a file outside it is refused
+        instead of read - without that, containment would be a property of the
+        link's name and not of the file actually executed.
+        """
+        path = Path(value).expanduser().resolve()
+        if path.suffix.lower() not in SCRIPT_SUFFIXES:
+            raise BridgeError("Script paths must end with .py")
+        if not path.is_file():
+            raise BridgeError("Script does not exist: %s" % path)
+        if not _within(path, self.allowed_roots):
+            raise BridgeError("Script is outside DCC_MCP_FREECAD_ALLOWED_ROOTS")
+        return path
+
+    def _script_timeout(self, value: float) -> float:
+        """Bound a script deadline by the script ceiling, not the document one.
+
+        ``_timeout`` enforces ``max_timeout_secs`` (1800s by default), which is
+        the right bound for a document round-trip and the wrong one for the
+        escape hatch: a script that blocks on a modal dialog should be killed in
+        minutes. Both ceilings are applied, the stricter one winning.
+        """
+        timeout = float(value)
+        if timeout <= 0 or timeout > self.max_script_timeout_secs:
+            raise BridgeError(
+                "timeout_secs must be greater than 0 and no more than %s for run_script"
+                % int(self.max_script_timeout_secs)
+            )
+        return self._timeout(timeout)
+
+    def run_script(
+        self,
+        script_path: str,
+        timeout_secs: float = DEFAULT_MAX_SCRIPT_TIMEOUT_SECS,
+    ) -> dict[str, Any]:
+        """Execute one caller-named ``.py`` file in a disposable FreeCAD child.
+
+        This is the adapter's escape hatch: the typed tools cover a bounded
+        document workflow and everything outside it has nowhere to go. It is
+        deliberately narrower than a general ``execute_code`` and is **not a
+        sandbox**:
+
+        * Only a path is accepted - never source text - so there is no inline
+          string to inject through.
+        * The path is resolved and then checked against
+          ``DCC_MCP_FREECAD_ALLOWED_ROOTS``, so a link is judged by the file it
+          points at rather than by where it is named.
+        * The child runs as the operator's own account with that account's full
+          privileges. Allowed roots constrain *which script may be named*, not
+          *what the script may do*.
+        * The child is a package-owned runner, and the native-library directory
+          is spliced behind the standard library rather than in front of it, so
+          a same-named module shipped next to a script cannot be imported by the
+          runner before the script runs.
+        * ``--safe-mode`` plus a temporary user config means no user workbench,
+          plugin, or macro is loaded (the vacuum mode), which is what keeps the
+          upstream modal-dialog and broken-FeaturePython hangs from being
+          reachable through this door.
+
+        ``script_sha256`` is returned so a caller can tell two different
+        scripts apart, and ``exit_code`` so a script that reports success on
+        stdout but fails is not mistaken for a clean run.
+        """
+        if not self.executable:
+            raise BridgeError("FreeCADCmd was not found; set DCC_MCP_FREECAD_EXECUTABLE")
+        # Checked before the caller's own argument: a broken install is the more
+        # actionable error, and refusing on it first keeps a misconfigured wheel
+        # from being reported as a bad path the caller should fix.
+        if not self.driver_path.is_file():
+            raise BridgeError("Packaged FreeCAD driver is missing")
+        runner_path = self.driver_path.with_name(SCRIPT_RUNNER_NAME)
+        if not runner_path.is_file():
+            raise BridgeError("Packaged FreeCAD script runner is missing")
+        script = self._script_path(script_path)
+        timeout = self._script_timeout(timeout_secs)
+        with tempfile.TemporaryDirectory(prefix="dcc-mcp-freecad-") as temp_dir_value:
+            temp_dir = Path(temp_dir_value)
+            config_path = temp_dir / "user.cfg"
+            if self.backend == "python-module":
+                command = [
+                    self.executable,
+                    "-I",
+                    str(runner_path),
+                    str(self.module_directory),
+                    str(script),
+                ]
+            else:
+                command = [
+                    self.executable,
+                    "--safe-mode",
+                    "--user-cfg",
+                    str(config_path),
+                    str(runner_path),
+                    "--script",
+                    str(script),
+                ]
+            started = time.monotonic()
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            environment = os.environ.copy()
+            environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+            if self.backend == "python-module":
+                # Identical containment to _invoke: keep every temporary
+                # preference/cache write out of the operator home, and do not
+                # let a caller-controlled PYTHONPATH reach the runner.
+                for key, child in [
+                    ("HOME", "home"),
+                    ("XDG_CONFIG_HOME", "config"),
+                    ("XDG_CACHE_HOME", "cache"),
+                    ("XDG_DATA_HOME", "data"),
+                    ("FREECAD_USER_HOME", "freecad-home"),
+                ]:
+                    folder = temp_dir / child
+                    folder.mkdir()
+                    environment[key] = str(folder)
+                environment.pop("PYTHONPATH", None)
+                environment.pop("PYTHONHOME", None)
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout_file:
+                with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stderr_file:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=str(temp_dir),
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        text=True,
+                        creationflags=creationflags,
+                    )
+                    timed_out = False
+                    try:
+                        deadline = started + timeout
+                        while process.poll() is None:
+                            check_dcc_cancelled()
+                            if time.monotonic() >= deadline:
+                                timed_out = True
+                                raise BridgeTimeoutError(
+                                    "FreeCAD %s backend exceeded the %.1f second script timeout"
+                                    % (self.backend, timeout)
+                                )
+                            time.sleep(0.05)
+                    except BaseException:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                        raise
+                    stdout_file.seek(0)
+                    stderr_file.seek(0)
+                    stdout = stdout_file.read(OUTPUT_LIMIT + 1)
+                    stderr = stderr_file.read(OUTPUT_LIMIT + 1)
+        return {
+            "script_path": str(script),
+            "script_sha256": sha256_file(script),
+            "timed_out": timed_out,
+            **_transport_fields(started, process.returncode, stdout, stderr),
+        }
 
     def _mutate_document(
         self,
@@ -779,6 +996,7 @@ class FreecadBridge:
                 "allowed_roots": [str(root) for root in self.allowed_roots],
                 "max_document_bytes": self.max_document_bytes,
                 "max_timeout_secs": self.max_timeout_secs,
+                "max_script_timeout_secs": self.max_script_timeout_secs,
             }
         )
         return result
@@ -799,6 +1017,7 @@ class FreecadBridge:
                 "parts_library": self._parts_library_capability(),
             },
             render={"render_view": self._render_capability(self.status())},
+            max_script_timeout_secs=self.max_script_timeout_secs,
         )
 
     @staticmethod

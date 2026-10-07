@@ -17,7 +17,7 @@ metadata:
     search-hint: >-
       FreeCAD status capabilities create inspect validate copy snapshot restore
       undo recover rollback FCStd document remove object dependency-aware
-      atomic save
+      atomic save run script python file escape hatch
     tools: tools.yaml
 ---
 
@@ -45,3 +45,37 @@ The store lives inside `DCC_MCP_FREECAD_ALLOWED_ROOTS` and is capped by
 `DCC_MCP_FREECAD_MAX_SNAPSHOTS` and `DCC_MCP_FREECAD_MAX_SNAPSHOT_BYTES`. When
 it is full the call is refused with `snapshot_limit_exceeded` — nothing is
 evicted behind your back. Use `delete_snapshot` to free capacity.
+
+## Escape hatch: `run_script`
+
+`run_script` is the one entry point for work no typed tool covers. It executes a
+single `.py` file in a disposable FreeCADCmd child process and returns
+`exit_code`, `stdout`, `stderr`, `stdout_truncated` / `stderr_truncated`,
+`timed_out`, `script_path`, and `script_sha256`.
+
+**It is not a sandbox.** The script runs as the operator's own account with that
+account's full privileges: it can read, write, and import anything that account
+can. `DCC_MCP_FREECAD_ALLOWED_ROOTS` constrains **which script may be named**,
+not **what the script may do**. Do not treat this tool as a boundary for
+untrusted code.
+
+What it does constrain:
+
+- **Path only, never source text.** `script_path` must end in `.py`, must exist,
+  is resolved (symlinks followed) and then must lie inside
+  `DCC_MCP_FREECAD_ALLOWED_ROOTS` — the same gate the document tools use. A link
+  inside a root that points outside it is refused.
+- **Vacuum mode.** The child starts with `--safe-mode` and a throwaway user
+  config, so no user workbench, plugin, or macro is loaded. State left behind by
+  a previous GUI session cannot reach this process.
+- **Its own timeout.** `timeout_secs` is capped at
+  `DCC_MCP_FREECAD_MAX_SCRIPT_TIMEOUT_SECS` (300s by default), not the 1800s
+  document ceiling — a script that blocks on a modal dialog is killed in
+  minutes. A hang is reported as a timeout with `timed_out: true`.
+- **No management surface.** There is no list, read, create, or delete for
+  scripts. Maintain them on the filesystem.
+
+The script is responsible for its own persistence. A script that changes a
+durable document should be followed by `inspect_document` or
+`validate_document`, so the write is verified on the real file rather than
+trusted from the exit code.
