@@ -111,6 +111,10 @@ def classify_host(version: str, matrix: Optional[Dict[str, Any]] = None) -> Dict
                 "changed_in": entry.get("changed_in"),
                 "kind": entry.get("kind"),
                 "adapter_usage": entry.get("adapter_usage"),
+                # Which tool names this break limits on this host. get_capabilities
+                # projects it into `host_limited`, so an `unused` break names none
+                # while a `guarded` break names the tool the guard protects.
+                "affected_tools": list(entry.get("affected_tools") or ()),
                 "enforcement": entry.get("enforcement"),
                 "remediation": entry.get("remediation"),
                 "replacement": entry.get("replacement"),
