@@ -6,7 +6,9 @@ import pytest
 import yaml
 from dcc_mcp_core import validate_skill
 
-from dcc_mcp_freecad import capabilities, compat
+import dcc_mcp_freecad
+from dcc_mcp_freecad import SketchSpecError, SketchStateError, capabilities, compat
+from dcc_mcp_freecad.bridge import BridgeError
 from dcc_mcp_freecad.server import FreecadMcpServer
 
 ROOT = Path(__file__).parents[1]
@@ -360,6 +362,51 @@ def test_declared_arguments_exist_on_the_implementation():
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
     assert len(catalog) == 35
+
+
+def test_the_sketch_errors_are_exported_and_state_error_is_the_callers_one():
+    """Both sketch refusals are importable from the package root, with one caveat.
+
+    ``SketchStateError`` exists twice -- once in ``sketch_rules``, raised inside
+    the FreeCAD process, and once in ``bridge``, which is what a caller catches
+    after the payload crosses the boundary. Only the bridge one is a
+    ``BridgeError``, so exporting the wrong spelling hands a caller a class its
+    ``except BridgeError`` handler never sees.
+
+    ``SketchSpecError`` is exported for the local path only, and the last block
+    pins *why*: it carries none of the three attributes the driver forwards
+    across the process boundary, so the same class raised inside the host
+    arrives as a plain ``BridgeError`` with no code. If it ever gains one of
+    them, both the caveat in ``__init__.py`` and the note in
+    ``docs/write-contract.md`` are stale and this fails.
+    """
+    for name in ("SketchStateError", "SketchSpecError"):
+        assert name in dcc_mcp_freecad.__all__, "%s is not exported from the package root" % name
+
+    assert SketchStateError is dcc_mcp_freecad.bridge.SketchStateError
+    assert SketchStateError is not dcc_mcp_freecad.sketch_rules.SketchStateError
+    assert issubclass(SketchStateError, BridgeError)
+    # The refusal is only branchable if the code and the measured state survive
+    # the trip, so the exported class must carry both.
+    error = SketchStateError("sketch is not ready", "E_SKETCH_UNDERCONSTRAINED", {"dof": 3})
+    assert error.code == "E_SKETCH_UNDERCONSTRAINED"
+    assert error.state == {"dof": 3}
+
+    # Usable locally: ``sketch_rules`` is pure Python, so a caller can validate a
+    # spec before spending a host round-trip and catch exactly this type.
+    assert SketchSpecError is dcc_mcp_freecad.sketch_rules.SketchSpecError
+    assert issubclass(SketchSpecError, ValueError)
+    # ...but not across the boundary. These are the keys the driver reads in
+    # ``main()``; none of them is present, so nothing but the message survives.
+    forwarded = [
+        attribute
+        for attribute in ("code", "payload", "state_payload")
+        if hasattr(SketchSpecError("bad spec"), attribute)
+    ]
+    assert forwarded == [], (
+        "SketchSpecError now carries %s, so it crosses the process boundary after all; "
+        "the caveat in __init__.py and docs/write-contract.md is stale" % forwarded
+    )
 
 
 def _replace(path: Path, old: str, new: str) -> None:
