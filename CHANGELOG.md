@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.6.0...v0.7.0) (2026-10-07)
+
+
+### Features
+
+* add bounded saved-copy appearance and framing ([#37](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/37)) ([e1261e9](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/e1261e96def16f811ad9f881f0ce402d691d2198))
+* add fillet, chamfer, pattern and mirror tools ([85a82a7](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/85a82a77632703b448f5ae578dd56a52f2ee03cc))
+* add verifiable headless render_view snapshots ([#52](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/52)) ([63a2549](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/63a25497db3f8215396d59bc14f9afede8a21beb))
+* **capabilities:** derive get_capabilities from tools.yaml and lock the contract ([#44](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/44)) ([abd87e0](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/abd87e013e6edf888f6d29e30a111a3c05e5b09e))
+* **parts:** add offline standard-parts library tools ([#47](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/47)) ([6aad1ac](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/6aad1ac0fbc87974b3bd2accbd5451cda34cc0cf))
+* **recoverability:** add document snapshots and restore ([#43](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/43)) ([4ae7e15](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/4ae7e15e55e050d841592b20485c42fd47a33ac9))
+* **script:** add run_script escape hatch for controlled scripting ([#57](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/57)) ([2a8d84d](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/2a8d84de05dc0b532a658044ec8d8bc4ed3e2536))
+* **sketch:** typed PartDesign sketch tools with a constraint gate ([#51](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/51)) ([ac51ae4](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/ac51ae45e829d07ac9e259188fd604b9d8dda51c))
+
+
+### Bug Fixes
+
+* **ci:** cut release PRs with a collaborator token ([#34](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/34)) ([96161a8](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/96161a8c6c583bfc55ef95576d688815c451486f))
+
+
+### Documentation
+
+* add AGENTS.md and adopt the repo contract gate ([#40](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/40)) ([8d7ea57](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/8d7ea57b6b984047273e8df143f5fc7c9a2af7eb))
+* **readme:** add the generated DCC-MCP host matrix pointer ([#32](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/32)) ([d76a32f](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/d76a32f60a9b0a8cf650dbd4ed64ccba3b698185))
+
 ## [0.6.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.5.0...v0.6.0) (2026-10-04)
 
 
