@@ -51,6 +51,10 @@ For **every** tool that changes a document or writes a file:
 | `export_geometry` | artefact exists and is non-empty; **and** can be read back into the geometry it came from (solid count and volume for CAD formats; point/facet count and bounding-box containment for meshes) |
 | `save_copy` | copy exists and is non-empty; copy reopens with the same object inventory |
 | `create_document` | the document file exists and is non-empty |
+| `create_sketch` | sketch exists; `TypeId` is `Sketcher::SketchObject`; `AttachmentSupport` names the datum plane the call created for the requested `plane`; the attachment mode is the flat-on-face mode; the sketch normal is the requested plane's normal; the sketch is inside the requested body |
+| `add_sketch_geometry` | the geometry count grew by exactly the number of elements the batch expands to; every stored element's kind is the one requested; every element's key points equal the coordinates that were asked for |
+| `add_sketch_constraint` | the constraint count grew by exactly the number of constraints in the batch; every stored `Type` is the one requested; a dimensional constraint's driving value equals the requested value (`angle` after the degrees-to-radians conversion) |
+| `get_sketch_info` | read-only: reports geometry, constraints, remaining degrees of freedom and the feature-readiness verdict |
 
 Two of these deserve a note.
 
@@ -66,6 +70,88 @@ on the surface it was given, so an exported mesh cannot leave its source's
 bounding box. An export of the wrong object -- or of nothing -- shows up here as
 a box that escaped. This catches "wrote a plausible-looking file" without
 recomputing the source geometry.
+
+## Refusing an under-constrained sketch
+
+A sketch carries a second kind of reported success that the rules above do not
+cover: the write lands perfectly and the profile is still wrong, because the
+solver is free to move whatever the constraints did not pin down. The sketch
+reports as created, and the solid built from it differs on every run.
+
+So degrees of freedom are *measured*, never assumed, and never read off the
+solver's own return value. `solve()` is called so a sketch the solver rejects is
+reported, but on FreeCAD 1.0.2 and 1.1.4 it returns `0` for any sketch that
+solves -- including one measured at four degrees of freedom. Its return value is
+read only as an error code (a negative value means the host committed no
+solution), and the count itself comes from the sketch's own `DoF` property, with
+`getDoF()` as the fallback spelling.
+
+A count the host will not report stays `None`. That is the whole point: an
+unmeasured sketch is reported as *not provably constrained* rather than as zero,
+because reporting every sketch as fully constrained is the failure this section
+exists to prevent.
+
+The verdict is computed in one place, `sketch_rules.feature_state`, and every
+sketch tool returns it:
+
+```json
+{
+  "dof": 3,
+  "dof_available": true,
+  "geometry_count": 4,
+  "fully_constrained": false,
+  "feature_ready": false,
+  "blocking_error_code": "E_SKETCH_UNDERCONSTRAINED",
+  "blocking_reason": "The sketch has 3 unconstrained degree(s) of freedom, so a feature built on it is not reproducible across hosts."
+}
+```
+
+`dof == 0` is not on its own sufficient: an empty sketch solves with zero freedom
+and is still not a profile, so `feature_ready` also requires geometry.
+
+**Reporting is not refusing.** `create_sketch`, `add_sketch_geometry` and
+`add_sketch_constraint` report the verdict and never refuse on it. A sketch is
+built one element at a time and every intermediate state legitimately has
+freedom left, so gating those calls would make sketching impossible. The refusal
+lives in the one call whose job is to answer "is this finished?":
+`get_sketch_info` with `require_fully_constrained: true`, which routes the
+verdict through `sketch_rules.assert_feature_ready` and raises instead of
+returning.
+
+The refusal is `dcc_mcp_freecad.sketch_rules.SketchStateError`. It crosses the
+process boundary under its own `sketch_state` key -- so a caller can branch on
+the `code` rather than parse a sentence that differs between host versions -- and
+the bridge re-raises it as `dcc_mcp_freecad.SketchStateError`, a `BridgeError`,
+so an existing `except BridgeError` handler keeps working.
+
+```json
+{
+  "schema_version": 1,
+  "code": "E_SKETCH_UNDERCONSTRAINED",
+  "details": {
+    "sketch_name": "Profile",
+    "dof": 3,
+    "geometry_count": 4,
+    "fully_constrained": false
+  }
+}
+```
+
+Four codes can block a sketch, and all four mean the same thing to a caller:
+this profile is not reproducible, do not build a feature on it.
+
+| Code | Measured state |
+|---|---|
+| `E_SKETCH_UNDERCONSTRAINED` | `dof > 0`, or `dof == 0` on a sketch with no geometry |
+| `E_SKETCH_OVERCONSTRAINED` | `dof < 0`: redundant or conflicting constraints |
+| `E_SKETCH_DOF_UNAVAILABLE` | the host would not report a count at all |
+| `E_SKETCH_SOLVER_FAILED` | the solver raised or did not converge |
+
+Constraint references are validated against the live geometry list *before* the
+first write of a batch, because the host adds a constraint on a missing element
+without complaint and the sketch then solves as if it were not there. A
+half-applied batch is a sketch that looks finished and is not, so the whole
+batch is refused rather than partially applied.
 
 ## Comparing floats
 

@@ -6,7 +6,9 @@ import pytest
 import yaml
 from dcc_mcp_core import validate_skill
 
-from dcc_mcp_freecad import capabilities, compat
+import dcc_mcp_freecad
+from dcc_mcp_freecad import SketchSpecError, SketchStateError, capabilities, compat
+from dcc_mcp_freecad.bridge import BridgeError
 from dcc_mcp_freecad.server import FreecadMcpServer
 
 ROOT = Path(__file__).parents[1]
@@ -360,6 +362,33 @@ def test_declared_arguments_exist_on_the_implementation():
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
     assert len(catalog) == 35
+
+
+def test_the_sketch_errors_a_caller_catches_are_exported():
+    """Both sketch refusals are importable from the package root.
+
+    ``SketchStateError`` exists twice -- once in ``sketch_rules``, raised inside
+    the FreeCAD process, and once in ``bridge``, which is what a caller catches
+    after the payload crosses the boundary. Only the bridge one is a
+    ``BridgeError``, so exporting the wrong spelling hands a caller a class its
+    ``except BridgeError`` handler never sees.
+    """
+    for name in ("SketchStateError", "SketchSpecError"):
+        assert name in dcc_mcp_freecad.__all__, "%s is not exported from the package root" % name
+
+    assert SketchStateError is dcc_mcp_freecad.bridge.SketchStateError
+    assert SketchStateError is not dcc_mcp_freecad.sketch_rules.SketchStateError
+    assert issubclass(SketchStateError, BridgeError)
+    # The refusal is only branchable if the code and the measured state survive
+    # the trip, so the exported class must carry both.
+    error = SketchStateError("sketch is not ready", "E_SKETCH_UNDERCONSTRAINED", {"dof": 3})
+    assert error.code == "E_SKETCH_UNDERCONSTRAINED"
+    assert error.state == {"dof": 3}
+
+    # Thrown by the shared spec rules before a write, so a caller can validate a
+    # spec locally and catch the same type the host would raise.
+    assert SketchSpecError is dcc_mcp_freecad.sketch_rules.SketchSpecError
+    assert issubclass(SketchSpecError, ValueError)
 
 
 def _replace(path: Path, old: str, new: str) -> None:

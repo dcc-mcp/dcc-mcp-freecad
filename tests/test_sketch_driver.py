@@ -1043,6 +1043,101 @@ def test_add_constraint_refuses_a_spec_the_rules_reject(host, tmp_path):
         )
 
 
+# One well-formed spec per declared type: the smallest call that reaches
+# ``_build_constraint``, so the dispatch below is exercised for the whole
+# vocabulary rather than for the types the other tests happen to use.
+_MINIMAL_CONSTRAINT_SPECS = {
+    "coincident": {"first": {"element": 0, "vertex": 2}, "second": {"element": 1, "vertex": 1}},
+    "concentric": {"first": {"element": 0}, "second": {"element": 1}},
+    "point_on_object": {"first": {"element": 0, "vertex": 1}, "second": {"element": 1}},
+    "horizontal": {"first": {"element": 0}},
+    "vertical": {"first": {"element": 0}},
+    "parallel": {"first": {"element": 0}, "second": {"element": 1}},
+    "perpendicular": {"first": {"element": 0}, "second": {"element": 1}},
+    "tangent": {"first": {"element": 0}, "second": {"element": 1}},
+    "equal": {"first": {"element": 0}, "second": {"element": 1}},
+    "distance": {
+        "first": {"element": 0, "vertex": 1},
+        "second": {"element": 1, "vertex": 1},
+        "value": 10,
+    },
+    "distance_x": {
+        "first": {"element": 0, "vertex": 1},
+        "second": {"element": 1, "vertex": 1},
+        "value": 0,
+    },
+    "distance_y": {
+        "first": {"element": 0, "vertex": 1},
+        "second": {"element": 1, "vertex": 1},
+        "value": 0,
+    },
+    "length": {"first": {"element": 0}, "value": 40},
+    "radius": {"first": {"element": 0}, "value": 4},
+    "angle": {"first": {"element": 0}, "second": {"element": 1}, "value_degrees": 90},
+}
+
+
+class _RecordingSketcher:
+    """Captures the positional tuple the driver hands to ``Sketcher.Constraint``."""
+
+    def __init__(self):
+        self.arguments = None
+
+    def Constraint(self, type_name, *arguments):
+        self.arguments = (type_name,) + arguments
+        return _Constraint(type_name, *arguments)
+
+
+def test_every_declared_constraint_type_builds_a_shape_the_host_accepts():
+    """No declared type may fall through the driver's constraint dispatch.
+
+    ``validate_constraint`` checks the spec, and the vocabulary test in
+    ``test_sketch_rules.py`` proves every declared type validates. Neither
+    reaches ``_build_constraint``, which is the only place a spec becomes the
+    positional tuple ``Sketcher.Constraint`` is called with. A type added to the
+    vocabulary without a branch there validates cleanly, advertises in the
+    catalog, and fails only when a caller uses it -- so a missing branch is
+    invisible to both.
+
+    The arity is then checked against ``_Constraint._LAYOUTS``, the fake's
+    mirror of the overloads real FreeCAD exposes, because
+    ``Sketcher.Constraint`` has no single variadic signature: a tuple the
+    layout cannot consume in full is a silently truncated constraint on a real
+    host, not an error.
+    """
+    assert set(_MINIMAL_CONSTRAINT_SPECS) == set(sketch_rules.CONSTRAINT_TYPES), (
+        "the minimal spec table covers %s, but the vocabulary is %s"
+        % (sorted(_MINIMAL_CONSTRAINT_SPECS), sorted(sketch_rules.CONSTRAINT_TYPES))
+    )
+    problems = []
+    for name, spec in sorted(_MINIMAL_CONSTRAINT_SPECS.items()):
+        normalized = sketch_rules.validate_constraint(dict(spec, type=name))
+        sketcher = _RecordingSketcher()
+        try:
+            freecad_driver._build_constraint(sketcher, normalized, "sketch.add_constraint")
+        except ValueError as exc:
+            problems.append("%s: %s" % (name, exc))
+            continue
+        type_name = sketcher.arguments[0]
+        layout = _Constraint._LAYOUTS.get(type_name)
+        if layout is None:
+            # Distance is the one constructor whose arity changes its meaning:
+            # three arguments pin an element's length, six measure between two
+            # points. The adapter keeps them as two types, so which one a name
+            # maps to is part of what this asserts.
+            expected = 3 if name == "length" else 6
+        else:
+            expected = 1 + len(layout)
+        if len(sketcher.arguments) != expected:
+            problems.append(
+                "%s: built %d argument(s) for %s, whose layout takes %d"
+                % (name, len(sketcher.arguments), type_name, expected)
+            )
+    assert problems == [], "declared constraint types the driver cannot build:\n%s" % (
+        "\n".join(problems)
+    )
+
+
 # ---------------------------------------------------------------------------
 # sketch.info
 # ---------------------------------------------------------------------------
