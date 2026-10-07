@@ -35,7 +35,7 @@ the same. A copy of a primitive keeps its parametric type; a scaled or mirrored
 result becomes a plain `Part::Feature`, except that a mirror which keeps its
 source stays a live `Part::Mirroring` linked to it. A copy's `translation` and
 `rotation_degrees` are absolute for every source type, so copying without them
-puts the copy on top of its source rather than at the document origin.
+puts the copy at the document origin.
 
 Geometry import/export supports STEP, IGES, BREP, STL, OBJ, and 3MF. Mesh export
 uses explicit bounded tessellation settings. No inline Python is accepted here —

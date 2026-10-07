@@ -356,8 +356,7 @@ def _move_to_local(geometry, source):
     makes ``translation`` mean "offset from the source" for a copied solid but
     "absolute position" for a primitive re-created from its dimensions. The copy
     is moved back by the inverse placement so that every source type then takes
-    the same absolute ``Placement``, and a copy with no translation requested
-    sits where the source sits rather than on top of it.
+    the same absolute ``Placement``.
 
     A mesh is transformed by ``transformGeometry``'s mesh equivalent rather than
     by a Part shape call, because ``Mesh.Mesh`` has no ``transformGeometry``.
@@ -1565,8 +1564,8 @@ def model_copy_object(params):
     there is no parametric definition to carry over.
 
     ``translation`` and ``rotation_degrees`` are absolute for every source type,
-    not relative to the source: a copy made without them lands on top of the
-    source rather than at the document origin. The shape and mesh branches copy
+    not relative to the source: a copy made without them lands at the document
+    origin, the same as a primitive copy does. The shape and mesh branches copy
     geometry FreeCAD reports in document coordinates, so it is moved back into
     local coordinates first; only then does the requested ``Placement`` mean the
     same thing it means for a primitive re-created from its own dimensions.

@@ -687,8 +687,11 @@ def test_real_freecad_copy_places_every_source_type_the_same_way(tmp_path: Path)
     bridge.boolean_operation(str(document), "cut", "Blank", "Tool", "Notched")
     source = _named_object(bridge, document, "Notched")
     size = source["shape"]["bounding_box"]["size"]
-    centre = source["shape"]["bounding_box"]["center"]
+    source_centre = source["shape"]["bounding_box"]["center"]
     assert size == pytest.approx([14, 10, 5], abs=1e-6)
+    # The source must sit away from the origin, or the two conventions agree
+    # and neither assertion below could tell them apart.
+    assert source_centre[0] == pytest.approx(100 + size[0] / 2, abs=1e-6)
 
     offset = [0, 50, 0]
     copied = bridge.copy_object(str(document), "Notched", "NotchedCopy", translation=offset)
@@ -703,11 +706,14 @@ def test_real_freecad_copy_places_every_source_type_the_same_way(tmp_path: Path)
         [offset[0] + size[0] / 2, offset[1] + size[1] / 2, offset[2] + size[2] / 2], abs=1e-6
     )
 
-    # The default is the same convention, so an untranslated copy sits on the
-    # source instead of collapsing to the document origin.
+    # The default is the same absolute convention the primitive branch already
+    # uses: an untranslated copy lands at the document origin, so the source's
+    # own position is not silently added to it.
     plain = bridge.copy_object(str(document), "Notched", "NotchedSame")
     plain_object = plain["object"]
-    assert plain_object["shape"]["bounding_box"]["center"] == pytest.approx(centre, abs=1e-6)
+    assert plain_object["shape"]["bounding_box"]["center"] == pytest.approx(
+        [size[0] / 2, size[1] / 2, size[2] / 2], abs=1e-6
+    )
 
     # A mesh: the third branch, also placed away from the origin. The mesh is
     # tessellated and re-imported, because a Mesh::Feature is the only source

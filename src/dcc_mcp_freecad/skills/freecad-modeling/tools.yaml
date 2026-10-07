@@ -157,8 +157,7 @@ tools:
     description: >-
       Duplicate an object under a new name, optionally at a new absolute
       placement. translation and rotation_degrees are absolute for every source
-      type, so a copy made without them sits on the source rather than at the
-      document origin.
+      type, so a copy made without them sits at the document origin.
     source_file: scripts/copy_object.py
     input_schema:
       type: object
