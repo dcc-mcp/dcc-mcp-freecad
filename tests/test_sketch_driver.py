@@ -97,6 +97,19 @@ class _Geom:
         for key, value in fields.items():
             setattr(self, key, value)
 
+    def value(self, parameter):
+        """The point at a parameter on the curve, as the host reports it.
+
+        Only arcs need it: the read-back uses the midpoint of the parameter
+        range to tell an arc apart from its complement, which share both
+        endpoints, centre and radius.
+        """
+        return _Vec(
+            self.Center.x + self.Radius * math.cos(parameter),
+            self.Center.y + self.Radius * math.sin(parameter),
+            0.0,
+        )
+
 
 class _Constraint:
     """Mirrors the positional layouts of ``Sketcher::Constraint``."""
@@ -324,12 +337,25 @@ class FakePart(types.ModuleType):
             Radius=radius,
         )
 
-    def ArcOfCircle(self, circle, start_angle, end_angle):
+    def ArcOfCircle(self, circle, start_angle, end_angle, sense=True):
+        """Model the host's ``sense`` handling, including its default.
+
+        ``ArcOfCirclePyImp.cpp`` defaults ``sense`` to True, and
+        ``GC_MakeArcOfCircle`` normalises a negative delta to +2*PI when it is.
+        That is the behaviour that silently turned a 90 -> 0 request into a 270
+        degree arc, so the fake reproduces it rather than assuming the sane
+        behaviour: a caller that omits ``sense`` gets the wrong arc back, and
+        only an explicit argument is honoured.
+        """
+        if sense and end_angle < start_angle:
+            end_angle = end_angle + 2 * math.pi
         cx, cy = circle.Center.x, circle.Center.y
         return _Geom(
             "Part::GeomArcOfCircle",
             Center=circle.Center,
             Radius=circle.Radius,
+            FirstParameter=start_angle,
+            LastParameter=end_angle,
             StartPoint=_Vec(
                 cx + circle.Radius * math.cos(start_angle),
                 cy + circle.Radius * math.sin(start_angle),
@@ -557,6 +583,119 @@ def test_add_geometry_appends_after_existing_elements(host, tmp_path):
     assert result["elements"][0]["key_points"] == [2.0, 3.0, 4.0]
 
 
+def test_add_geometry_catches_a_reversed_arc_sweep(host, tmp_path):
+    """A negative sweep must come back as the arc that was asked for.
+
+    This is the failure the midpoint read-back exists for. The host defaults
+    ``sense`` to True, which turns a 90 -> 0 request into a 270 degree arc in the
+    opposite quadrant -- while both endpoints, the centre and the radius still
+    match the request exactly. Only the midpoint differs, so without it the
+    write-after-read passed and a wrong profile was reported as correct.
+    """
+    _doc, path = _document(host, tmp_path)
+    _create(host, path, name="Profile")
+
+    clockwise = freecad_driver.sketch_add_geometry(
+        {
+            "document_path": path,
+            "sketch_name": "Profile",
+            "geometry": [
+                {
+                    "type": "arc",
+                    "cx": 0,
+                    "cy": 0,
+                    "radius": 10,
+                    "start_angle_degrees": 90,
+                    "end_angle_degrees": 0,
+                }
+            ],
+        }
+    )
+    anticlockwise = freecad_driver.sketch_add_geometry(
+        {
+            "document_path": path,
+            "sketch_name": "Profile",
+            "geometry": [
+                {
+                    "type": "arc",
+                    "cx": 0,
+                    "cy": 0,
+                    "radius": 10,
+                    "start_angle_degrees": 0,
+                    "end_angle_degrees": 90,
+                }
+            ],
+        }
+    )
+
+    # Both share endpoints, centre and radius; their midpoints are opposite.
+    first = clockwise["elements"][0]["key_points"]
+    second = anticlockwise["elements"][0]["key_points"]
+    assert _close(first[0:2], (0.0, 10.0)), "the requested start point"
+    assert _close(first[2:4], (7.0710678118654755, 7.0710678118654755)), (
+        "a 90 -> 0 sweep passes through the first quadrant, not the third"
+    )
+    assert _close(first[4:6], (10.0, 0.0)), "the requested end point"
+    assert _close(second[2:4], (7.0710678118654755, 7.0710678118654755))
+
+
+def test_add_geometry_refuses_an_arc_whose_midpoint_cannot_be_read(host, tmp_path):
+    """An arc whose midpoint is unreadable is refused, not compared without it.
+
+    Dropping the midpoint from the comparison would be the same bug in a new
+    coat: the check would pass on every arc, including a reversed one.
+    """
+    _doc, path = _document(host, tmp_path)
+    _create(host, path, name="Profile")
+
+    def blind_value(_parameter):
+        raise RuntimeError("no midpoint on this host")
+
+    monkeypatched = host.part.ArcOfCircle
+
+    def arc_without_midpoint(circle, start, end, sense=True):
+        geometry = monkeypatched(circle, start, end, sense)
+        geometry.value = blind_value
+        return geometry
+
+    host.part.ArcOfCircle = arc_without_midpoint
+
+    with pytest.raises(Exception, match="midpoint"):
+        freecad_driver.sketch_add_geometry(
+            {
+                "document_path": path,
+                "sketch_name": "Profile",
+                "geometry": [
+                    {
+                        "type": "arc",
+                        "cx": 0,
+                        "cy": 0,
+                        "radius": 10,
+                        "start_angle_degrees": 0,
+                        "end_angle_degrees": 90,
+                    }
+                ],
+            }
+        )
+
+
+def test_a_negative_solver_status_is_refused_not_reported_as_constrained(host, tmp_path):
+    """A solver that did not converge is a failure, even when DOF reads zero.
+
+    The host leaves the geometry un-updated and ``FullyConstrained`` unset on a
+    negative status, so a sketch reporting dof 0 with status -2 is not the
+    solved profile the caller asked for.
+    """
+    _doc, path = _document(host, tmp_path)
+    _create(host, path, name="Profile")
+    sketch = _sketch(host, path, "Profile")
+    sketch.DoF = 0
+    sketch.solve = lambda: -2
+
+    with pytest.raises(sketch_rules.SketchStateError, match="did not converge"):
+        freecad_driver._sketch_dof(sketch, "1.1.4", "sketch.add_geometry")
+
+
 def test_add_geometry_proves_the_arc_it_was_asked_for(host, tmp_path):
     _doc, path = _document(host, tmp_path)
     _create(host, path)
@@ -580,9 +719,12 @@ def test_add_geometry_proves_the_arc_it_was_asked_for(host, tmp_path):
 
     assert result["elements"][0]["kind"] == "arc"
     points = result["elements"][0]["key_points"]
+    # start, midpoint, end, centre, radius -- radius 10 at 45 degrees
     assert _close(points[0:2], (10.0, 0.0))
-    assert _close(points[2:4], (0.0, 10.0))
-    assert points[6] == 10.0
+    assert _close(points[2:4], (7.0710678118654755, 7.0710678118654755))
+    assert _close(points[4:6], (0.0, 10.0))
+    assert _close(points[6:8], (0.0, 0.0))
+    assert points[8] == 10.0
 
 
 def test_add_geometry_refuses_when_the_host_dropped_an_element(host, tmp_path):

@@ -2498,6 +2498,27 @@ def _point_pair(value):
     return [float(value.x), float(value.y)]
 
 
+def _arc_midpoint(geo):
+    """A point on the stored arc's swept side, in ``key_points`` order.
+
+    The midpoint is what distinguishes an arc from its complement: both share
+    their endpoints, centre and radius, so those four agree even when the host
+    swept the other way round. FreeCAD exposes the midpoint of the *parameter*
+    range, which is exactly the arc it actually stored.
+    """
+    try:
+        middle = (float(geo.FirstParameter) + float(geo.LastParameter)) / 2.0
+        return _point_pair(geo.value(middle))
+    except Exception:
+        # Without a midpoint the read-back loses the only value that can catch
+        # a reversed sweep, so an unreadable one is a failure rather than a
+        # value silently dropped from the comparison.
+        raise _sketch_module().SketchSpecError(
+            "the stored arc does not expose a midpoint, so its sweep direction "
+            "cannot be verified against the request"
+        ) from None
+
+
 def _geometry_read_back(geo, kind):
     """The coordinates of a stored geometry element, in ``key_points`` order."""
     if kind == "point":
@@ -2506,7 +2527,7 @@ def _geometry_read_back(geo, kind):
         return _point_pair(geo.StartPoint) + _point_pair(geo.EndPoint)
     values = _point_pair(geo.Center) + [float(geo.Radius)]
     if kind == "arc":
-        return _point_pair(geo.StartPoint) + _point_pair(geo.EndPoint) + values
+        return _point_pair(geo.StartPoint) + _arc_midpoint(geo) + _point_pair(geo.EndPoint) + values
     return values
 
 
@@ -2515,6 +2536,20 @@ def _geometry_read_back(geo, kind):
 # host rather than assumed; the others are kept so a host that renames it again
 # is recognised instead of silently reported as fully constrained.
 _DOF_PROPERTIES = ("DoF", "DOF", "dof")
+
+# What a negative ``Sketch.solve()`` return means, in the host's own terms. Read
+# as error codes, never as a degree-of-freedom count.
+_SOLVER_STATUS = {
+    -1: "the solver did not converge",
+    -2: "redundant constraints",
+    -3: "conflicting constraints",
+    -4: "over-constrained",
+    -5: "malformed constraints",
+}
+
+
+def _solver_status_text(code):
+    return _SOLVER_STATUS.get(code, "solver reported failure")
 
 
 def _sketch_dof(sketch, version, tool):
@@ -2531,10 +2566,18 @@ def _sketch_dof(sketch, version, tool):
     1.1.4 it returns ``0`` for any sketch that solves, including one measured at
     four degrees of freedom. Reading it as a count is precisely the trap this
     function exists to avoid -- the number is plausible, and it is wrong.
+
+    It is still read as an *error code*, because that is what it also is. A
+    negative return means the host did not commit a solution: it leaves
+    ``FullyConstrained`` unset and the geometry un-updated, while the DOF it
+    reports can still be zero. The codes that a DOF sign already catches
+    (conflicting, over-constrained) are named for the caller's benefit; the
+    three it does not catch -- redundant, malformed, not converged -- are the
+    reason this check exists at all.
     """
     rules = _sketch_module()
     try:
-        sketch.solve()
+        solver_status = sketch.solve()
     except Exception as exc:
         raise rules.SketchStateError(
             rules.ERROR_SOLVER_FAILED,
@@ -2545,6 +2588,24 @@ def _sketch_dof(sketch, version, tool):
             host_version=version,
             solver_error=str(exc),
         ) from None
+    if isinstance(solver_status, int) and not isinstance(solver_status, bool):
+        if solver_status < 0:
+            raise rules.SketchStateError(
+                rules.ERROR_SOLVER_FAILED,
+                "%s: the solver did not converge (status %d: %s). The host left the "
+                "sketch unsolved and did not update its geometry, so its degrees of "
+                "freedom cannot be trusted. Correct the %s and retry."
+                % (
+                    tool,
+                    solver_status,
+                    _solver_status_text(solver_status),
+                    _solver_status_text(solver_status),
+                ),
+                tool=tool,
+                sketch_name=getattr(sketch, "Name", None),
+                host_version=version,
+                solver_error=str(solver_status),
+            )
     for attribute in _DOF_PROPERTIES:
         value = getattr(sketch, attribute, None)
         if isinstance(value, int) and not isinstance(value, bool):
@@ -2569,7 +2630,15 @@ def _build_geometry(app, part, primitive):
     circle = part.Circle(center, app.Vector(0.0, 0.0, 1.0), primitive["radius"])
     if kind == "arc":
         start, end = primitive["angles_degrees"]
-        return part.ArcOfCircle(circle, math.radians(start), math.radians(end))
+        # ``sense`` is passed explicitly and never left to its default. The
+        # default is True, which normalises a negative sweep to +360 degrees
+        # instead of sweeping backwards: a request for 90 -> 0 comes back as a
+        # 270 degree arc in the opposite quadrant while every other compared
+        # value still matches the request. False keeps the directed sweep the
+        # caller modelled.
+        return part.ArcOfCircle(
+            circle, math.radians(start), math.radians(end), not primitive["clockwise"]
+        )
     return circle
 
 

@@ -76,7 +76,7 @@ def test_a_circle_carries_its_centre_and_radius():
     assert rules.key_points(primitives[0]) == [5.0, -1.0, 2.5]
 
 
-def test_an_arc_carries_both_ends_centre_and_radius():
+def test_an_arc_carries_both_ends_its_midpoint_centre_and_radius():
     primitives = rules.expand_geometry(
         {
             "type": "arc",
@@ -91,9 +91,10 @@ def test_an_arc_carries_both_ends_centre_and_radius():
     arc = primitives[0]
     points = rules.key_points(arc)
     assert _close(points[0:2], (10.0, 0.0))
-    assert _close(points[2:4], (0.0, 10.0))
-    assert _close(points[4:6], (0.0, 0.0))
-    assert points[6] == 10.0
+    assert _close(points[2:4], (7.0710678118654755, 7.0710678118654755))
+    assert _close(points[4:6], (0.0, 10.0))
+    assert _close(points[6:8], (0.0, 0.0))
+    assert points[8] == 10.0
 
 
 def test_a_point_carries_a_single_position():
@@ -124,10 +125,79 @@ def test_a_geometry_the_adapter_cannot_honour_is_refused(spec, match):
 def test_an_arc_with_no_sweep_or_more_than_a_full_turn_is_refused():
     base = {"type": "arc", "cx": 0, "cy": 0, "radius": 1}
 
-    with pytest.raises(rules.SketchSpecError, match="must differ"):
+    with pytest.raises(rules.SketchSpecError, match="same point"):
         rules.expand_geometry(dict(base, start_angle_degrees=45, end_angle_degrees=45))
     with pytest.raises(rules.SketchSpecError, match="may not exceed 360"):
         rules.expand_geometry(dict(base, start_angle_degrees=0, end_angle_degrees=400))
+
+
+@pytest.mark.parametrize("start,end", [(0, 360), (360, 0), (-90, 270)])
+def test_an_arc_whose_ends_coincide_is_refused_whatever_the_sweep(start, end):
+    """A full turn is a circle, not a degenerate arc.
+
+    A 360 degree sweep passes a "sweep is non-zero" check while its endpoints
+    land on the same point, so the rejection has to compare endpoints rather
+    than the sweep.
+    """
+    with pytest.raises(rules.SketchSpecError, match="same point"):
+        rules.expand_geometry(
+            {
+                "type": "arc",
+                "cx": 0,
+                "cy": 0,
+                "radius": 1,
+                "start_angle_degrees": start,
+                "end_angle_degrees": end,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "start,end,expected",
+    [(0, 90, False), (90, 0, True), (0, -90, True), (-90, 0, False)],
+)
+def test_the_arc_records_the_direction_it_was_modelled_in(start, end, expected):
+    """A negative sweep is a clockwise arc, and is recorded as one.
+
+    The host's default sense is the other way round for a negative sweep, so
+    the direction has to travel with the geometry rather than be re-derived.
+    """
+    arc = rules.expand_geometry(
+        {
+            "type": "arc",
+            "cx": 0,
+            "cy": 0,
+            "radius": 1,
+            "start_angle_degrees": start,
+            "end_angle_degrees": end,
+        }
+    )[0]
+
+    assert arc["clockwise"] is expected
+
+
+def test_the_arc_midpoint_is_part_of_the_read_back():
+    """The midpoint is the only compared value that differs from a complement.
+
+    An arc and its complement share both endpoints, centre and radius, so a
+    read-back that skipped the midpoint matched a reversed sweep exactly.
+    """
+    arc = rules.expand_geometry(
+        {
+            "type": "arc",
+            "cx": 0,
+            "cy": 0,
+            "radius": 10,
+            "start_angle_degrees": 90,
+            "end_angle_degrees": 0,
+        }
+    )[0]
+
+    points = rules.key_points(arc)
+
+    # start, midpoint, end, centre, radius -- radius 10 at 45 degrees
+    assert len(points) == 9
+    assert [round(value, 6) for value in points[2:4]] == [7.071068, 7.071068]
 
 
 # ---------------------------------------------------------------------------

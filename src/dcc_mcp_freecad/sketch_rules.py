@@ -198,9 +198,18 @@ def _arc(values, tool):
     radius = values["radius"]
     start = values["start_angle_degrees"]
     end = values["end_angle_degrees"]
+    if not all(math.isfinite(value) for value in (start, end, radius)):
+        raise SketchSpecError("%s: arc angles and radius must be finite" % tool)
     sweep = end - start
-    if not math.isfinite(sweep) or sweep == 0:
-        raise SketchSpecError("%s: arc start and end angles must differ" % tool)
+    # Reject the sweep by comparing the endpoints it produces, not the sweep
+    # itself. A 360 degree sweep passes a "sweep must be non-zero" check while
+    # landing its end exactly on its start, which the host then reports as a
+    # degenerate arc -- so the endpoint comparison is the one that catches it.
+    if _same_angle(start, end):
+        raise SketchSpecError(
+            "%s: arc start and end angles describe the same point "
+            "(start %s, end %s); use a circle for a full turn" % (tool, start, end)
+        )
     if abs(sweep) > 360:
         raise SketchSpecError("%s: arc sweep may not exceed 360 degrees" % tool)
     cx, cy = values["cx"], values["cy"]
@@ -212,15 +221,19 @@ def _arc(values, tool):
         center=[cx, cy],
         radius=radius,
         angles_degrees=[start, end],
+        # The direction the adapter modelled the arc in. The host's own default
+        # is the reverse of this for a negative sweep, so it is passed
+        # explicitly rather than inherited. See _build_geometry.
+        clockwise=sweep < 0,
     )
 
 
-def _polar(cx, cy, radius, degrees):
-    angle = math.radians(degrees)
-    return [cx + radius * math.cos(angle), cy + radius * math.sin(angle)]
+def _same_angle(first, second):
+    """True when two angles in degrees land on the same point of a circle."""
+    return abs((first - second) % 360.0) < 1e-9
 
 
-def _primitive(kind, role, points, center=None, radius=None, angles_degrees=None):
+def _primitive(kind, role, points, center=None, radius=None, angles_degrees=None, clockwise=None):
     return {
         "kind": kind,
         "type": kind,
@@ -229,7 +242,13 @@ def _primitive(kind, role, points, center=None, radius=None, angles_degrees=None
         "center": list(center) if center is not None else None,
         "radius": radius,
         "angles_degrees": list(angles_degrees) if angles_degrees is not None else None,
+        "clockwise": clockwise,
     }
+
+
+def _polar(cx, cy, radius, degrees):
+    angle = math.radians(degrees)
+    return [cx + radius * math.cos(angle), cy + radius * math.sin(angle)]
 
 
 def key_points(primitive):
@@ -237,9 +256,14 @@ def key_points(primitive):
 
     The order matches ``freecad_driver._geometry_read_back`` element for
     element: a point reports its position, a line its two ends, a circle its
-    centre and radius, an arc its two ends, centre and radius. The middle point
-    of an arc is deliberately not compared -- it is derived from the same three
-    numbers, so comparing it too would only restate them.
+    centre and radius, an arc its two ends, its midpoint, centre and radius.
+
+    The arc midpoint is compared even though it is derived from the same angles.
+    It used to be skipped as redundant, and it is not: the two ends, the centre
+    and the radius are all identical for an arc and its complement, so without
+    the midpoint a host that reinterpreted the direction returned a byte-for-byte
+    match on every compared value while the profile was in the opposite quadrant.
+    The midpoint is the only one of the four that differs between the two.
     """
     kind = primitive["kind"]
     points = primitive["points"]
@@ -249,7 +273,7 @@ def key_points(primitive):
         return list(points[0]) + list(points[1])
     values = list(primitive["center"]) + [float(primitive["radius"])]
     if kind == "arc":
-        return list(points[0]) + list(points[2]) + values
+        return list(points[0]) + list(points[1]) + list(points[2]) + values
     return values
 
 

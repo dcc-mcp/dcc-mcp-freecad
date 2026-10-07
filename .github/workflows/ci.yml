@@ -93,7 +93,11 @@ jobs:
           python -m pytest -m "freecad and not freecad_gui" -v --junitxml=freecad-real-${{ matrix.freecad_version }}.xml
       - name: Assert the real test executed
         if: always()
+<<<<<<< HEAD
         run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 25
+=======
+        run: python3 .github/scripts/verify-freecad-run.py freecad-real-${{ matrix.freecad_version }}.xml 30
+>>>>>>> 1e158c9 (fix(sketch): pass the arc sweep direction explicitly and compare its midpoint)
       - name: Real native GUI presentation persistence
         run: python -m pytest -m freecad_gui -v --junitxml=freecad-gui-${{ matrix.freecad_version }}.xml
       - name: Assert GUI cases executed without skips

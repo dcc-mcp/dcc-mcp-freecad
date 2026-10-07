@@ -13,6 +13,7 @@ call sequence must produce the same topology on FreeCAD 1.0.2 and 1.1.4.
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -347,3 +348,56 @@ def test_real_freecad_constrains_a_circle_by_radius_and_position(tmp_path: Path)
     assert info["topology"]["faces"] == 0, info["topology"]
     assert info["geometry"][0]["kind"] == "circle"
     assert info["geometry"][0]["key_points"][2] == 4.0
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+@pytest.mark.parametrize("start,end,mid_quadrant", [(0, 90, 1), (90, 0, 1), (180, 270, 3)])
+def test_real_freecad_stores_the_arc_direction_it_was_given(
+    tmp_path: Path, start, end, mid_quadrant
+):
+    """An arc must come back sweeping the way it was requested.
+
+    The host defaults ``ArcOfCircle``'s ``sense`` to True, which rewrites a
+    negative sweep as a +360 degree complement: a 90 -> 0 request returns a 270
+    degree arc in the opposite quadrant while both endpoints, the centre and the
+    radius still match. The midpoint is the only compared value that can tell the
+    two apart, so it is what this asserts on -- once per direction, on every host
+    in the matrix, because the whole point is that the answer must not vary
+    between 1.0.2 and 1.1.4.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "arc-%d-%d.FCStd" % (start, end)
+    bridge.create_document(str(document))
+    bridge.create_sketch(str(document), "ArcSketch", plane="xy", body="ArcBody")
+
+    added = bridge.add_sketch_geometry(
+        str(document),
+        "ArcSketch",
+        [
+            {
+                "type": "arc",
+                "cx": 0,
+                "cy": 0,
+                "radius": 10,
+                "start_angle_degrees": start,
+                "end_angle_degrees": end,
+            }
+        ],
+    )
+
+    # start, midpoint, end, centre, radius
+    points = added["elements"][0]["key_points"]
+    mid_x, mid_y = points[2], points[3]
+
+    expected_mid = 45.0 if mid_quadrant == 1 else 225.0
+    assert math.isclose(mid_x, 10 * math.cos(math.radians(expected_mid)), abs_tol=1e-6), (
+        "the arc swept the wrong way: midpoint %r for %d -> %d" % (points[2:4], start, end)
+    )
+    assert math.isclose(mid_y, 10 * math.sin(math.radians(expected_mid)), abs_tol=1e-6), (
+        "the arc swept the wrong way: midpoint %r for %d -> %d" % (points[2:4], start, end)
+    )
+
+    info = bridge.get_sketch_info(str(document), "ArcSketch")
+    assert info["geometry"][0]["kind"] == "arc"
+    assert info["topology"]["edges"] == 1, info["topology"]
