@@ -799,8 +799,52 @@ class FreecadBridge:
                 "part_extensions": sorted(parts_library.PART_SUFFIXES),
                 "parts_library": self._parts_library_capability(),
             },
-            render=self._render_capability(self.status()),
+            render={"render_view": self._render_capability(self.status())},
         )
+
+    @staticmethod
+    def _render_capability(status: Mapping[str, Any]) -> dict[str, Any]:
+        """Describe raster rendering, marking a host that cannot do it.
+
+        A console-only FreeCAD build has no ``FreeCADGui``, and an offscreen host
+        may have it while still being unable to drive GL. Neither is allowed to
+        look like a working renderer, so the report says which situation this is
+        and how to fix it rather than waiting for a caller to render and wonder.
+        """
+        gui = status.get("gui_library")
+        importable = isinstance(gui, dict) and gui.get("importable") is True
+        if not status.get("ready"):
+            state = "host_limited"
+            remediation = (
+                "No usable FreeCAD backend was found, so nothing can be rendered. Run "
+                "`dcc-mcp-freecad doctor --json` and set DCC_MCP_FREECAD_EXECUTABLE to a "
+                "supported FreeCADCmd."
+            )
+        elif not importable:
+            state = "host_limited"
+            remediation = (
+                "This FreeCAD build does not expose the FreeCADGui module, so no view can be "
+                "captured. Install a FreeCAD build that ships the GUI libraries (the official "
+                "AppImage and the Windows/macOS installers do); a console-only or "
+                "headless-only build cannot render. Reported by the host as: %s"
+                % (gui.get("error") if isinstance(gui, dict) else "unknown")
+            )
+        else:
+            state = "available"
+            remediation = None
+        return {
+            "status": state,
+            "views": sorted(VIEWS),
+            "default_width": DEFAULT_RENDER_WIDTH,
+            "default_height": DEFAULT_RENDER_HEIGHT,
+            "max_width": MAX_RENDER_WIDTH,
+            "max_height": MAX_RENDER_HEIGHT,
+            "image_included_by_default": False,
+            "waste_image_detection": True,
+            "error_codes": sorted(_RENDER_REMEDIATION),
+            "host_gui_importable": importable,
+            "remediation": remediation,
+        }
 
     def _parts_library_capability(self) -> dict[str, Any]:
         """Describe the configured library without letting it break discovery.
