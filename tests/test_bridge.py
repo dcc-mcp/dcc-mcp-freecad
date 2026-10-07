@@ -755,6 +755,89 @@ def test_real_freecad_copy_places_every_source_type_the_same_way(tmp_path: Path)
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_copy_rotation_is_absolute_for_a_primitive(tmp_path: Path):
+    """A primitive copy takes the requested rotation, not the source's.
+
+    A primitive is re-created from its dimensions, so it has no orientation of
+    its own to inherit and the request is the whole answer. The assertion is
+    written as "the copy of a rotated source equals the copy of an unrotated
+    one" because that is the property the contract promises and it does not
+    depend on how a given host normalises an axis/angle pair.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "copy-rotation.FCStd"
+    bridge.create_document(str(document))
+
+    bridge.add_primitive(
+        str(document), "box", "Flat", dimensions={"length": 20, "width": 10, "height": 5}
+    )
+    bridge.add_primitive(
+        str(document), "box", "Turned", dimensions={"length": 20, "width": 10, "height": 5}
+    )
+    bridge.transform_object(str(document), "Turned", rotation_axis=[0, 0, 1], rotation_degrees=35)
+
+    flat_copy = bridge.copy_object(
+        str(document), "Flat", "FlatCopy", rotation_axis=[0, 0, 1], rotation_degrees=30
+    )
+    turned_copy = bridge.copy_object(
+        str(document), "Turned", "TurnedCopy", rotation_axis=[0, 0, 1], rotation_degrees=30
+    )
+
+    flat_box = flat_copy["object"]["shape"]["bounding_box"]
+    turned_box = turned_copy["object"]["shape"]["bounding_box"]
+    # The source's own 35 degrees must not leak into the copy: both copies carry
+    # exactly the requested 30, so their extents match.
+    assert turned_box["size"] == pytest.approx(flat_box["size"], abs=1e-6)
+    assert bridge.validate_document(str(document))["valid"] is True
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_copy_rotation_composes_on_a_baked_orientation(tmp_path: Path):
+    """A shape copy keeps the orientation baked into the source's geometry.
+
+    A boolean result holds its orientation in its coordinates and carries an
+    identity ``Placement``, so there is nothing for the rebase to invert and the
+    request composes on top. This pins that documented behaviour rather than
+    leaving it to drift: a reader (or a future rebase that "fixes" rotation the
+    same way translation was fixed) would otherwise have no signal either way.
+
+    The assertion is differential - a rotated request must move the copy's
+    bounding box relative to an unrotated copy of the same source - so it holds
+    whatever the source's baked orientation happens to be.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "copy-rotation-baked.FCStd"
+    bridge.create_document(str(document))
+
+    bridge.add_primitive(
+        str(document), "box", "Blank", dimensions={"length": 20, "width": 10, "height": 5}
+    )
+    bridge.add_primitive(
+        str(document), "box", "Tool", dimensions={"length": 6, "width": 10, "height": 5}
+    )
+    bridge.transform_object(str(document), "Tool", translation=[100, 40, 0])
+    bridge.transform_object(str(document), "Blank", translation=[100, 40, 0])
+    bridge.boolean_operation(str(document), "cut", "Blank", "Tool", "Notched")
+
+    plain = bridge.copy_object(str(document), "Notched", "NotchedPlain")
+    turned = bridge.copy_object(
+        str(document), "Notched", "NotchedTurned", rotation_axis=[0, 0, 1], rotation_degrees=90
+    )
+
+    plain_box = plain["object"]["shape"]["bounding_box"]
+    turned_box = turned["object"]["shape"]["bounding_box"]
+    # A 90 degree turn about Z swaps the two horizontal extents, so the copy is
+    # measurably different from the unrotated one. Asserting on the swap rather
+    # than on an absolute number keeps this true however the source is oriented.
+    assert turned_box["size"][0] == pytest.approx(plain_box["size"][1], abs=1e-6)
+    assert turned_box["size"][1] == pytest.approx(plain_box["size"][0], abs=1e-6)
+    assert turned_box["size"][2] == pytest.approx(plain_box["size"][2], abs=1e-6)
+    assert bridge.validate_document(str(document))["valid"] is True
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
 def test_real_freecad_wedge_helix_and_3mf(tmp_path: Path):
     """The new primitives and the 3MF exporter, measured against the geometry.
 

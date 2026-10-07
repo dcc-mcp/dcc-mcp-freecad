@@ -42,7 +42,7 @@ Re-run the generator after changing the catalog.
   with typed dimensions and placements.
 - Scale, copy, and mirror objects into a new object named by the caller.
 - Create parametric union, cut, and intersection features.
-- Import or export STEP, IGES, BREP, STL, OBJ, and 3MF geometry.
+- Import STEP, IGES, BREP, STL, and OBJ geometry, and export those plus 3MF.
 - Fillet and chamfer edges on an existing solid, with a feasibility pre-check
   that refuses a radius or distance the adjacent faces cannot absorb.
 - Build linear and polar patterns (up to 1000 instances) and mirror a solid

@@ -1293,10 +1293,13 @@ def _apply_dimensions(obj, dimensions, version):
         if name in _NON_NEGATIVE_DIMENSIONS and number < 0:
             raise ValueError("%s must be non-negative" % name)
         if obj.TypeId == "Part::Helix" and name == "angle":
-            if not -_HELIX_ANGLE_LIMIT <= number <= _HELIX_ANGLE_LIMIT:
-                raise ValueError(
-                    "%s must be between -%s and %s" % (name, _HELIX_ANGLE_LIMIT, _HELIX_ANGLE_LIMIT)
-                )
+            # The published schema declares ``minimum: 0`` for every dimension,
+            # so a negative angle is refused here rather than accepted and
+            # silently reaching the host. Refusing keeps the schema honest: a
+            # tightening that let a negative through would make the documented
+            # bound a lie.
+            if not 0 <= number <= _HELIX_ANGLE_LIMIT:
+                raise ValueError("%s must be between 0 and %s" % (name, _HELIX_ANGLE_LIMIT))
         elif name in ("angle", "angle3") and not 0 < number <= 360:
             raise ValueError("%s must be greater than 0 and no more than 360" % name)
         if name in ("angle1", "angle2"):
@@ -1593,12 +1596,21 @@ def model_copy_object(params):
     boolean result, a mesh - is duplicated as a shape or mesh copy, because
     there is no parametric definition to carry over.
 
-    ``translation`` and ``rotation_degrees`` are absolute for every source type,
-    not relative to the source: a copy made without them lands at the document
-    origin, the same as a primitive copy does. The shape and mesh branches copy
-    geometry FreeCAD reports in document coordinates, so it is moved back into
-    local coordinates first; only then does the requested ``Placement`` mean the
-    same thing it means for a primitive re-created from its own dimensions.
+    ``translation`` is absolute for every source type, not relative to the
+    source: a copy made without it lands at the document origin, the same as a
+    primitive copy does. The shape and mesh branches copy geometry FreeCAD
+    reports in document coordinates, so it is moved back onto its own bounding
+    box first; only then does the requested translation mean the same thing it
+    means for a primitive re-created from its own dimensions.
+
+    ``rotation_degrees`` is absolute only for a primitive, which is re-created
+    from its dimensions and so carries no orientation of its own. For a shape or
+    mesh copy the request composes on top of the orientation already baked into
+    the copied geometry: a boolean result and a mesh hold their orientation in
+    their coordinates with an identity ``Placement``, so there is nothing for the
+    rebase to invert and the source's rotation cannot be recovered. A caller that
+    needs a known orientation for those sources should copy a primitive, or
+    rotate the source before copying it.
     """
     import FreeCAD as App
 
@@ -1754,6 +1766,12 @@ def model_mirror_object(params):
         # branches on one verified code path.
         staging_name = result_name if keep_source else "DccMcpMirrorStage"
         mirror = doc.addObject("Part::Mirroring", staging_name)
+        # Internal names are unique per document, so a staging name that is
+        # taken makes addObject rename the feature it just created. Reading the
+        # name back off the object keeps the removal below pointed at the
+        # feature this call made; removing the requested string instead would
+        # delete the caller's object of that name and leave this one behind.
+        staging_name = mirror.Name
         try:
             mirror.Source = source
             mirror.Normal = axis

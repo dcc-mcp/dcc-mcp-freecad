@@ -33,15 +33,18 @@ caller, because FreeCAD silently ignores a `Shape` assignment on a parametric
 primitive - an in-place variant would report success while the geometry stayed
 the same. A copy of a primitive keeps its parametric type; a scaled or mirrored
 result becomes a plain `Part::Feature`, except that a mirror which keeps its
-source stays a live `Part::Mirroring` linked to it. A copy's `translation` and
-`rotation_degrees` are absolute for every source type, so copying without them
-puts the copy at the document origin.
+source stays a live `Part::Mirroring` linked to it. A copy's `translation` is
+absolute for every source type, so copying without it puts the copy at the
+document origin. A copy's `rotation_degrees` is absolute for a primitive; for a
+shape or mesh source it composes on top of the orientation already in the copied
+geometry, because a boolean result and a mesh hold their orientation in their
+coordinates with no `Placement` to invert.
 
-Geometry import/export supports STEP, IGES, BREP, STL, OBJ, and 3MF. Mesh export
-uses explicit bounded tessellation settings. No inline Python is accepted here —
-the typed tools accept arguments, never source text. The one escape hatch is
-`freecad-session`'s `run_script`, which takes a **path to a script file** and
-runs it in a disposable FreeCAD process; it is not a sandbox, and it does not
-load user workbenches, plugins, or macros. Every 3MF export is asserted to
-declare the millimetre unit, because a consumer scales the model by that
-declaration.
+Geometry import supports STEP, IGES, BREP, STL, and OBJ; export supports those
+plus 3MF, which is export-only. Mesh export uses explicit bounded tessellation
+settings. No inline Python is accepted here — the typed tools accept arguments,
+never source text. The one escape hatch is `freecad-session`'s `run_script`,
+which takes a **path to a script file** and runs it in a disposable FreeCAD
+process; it is not a sandbox, and it does not load user workbenches, plugins, or
+macros. Every 3MF export is asserted to declare the millimetre unit, because a
+consumer scales the model by that declaration.

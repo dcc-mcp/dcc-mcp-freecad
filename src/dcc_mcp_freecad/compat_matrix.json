@@ -13,7 +13,7 @@
       "min_version": "1.0.0",
       "max_version": "1.0.9999",
       "status": "supported",
-      "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove, plus scale/copy/mirror, the wedge and helix primitives, and 3MF export - 5 passed / 0 skipped. Wedge and helix geometry and the 3MF millimetre unit declaration are measured against the request on this line, not merely reported.",
+      "evidence": "Real FreeCAD 1.0.2 end-to-end run in CI: create/add/update/transform/boolean/validate/inspect/export STEP+STL/import/save_copy/remove, plus scale/copy/mirror, the wedge and helix primitives, and 3MF export - 37 passed / 0 skipped. Wedge and helix geometry and the 3MF millimetre unit declaration are measured against the request on this line, not merely reported.",
       "ci_matrix_entry": "FreeCAD_1.0.2-conda-Linux-x86_64-py311.AppImage"
     },
     {
@@ -21,7 +21,7 @@
       "min_version": "1.1.0",
       "max_version": "1.1.9999",
       "status": "supported",
-      "evidence": "Real FreeCAD 1.1.4 end-to-end run in CI: the same end-to-end path plus scale/copy/mirror, the wedge and helix primitives, and 3MF export - 5 passed / 0 skipped. No adapter-visible API break: the Part/Placement/boolean/MeshPart surface used by the driver is unchanged, and the wedge, helix and 3MF measurements agree with the 1.0.x line.",
+      "evidence": "Real FreeCAD 1.1.4 end-to-end run in CI: the same end-to-end path plus scale/copy/mirror, the wedge and helix primitives, and 3MF export - 37 passed / 0 skipped. No adapter-visible API break: the Part/Placement/boolean/MeshPart surface used by the driver is unchanged, and the wedge, helix and 3MF measurements agree with the 1.0.x line.",
       "ci_matrix_entry": "FreeCAD_1.1.4-Linux-x86_64-py311.AppImage"
     }
   ],
