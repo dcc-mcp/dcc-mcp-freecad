@@ -347,6 +347,31 @@ def _shape_or_error(obj, name, tool):
     return shape
 
 
+def _move_to_local(geometry, source):
+    """Rebase copied geometry out of the source's placement, in place.
+
+    ``obj.Shape`` and ``obj.Mesh`` are reported in document coordinates, so a
+    copy taken straight from the source already carries the source's placement
+    baked in. Assigning ``Placement`` on top of it then composes the two, which
+    makes ``translation`` mean "offset from the source" for a copied solid but
+    "absolute position" for a primitive re-created from its dimensions. The copy
+    is moved back by the inverse placement so that every source type then takes
+    the same absolute ``Placement``, and a copy with no translation requested
+    sits where the source sits rather than on top of it.
+
+    A mesh is transformed by ``transformGeometry``'s mesh equivalent rather than
+    by a Part shape call, because ``Mesh.Mesh`` has no ``transformGeometry``.
+    """
+    placement = getattr(source, "Placement", None)
+    if placement is None:
+        return geometry
+    matrix = placement.inverse().toMatrix()
+    if hasattr(geometry, "transformGeometry"):
+        return geometry.transformGeometry(matrix)
+    geometry.transform(matrix)
+    return geometry
+
+
 def _scaled_shape(app, shape, factors, around, tool):
     """Scale ``shape`` about ``around`` and return the new shape.
 
@@ -1538,6 +1563,13 @@ def model_copy_object(params):
     dimensions, so the copy stays editable. Anything else - an imported solid, a
     boolean result, a mesh - is duplicated as a shape or mesh copy, because
     there is no parametric definition to carry over.
+
+    ``translation`` and ``rotation_degrees`` are absolute for every source type,
+    not relative to the source: a copy made without them lands on top of the
+    source rather than at the document origin. The shape and mesh branches copy
+    geometry FreeCAD reports in document coordinates, so it is moved back into
+    local coordinates first; only then does the requested ``Placement`` mean the
+    same thing it means for a primitive re-created from its own dimensions.
     """
     import FreeCAD as App
 
@@ -1573,10 +1605,14 @@ def model_copy_object(params):
                 setattr(result, property_name, value)
         elif mesh is not None and getattr(mesh, "CountPoints", 0):
             result = doc.addObject("Mesh::Feature", new_name)
-            result.Mesh = mesh.copy()
+            copied = mesh.copy()
+            _move_to_local(copied, source)
+            result.Mesh = copied
         else:
             result = doc.addObject("Part::Feature", new_name)
-            result.Shape = _shape_or_error(source, object_name, tool).copy()
+            copied = _shape_or_error(source, object_name, tool).copy()
+            _move_to_local(copied, source)
+            result.Shape = copied
         if label:
             result.Label = str(label)
         if hasattr(result, "Placement"):

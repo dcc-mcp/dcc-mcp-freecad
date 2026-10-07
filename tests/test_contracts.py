@@ -321,8 +321,8 @@ _DRIFT_CASES = [
         "capability",
         lambda skills: _replace(
             skills / "freecad-modeling" / "tools.yaml",
-            "enum: [box, cone, cylinder, sphere, torus]",
-            "enum: [box, cone, cylinder, sphere]",
+            "enum: [box, cone, cylinder, sphere, torus, wedge, helix]",
+            "enum: [box, cone, cylinder, sphere, wedge, helix]",
         ),
     ),
     (

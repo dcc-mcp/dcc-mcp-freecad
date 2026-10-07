@@ -659,6 +659,96 @@ def _named_object(bridge, document, name):
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_copy_places_every_source_type_the_same_way(tmp_path: Path):
+    """``translation`` must mean the same thing whatever the source is made of.
+
+    A primitive is rebuilt from its dimensions, so its geometry starts in local
+    coordinates; a boolean result and a mesh are copied from ``Shape`` / ``Mesh``,
+    which FreeCAD reports already carrying the source's placement. Without the
+    copies being rebased, the same ``translation`` lands a primitive at the
+    document origin and a boolean result on top of its source - a "copy" that
+    looks like a no-op. This covers the two branches the primitive-only case
+    cannot reach, with a non-zero translation so the difference is measurable.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "copy-semantics.FCStd"
+    bridge.create_document(str(document))
+
+    # A boolean result: Part::Cut, so it takes the shape branch, not the
+    # primitive branch. Placed away from the origin on purpose.
+    bridge.add_primitive(
+        str(document), "box", "Blank", dimensions={"length": 20, "width": 10, "height": 5}
+    )
+    bridge.add_primitive(
+        str(document), "box", "Tool", dimensions={"length": 6, "width": 10, "height": 5}
+    )
+    bridge.transform_object(str(document), "Tool", translation=[100, 40, 0])
+    bridge.transform_object(str(document), "Blank", translation=[100, 40, 0])
+    bridge.boolean_operation(str(document), "cut", "Blank", "Tool", "Notched")
+    source = _named_object(bridge, document, "Notched")
+    size = source["shape"]["bounding_box"]["size"]
+    centre = source["shape"]["bounding_box"]["center"]
+    assert size == pytest.approx([14, 10, 5], abs=1e-6)
+
+    offset = [0, 50, 0]
+    copied = bridge.copy_object(str(document), "Notched", "NotchedCopy", translation=offset)
+    copied_object = copied["object"]
+    # A boolean result has no parametric definition to carry over.
+    assert copied_object["type_id"] == "Part::Feature"
+    assert copied_object["placement"]["translation"] == pytest.approx(offset, abs=1e-9)
+    assert copied_object["shape"]["bounding_box"]["size"] == pytest.approx(size, abs=1e-6)
+    # Absolute, like the primitive branch: the requested offset, not the source
+    # position plus the offset.
+    assert copied_object["shape"]["bounding_box"]["center"] == pytest.approx(
+        [offset[0] + size[0] / 2, offset[1] + size[1] / 2, offset[2] + size[2] / 2], abs=1e-6
+    )
+
+    # The default is the same convention, so an untranslated copy sits on the
+    # source instead of collapsing to the document origin.
+    plain = bridge.copy_object(str(document), "Notched", "NotchedSame")
+    plain_object = plain["object"]
+    assert plain_object["shape"]["bounding_box"]["center"] == pytest.approx(centre, abs=1e-6)
+
+    # A mesh: the third branch, also placed away from the origin. The mesh is
+    # tessellated and re-imported, because a Mesh::Feature is the only source
+    # that reaches the mesh branch.
+    bridge.add_primitive(
+        str(document), "box", "MeshSource", dimensions={"length": 12, "width": 8, "height": 4}
+    )
+    bridge.transform_object(str(document), "MeshSource", translation=[0, 80, 0])
+    tessellated = tmp_path / "source.stl"
+    # The format comes from the suffix, which is why the mesh has to make a
+    # round trip through a file instead of being built directly.
+    bridge.export_geometry(str(document), ["MeshSource"], str(tessellated))
+    bridge.import_geometry(str(document), str(tessellated), "MeshObject")
+    mesh_source = _named_object(bridge, document, "MeshObject")
+    assert mesh_source["type_id"] == "Mesh::Feature", mesh_source["type_id"]
+    mesh_box = mesh_source["mesh"]["bounding_box"]
+    mesh_centre = mesh_box["center"]
+    # The source must sit away from the origin, or the two conventions agree
+    # and the assertion below would pass either way.
+    assert mesh_centre[1] == pytest.approx(80 + mesh_box["size"][1] / 2, abs=1e-6)
+
+    mesh_copy = bridge.copy_object(str(document), "MeshObject", "MeshCopy", translation=offset)
+    assert mesh_copy["object"]["type_id"] == "Mesh::Feature"
+    copied_box = mesh_copy["object"]["mesh"]["bounding_box"]
+    assert copied_box["size"] == pytest.approx(mesh_box["size"], abs=1e-6)
+    # Same absolute convention as the shape branch: the source's own position
+    # must not be added on top of the requested offset.
+    assert copied_box["center"] == pytest.approx(
+        [
+            offset[0] + mesh_box["size"][0] / 2,
+            offset[1] + mesh_box["size"][1] / 2,
+            offset[2] + mesh_box["size"][2] / 2,
+        ],
+        abs=1e-6,
+    )
+
+    assert bridge.validate_document(str(document))["valid"] is True
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
 def test_real_freecad_wedge_helix_and_3mf(tmp_path: Path):
     """The new primitives and the 3MF exporter, measured against the geometry.
 
