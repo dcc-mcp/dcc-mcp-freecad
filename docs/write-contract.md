@@ -137,21 +137,39 @@ so an existing `except BridgeError` handler keeps working.
 }
 ```
 
-Four codes can block a sketch, and all four mean the same thing to a caller:
-this profile is not reproducible, do not build a feature on it.
+Six codes reach a caller as `SketchStateError`. Four of them are the readiness
+verdict from `feature_state` and all four mean the same thing: this profile is
+not reproducible, do not build a feature on it. The other two are raised while a
+constraint is resolved against live geometry, *before* anything is written.
 
-| Code | Measured state |
-|---|---|
-| `E_SKETCH_UNDERCONSTRAINED` | `dof > 0`, or `dof == 0` on a sketch with no geometry |
-| `E_SKETCH_OVERCONSTRAINED` | `dof < 0`: redundant or conflicting constraints |
-| `E_SKETCH_DOF_UNAVAILABLE` | the host would not report a count at all |
-| `E_SKETCH_SOLVER_FAILED` | the solver raised or did not converge |
+| Code | Refused because | Gate |
+|---|---|---|
+| `E_SKETCH_UNDERCONSTRAINED` | `dof > 0`, or `dof == 0` on a sketch with no geometry | readiness |
+| `E_SKETCH_OVERCONSTRAINED` | `dof < 0`: redundant or conflicting constraints | readiness |
+| `E_SKETCH_DOF_UNAVAILABLE` | the host would not report a count at all | readiness |
+| `E_SKETCH_SOLVER_FAILED` | the solver raised or did not converge | readiness |
+| `E_SKETCH_ELEMENT_NOT_FOUND` | a constraint names an element the sketch does not have | reference |
+| `E_SKETCH_SPEC_INVALID` | a constraint is put on geometry that cannot carry it, or its two references do not line up (different kinds for `equal`, a vertex that kind does not have) | spec |
 
 Constraint references are validated against the live geometry list *before* the
 first write of a batch, because the host adds a constraint on a missing element
 without complaint and the sketch then solves as if it were not there. A
 half-applied batch is a sketch that looks finished and is not, so the whole
 batch is refused rather than partially applied.
+
+**One sketch type does not survive the boundary.** `sketch_rules` refuses an
+uninterpretable spec with `SketchSpecError` -- a rectangle with a negative width,
+a circle with no radius, a coordinate that is not a number. That class carries
+none of the three attributes the driver forwards across the process boundary
+(`code`, `payload`, `state_payload`), so a refusal raised *inside* the FreeCAD
+process arrives at the caller as a plain `BridgeError` with the message and no
+code.
+
+`dcc_mcp_freecad.SketchSpecError` is therefore exported for the **local** path:
+`sketch_rules` is pure Python, so a caller can validate a spec before spending a
+host round-trip and catch exactly this type. An `except` written against it does
+not fire on a refusal that came back from the host; catch `BridgeError` for that,
+or treat the spec as unvalidated.
 
 ## Comparing floats
 

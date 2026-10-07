@@ -1104,6 +1104,13 @@ def test_every_declared_constraint_type_builds_a_shape_the_host_accepts():
     ``Sketcher.Constraint`` has no single variadic signature: a tuple the
     layout cannot consume in full is a silently truncated constraint on a real
     host, not an error.
+
+    The constructor name is checked before the arity, and deliberately so. The
+    ``Distance`` fallback has to decide the expected arity from the adapter's
+    type name rather than from the layout, so a constructor renamed to
+    something the fake does not know would fall into that fallback, match the
+    arity it guessed, and pass -- the assertion would compare a name nobody
+    recognises against a number nobody chose.
     """
     assert set(_MINIMAL_CONSTRAINT_SPECS) == set(sketch_rules.CONSTRAINT_TYPES), (
         "the minimal spec table covers %s, but the vocabulary is %s"
@@ -1119,6 +1126,12 @@ def test_every_declared_constraint_type_builds_a_shape_the_host_accepts():
             problems.append("%s: %s" % (name, exc))
             continue
         type_name = sketcher.arguments[0]
+        if type_name != normalized["free_cad_type"]:
+            problems.append(
+                "%s: built a %s, but the vocabulary declares %s"
+                % (name, type_name, normalized["free_cad_type"])
+            )
+            continue
         layout = _Constraint._LAYOUTS.get(type_name)
         if layout is None:
             # Distance is the one constructor whose arity changes its meaning:
