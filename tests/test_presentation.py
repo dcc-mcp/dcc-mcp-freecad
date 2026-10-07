@@ -1,5 +1,6 @@
 import sys
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -310,3 +311,173 @@ def test_copy_cleanup_error_preserves_publication_or_native_failure(
         assert target.read_bytes() == b"native copy"
     assert cleanup_attempted
     assert source.read_bytes() == b"original"
+
+
+def test_capture_passes_only_positional_arguments(tmp_path):
+    """``saveImage`` is METH_VARARGS; there is no keyword spelling to use."""
+    calls = []
+
+    class View:
+        def saveImage(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            Path(args[0]).write_bytes(b"png-bytes")
+
+    target = tmp_path / "frame.png"
+    presentation.capture(View(), target, 640, 360)
+    assert calls == [((str(target), 640, 360), {})]
+    assert target.read_bytes() == b"png-bytes"
+
+
+@pytest.mark.parametrize("missing,empty", [(True, False), (False, True)])
+def test_capture_refuses_a_file_the_host_did_not_write(tmp_path, missing, empty):
+    class View:
+        def saveImage(self, *args, **kwargs):
+            if not missing:
+                Path(args[0]).write_bytes(b"" if empty else b"png-bytes")
+
+    target = tmp_path / "frame.png"
+    with pytest.raises(RuntimeError, match="no image" if missing else "empty image"):
+        presentation.capture(View(), target, 8, 8)
+
+
+def test_initialize_disables_the_notification_area_before_starting_gui(monkeypatch):
+    """The offscreen notification area can deadlock the render call."""
+    events = []
+
+    def param_get(group):
+        def set_bool(key, value):
+            events.append((group.split("/")[-1], key, value))
+
+        return SimpleNamespace(SetBool=set_bool)
+
+    app = SimpleNamespace(ParamGet=param_get, GuiUp=True)
+    gui = SimpleNamespace(showMainWindow=lambda: events.append(("Gui", "showMainWindow", None)))
+    monkeypatch.setitem(sys.modules, "FreeCAD", app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", gui)
+    assert presentation.initialize() is gui
+    keys = [entry[1] for entry in events]
+    assert "NotificationAreaEnabled" in keys
+    assert "NonIntrusiveNotificationsEnabled" in keys
+    # Both are disabled before the GUI is started, which is the point.
+    assert keys.index("showMainWindow") > keys.index("NotificationAreaEnabled")
+    assert keys.index("showMainWindow") > keys.index("NonIntrusiveNotificationsEnabled")
+
+
+def test_initialize_refuses_a_host_that_never_came_up(monkeypatch):
+    app = SimpleNamespace(
+        ParamGet=lambda group: SimpleNamespace(SetBool=lambda key, value: None), GuiUp=False
+    )
+    gui = SimpleNamespace(showMainWindow=lambda: None)
+    monkeypatch.setitem(sys.modules, "FreeCAD", app)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", gui)
+    with pytest.raises(RuntimeError, match="GUI view providers are unavailable"):
+        presentation.initialize()
+
+
+def test_renderable_names_excludes_containers_and_their_members():
+    leaf = SimpleNamespace(Name="Leaf", ViewObject=SimpleNamespace(Visibility=True))
+    container = SimpleNamespace(
+        Name="Container", ViewObject=SimpleNamespace(Visibility=True), Group=[leaf]
+    )
+    link_group = SimpleNamespace(
+        Name="Links", ViewObject=SimpleNamespace(Visibility=True), ElementList=[leaf]
+    )
+    plain = SimpleNamespace(Name="Plain", ViewObject=SimpleNamespace(Visibility=True))
+    headless = SimpleNamespace(Name="Headless", ViewObject=None)
+    document = SimpleNamespace(Objects=[leaf, container, link_group, plain, headless])
+    assert presentation.renderable_names(document) == ["Plain"]
+
+
+def test_hide_all_hides_every_provider_without_touching_the_camera():
+    first = SimpleNamespace(Name="A", ViewObject=SimpleNamespace(Visibility=True))
+    second = SimpleNamespace(Name="B", ViewObject=SimpleNamespace(Visibility=True))
+    document = SimpleNamespace(Objects=[first, second, SimpleNamespace(Name="C", ViewObject=None)])
+    presentation.hide_all(document)
+    assert first.ViewObject.Visibility is False
+    assert second.ViewObject.Visibility is False
+
+
+def test_view_state_records_the_camera_as_the_host_serialized_it():
+    active = SimpleNamespace(
+        getCamera=lambda: "OrthographicCamera { height 12.5 }",
+        getCameraType=lambda: "Orthographic",
+    )
+    gui = SimpleNamespace(
+        getDocument=lambda name: SimpleNamespace(activeView=lambda: active),
+        Selection=SimpleNamespace(getSelection=lambda: [SimpleNamespace(Name="A")]),
+    )
+    document = SimpleNamespace(
+        Name="Doc",
+        Objects=[
+            SimpleNamespace(Name="A", ViewObject=SimpleNamespace(Visibility=True)),
+            SimpleNamespace(Name="B", ViewObject=SimpleNamespace(Visibility=False)),
+        ],
+    )
+    state = presentation.view_state(document, gui)
+    assert state["camera"] == "OrthographicCamera { height 12.5 }"
+    assert state["camera_type"] == "Orthographic"
+    assert state["visibility"] == {"A": True, "B": False}
+    assert state["selection"] == ["A"]
+
+
+def test_view_state_settles_a_camera_the_host_promotes_on_write_back():
+    """FreeCAD 1.1 grows the serialized camera the first time it is written.
+
+    Its ``getCamera`` leaves ``nearDistance``/``farDistance`` out until
+    ``setCamera`` has stored them, so a "before" snapshot and an "after" one can
+    describe the same view in different serializations. Both are settled here,
+    which is what makes the byte-exact restore check hold on both release lines.
+    """
+    unsettled = "OrthographicCamera {\n  height 12.5\n}"
+    settled = "OrthographicCamera {\n  nearDistance 1\n  height 12.5\n}"
+    reported = [unsettled]
+
+    def get_camera():
+        return reported[0]
+
+    def set_camera(value):
+        reported[0] = settled
+
+    active = SimpleNamespace(
+        getCamera=get_camera,
+        setCamera=set_camera,
+        getCameraType=lambda: "Orthographic",
+    )
+    gui = SimpleNamespace(
+        getDocument=lambda name: SimpleNamespace(activeView=lambda: active),
+        Selection=SimpleNamespace(getSelection=lambda: []),
+    )
+    document = SimpleNamespace(Name="Doc", Objects=[])
+    assert presentation.settled_camera(active) == settled
+    reported[0] = unsettled
+    assert presentation.view_state(document, gui)["camera"] == settled
+    # Settling is idempotent: a second snapshot of the same view is identical.
+    assert presentation.view_state(document, gui)["camera"] == settled
+
+
+def test_view_state_records_no_selection_rather_than_an_empty_one():
+    active = SimpleNamespace(getCamera=lambda: "camera", getCameraType=lambda: "Orthographic")
+    gui = SimpleNamespace(
+        getDocument=lambda name: SimpleNamespace(activeView=lambda: active),
+        Selection=SimpleNamespace(getSelection=lambda: (_ for _ in ()).throw(OSError("no gui"))),
+    )
+    document = SimpleNamespace(Name="Doc", Objects=[])
+    # An unrecorded state must not be restored as "nothing was selected".
+    assert presentation.view_state(document, gui)["selection"] is None
+
+
+def test_states_match_has_no_tolerance():
+    first = {
+        "camera": "OrthographicCamera { height 12.5 }",
+        "camera_type": "Orthographic",
+        "visibility": {"A": True},
+        "selection": ["A"],
+    }
+    second = dict(first)
+    assert presentation.states_match(first, second)
+    drifted = dict(first, camera="OrthographicCamera { height 12.5000001 }")
+    # The camera round-trips byte for byte, so any difference is a real move.
+    assert not presentation.states_match(first, drifted)
+    assert not presentation.states_match(first, dict(first, visibility={"A": False}))
+    assert not presentation.states_match(first, dict(first, selection=[]))
+    assert not presentation.states_match(first, dict(first, selection=None))

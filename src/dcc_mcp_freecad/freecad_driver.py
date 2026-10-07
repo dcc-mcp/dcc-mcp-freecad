@@ -632,6 +632,7 @@ def system_status(_params):
         "python_version": sys.version.split()[0],
         "host_matrix": host_matrix(reported),
         "api_probe": _probe_breaking_changes(reported),
+        "gui_library": _gui_library_probe(),
     }
 
 
@@ -856,6 +857,125 @@ def document_save_copy(params):
         "object_names": expected,
         "verified": _verified_checks(read_back),
     }
+
+
+def _gui_library_probe():
+    """Report whether this host exposes FreeCADGui, without starting it.
+
+    Importing the module has no side effects; ``showMainWindow`` does. So a
+    capability report can say whether rendering is possible at all without paying
+    for GUI startup, and ``get_capabilities`` can mark a console-only build as
+    limited instead of letting the first ``render_view`` be the discovery.
+    """
+    try:
+        import FreeCADGui  # noqa: F401
+    except Exception as exc:
+        return {"importable": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+    return {"importable": True, "error": None}
+
+
+def document_render_view(params):
+    """Capture the requested view to a PNG, twice, so the frame can be checked.
+
+    The first capture is the requested frame. The second hides every object and
+    captures the same camera again, producing what the scene looks like with
+    nothing selected. Only the pair lets the caller tell "the model rendered"
+    from "the background rendered": FreeCAD's default 3D-view background is a
+    linear gradient that is baked into the saved PNG, so an entirely empty
+    render already passes any "is it monochrome?" test on variance alone.
+
+    Framing the scene means moving the camera and changing visibility, so the
+    native view state is recorded before anything is touched and restored
+    afterwards, and that restoration is itself a read-back check. A tool whose
+    only job is to look must not leave the view somewhere else.
+
+    The document is opened, recomputed and mutated only in memory. It is never
+    saved, so a render cannot change the caller's file.
+    """
+    import FreeCAD as App
+
+    tool = "document.render_view"
+    version = _host_version()
+    document_path = _required(params, "document_path", tool)
+    subject_path = _required(params, "image_path", tool)
+    baseline_path = _required(params, "baseline_path", tool)
+    view = params.get("view", "isometric")
+    appearances = params.get("appearances")
+    frame_margin = params.get("frame_margin")
+    read_back = _ReadBack(tool, version, params)
+    module = _load_sibling_module("presentation.py", "dcc_mcp_freecad_presentation")
+    width, height = module.validate_render_size(
+        params["width"] if params.get("width") is not None else module.DEFAULT_RENDER_WIDTH,
+        params["height"] if params.get("height") is not None else module.DEFAULT_RENDER_HEIGHT,
+    )
+    if params.get("visible_objects") is None and (
+        appearances is not None or frame_margin is not None
+    ):
+        raise ValueError("appearances and frame_margin require an explicit visible_objects")
+    if not isinstance(view, str) or view not in module.VIEWS:
+        raise ValueError("view must be isometric, front, top or right")
+    gui = module.initialize()
+    doc = _open_document(App, document_path)
+    try:
+        doc.recompute()
+        state = module.view_state(doc, gui)
+        restored = None
+        try:
+            names = params.get("visible_objects")
+            if names is None:
+                names = module.renderable_names(doc)
+                if not names:
+                    raise ValueError("The document has no top-level non-container object to render")
+            # Validated once, after the selection is resolved, so the default
+            # path cannot skip the view and appearance rules the explicit path
+            # applies.
+            normalized = module.validate_options(names, view, appearances, frame_margin)
+            snapshot = module.apply(doc, gui, names, view, appearances, frame_margin)
+            read_back.check(
+                module.requested_matches(names, view, snapshot, appearances),
+                "render.presentation_request",
+                {
+                    "visible_objects": sorted(names),
+                    "camera_type": "Orthographic",
+                    "camera_orientation": module.VIEW_ROTATIONS[view],
+                    "appearances": normalized,
+                },
+                snapshot,
+                "Native visibility, orientation and appearance must match the request "
+                "before a frame is captured from it.",
+            )
+            active = gui.getDocument(doc.Name).activeView()
+            module.capture(active, subject_path, width, height)
+            module.hide_all(doc)
+            module.capture(active, baseline_path, width, height)
+        finally:
+            # Runs on every path, including a failed capture: a tool that only
+            # looks must give the view back whether or not it succeeded.
+            module.restore_view_state(doc, gui, state)
+            restored = module.view_state(doc, gui)
+        read_back.check(
+            module.states_match(state, restored),
+            "render.view_state_restored",
+            state,
+            restored,
+            "A read-only render must leave the native camera, visibility and selection "
+            "exactly as it found them, compared byte for byte rather than by tolerance.",
+        )
+        return {
+            "view": view,
+            "visible_objects": sorted(names),
+            "width": width,
+            "height": height,
+            "presentation": snapshot,
+            # Both snapshots are returned as evidence, so the read-only claim is
+            # visible to the caller and assertable in a test, not just a comment.
+            "view_state_before": state,
+            "view_state_after": restored,
+            "host_version": version,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
 
 
 def _dependents_recursive(obj, collected):
@@ -3163,6 +3283,7 @@ _METHODS = {
     "document.inspect": document_inspect,
     "document.validate": document_validate,
     "document.save_copy": document_save_copy,
+    "document.render_view": document_render_view,
     "document.remove_object": document_remove_object,
     "model.add_primitive": model_add_primitive,
     "model.update_primitive": model_update_primitive,

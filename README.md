@@ -36,6 +36,8 @@ Re-run the generator after changing the catalog.
 - Detect FreeCADCmd and report the actual FreeCAD/Python runtime.
 - Create, inspect, recompute, validate, copy, and dependency-safely edit FCStd
   documents.
+- Render a document view to a PNG headlessly and prove the frame is not a waste
+  image before returning it.
 - Add and update boxes, cylinders, spheres, cones, and tori with typed
   dimensions and placements.
 - Create parametric union, cut, and intersection features.
@@ -286,3 +288,71 @@ Both options require an explicit `visible_objects` selection. These controls
 save native presentation state; they do not render an image or add a material
 execution interface. See the [appearance qualification gate](docs/validation/appearance-copy.md)
 for the source evidence and native tests still required for this enhancement.
+
+### Headless render snapshots
+
+`render_view` captures a document view to a PNG so an agent can see what it
+built instead of reading coordinates blind. It runs in the same isolated
+process-per-call architecture as every other tool, so none of the
+long-lived-GUI-thread failure modes apply.
+
+**The image is not returned by default.** `include_image` defaults to `false`:
+the default response is text — whether the render is usable, the pixel summary,
+the view, and what was in frame. Asking for the PNG on every call is how a
+visual-feedback feature becomes a context-cost problem.
+
+**The frame is verified before it is returned, and a waste frame is refused
+rather than handed back.** Two detectors, because there are two failure modes:
+
+| Failure | Error code | Refused when |
+| --- | --- | --- |
+| capture never reached the scene (flat fill) | `degenerate_render` | one luminance level, or luminance spread below 1.0, or one colour covering more than 99.9% of the frame |
+| background rendered, model did not | `empty_render` | fewer than 0.5% of pixels differ from the empty scene at the same camera |
+
+The second detector exists because **FreeCAD's default 3D-view background is a
+linear gradient and it is baked into the saved PNG**, so an entirely empty
+render already has plenty of pixel variance and would pass any "is it
+monochrome?" check. Every render is therefore captured twice — once as
+requested, once with every object hidden at the identical camera — and the pair
+is compared. Comparing against the empty scene is also a non-background pixel
+share measurement that needs no knowledge of what the background is.
+
+Both failures carry the full pixel summary, both captures' statistics, the
+measured fraction, the reasons, and remediation. Nothing is published to
+`output_path` unless the verdict passes.
+
+**The render is read-only with respect to the document.** Framing the scene
+means moving the camera and changing visibility, so the native camera,
+visibility and selection are recorded first and restored afterwards — including
+when the capture fails, because the restore runs in a `finally`. That
+restoration is itself a byte-exact read-back check
+(`render.view_state_restored`): `getCamera()` round-trips byte for byte through
+`setCamera()`, so the comparison has no tolerance and any difference is a real
+move. Both snapshots are returned as `view_state_before` and
+`view_state_after`, so the claim is visible rather than asserted in a comment.
+The document is never saved, and the source file stays byte-for-byte unchanged.
+
+Bounds and behaviour:
+
+- `width`/`height` default and cap at 1280×720, minimum 16×16.
+- `visible_objects` is optional; omitted selects every top-level non-container
+  object, using the same container rejection `save_copy` applies.
+- `view` is `isometric`, `front`, `top` or `right`.
+- `appearances` and `frame_margin` work here as they do in `save_copy`, change
+  only this render, and require an explicit `visible_objects`.
+- `output_path` is optional and must end with `.png` inside the allowed roots.
+  Omitted means render, measure and discard — no artefact is left behind.
+  Publication follows the same rules as `save_copy`, including `overwrite`.
+- `include_image` attaches the PNG as base64, capped at 4 MiB; larger renders
+  must be published with `output_path` and read as a file.
+
+It requires the installed FreeCAD GUI library, the Qt offscreen platform and a
+working software GL path. A host without `FreeCADGui` cannot render, and
+`get_capabilities` reports `render_view` as `host_limited` with remediation
+instead of letting the first call be the discovery. The adapter sets
+`LIBGL_ALWAYS_SOFTWARE=1` on the child process (overridable) and disables
+FreeCAD's notification area, which can deadlock under the offscreen platform.
+
+See the [headless render qualification](docs/validation/render-view.md) record
+for the host API facts this relies on, the evidence per layer, and what is
+explicitly not claimed.
