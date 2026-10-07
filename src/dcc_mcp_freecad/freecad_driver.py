@@ -393,7 +393,12 @@ def _placement_to_local_matrix(geometry, source):
     origin = App.Vector(bounds.XMin, bounds.YMin, bounds.ZMin)
     if origin.Length == 0:
         return None
-    return App.Matrix().translate(origin.negative())
+    # ``Matrix.move`` left-multiplies a pure translation and mutates in place,
+    # so it is started from identity and read after the call. There is no
+    # ``Matrix.translate``; that name exists only on ``Placement``.
+    matrix = App.Matrix()
+    matrix.move(origin.negative())
+    return matrix
 
 
 def _scaled_shape(app, shape, factors, around, tool):
