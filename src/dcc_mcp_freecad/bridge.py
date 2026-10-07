@@ -16,8 +16,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
-from . import parts_library, sketch_rules
-from . import raster
+from . import parts_library, raster, sketch_rules
 from .capabilities import build_capabilities
 from .presentation import (
     DEFAULT_RENDER_HEIGHT,
