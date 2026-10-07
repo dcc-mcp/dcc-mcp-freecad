@@ -688,10 +688,10 @@ def test_real_freecad_copy_places_every_source_type_the_same_way(tmp_path: Path)
     source = _named_object(bridge, document, "Notched")
     size = source["shape"]["bounding_box"]["size"]
     source_centre = source["shape"]["bounding_box"]["center"]
+    # The tool sits at the blank's left end, so the cut removes the first 6mm:
+    # the result spans x 106..120 rather than starting at the placement origin.
     assert size == pytest.approx([14, 10, 5], abs=1e-6)
-    # The source must sit away from the origin, or the two conventions agree
-    # and neither assertion below could tell them apart.
-    assert source_centre[0] == pytest.approx(100 + size[0] / 2, abs=1e-6)
+    assert source_centre[0] == pytest.approx(100 + 6 + size[0] / 2, abs=1e-6)
 
     offset = [0, 50, 0]
     copied = bridge.copy_object(str(document), "Notched", "NotchedCopy", translation=offset)
