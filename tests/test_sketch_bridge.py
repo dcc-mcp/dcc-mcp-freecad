@@ -356,15 +356,15 @@ def test_real_freecad_constrains_a_circle_by_radius_and_position(tmp_path: Path)
 def test_real_freecad_stores_the_arc_direction_it_was_given(
     tmp_path: Path, start, end, mid_quadrant
 ):
-    """An arc must come back sweeping the way it was requested.
+    """An arc must come back as the sweep that was requested, in both directions.
 
-    The host defaults ``ArcOfCircle``'s ``sense`` to True, which rewrites a
-    negative sweep as a +360 degree complement: a 90 -> 0 request returns a 270
-    degree arc in the opposite quadrant while both endpoints, the centre and the
-    radius still match. The midpoint is the only compared value that can tell the
-    two apart, so it is what this asserts on -- once per direction, on every host
-    in the matrix, because the whole point is that the answer must not vary
-    between 1.0.2 and 1.1.4.
+    ``sense`` is not "which way to sweep": on the periodic basis of a circle,
+    SetTrim keeps the angles in order for a true Sense and reverses the curve for
+    a false one, which is what turned a 90 -> 0 request into a 270 degree
+    complement. Both endpoints, the centre and the radius match either way, so the
+    midpoint is the value that tells them apart -- asserted once per direction, on
+    every host in the matrix, because the answer must not vary between 1.0.2 and
+    1.1.4.
     """
     bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
     document = tmp_path / ("arc-%d-%d.FCStd" % (start, end))

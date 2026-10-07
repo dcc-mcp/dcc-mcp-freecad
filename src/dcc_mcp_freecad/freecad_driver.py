@@ -2630,15 +2630,22 @@ def _build_geometry(app, part, primitive):
     circle = part.Circle(center, app.Vector(0.0, 0.0, 1.0), primitive["radius"])
     if kind == "arc":
         start, end = primitive["angles_degrees"]
-        # ``sense`` is passed explicitly and never left to its default. The
-        # default is True, which normalises a negative sweep to +360 degrees
-        # instead of sweeping backwards: a request for 90 -> 0 comes back as a
-        # 270 degree arc in the opposite quadrant while every other compared
-        # value still matches the request. False keeps the directed sweep the
-        # caller modelled.
-        return part.ArcOfCircle(
-            circle, math.radians(start), math.radians(end), not primitive["clockwise"]
-        )
+        # ``sense`` is always True, and the angles are passed in the order the
+        # caller modelled them.
+        #
+        # ``sense`` is not "which way to sweep". ArcOfCirclePyImp forwards it to
+        # GC_MakeArcOfCircle, which hands it to Geom_TrimmedCurve::SetTrim; there
+        # the meaning is "should the result keep the basis circle's orientation".
+        # The basis here is a Geom_Circle, which is periodic, so SetTrim takes the
+        # periodic branch: ``sameSense = Sense`` with no swap, and only a false
+        # Sense triggers Reverse() - which flips the conic's Z axis and moves the
+        # parameter range to 2*pi - U. Passing False therefore does not sweep
+        # backwards; it returns the arc the caller asked for traversed the other
+        # way, which is why a 90 -> 0 request came back as a 270 degree arc.
+        #
+        # True keeps (start, end) in order and stores exactly the modelled sweep,
+        # for a negative sweep as much as a positive one.
+        return part.ArcOfCircle(circle, math.radians(start), math.radians(end), True)
     return circle
 
 

@@ -35,6 +35,19 @@ sketch solves differently on the next host version, which is why
 `get_sketch_info` reports `dof` and `feature_ready` and why a sketch with
 unconstrained degrees of freedom is never reported as usable for a feature.
 
+## Arc direction
+
+An `arc` is specified by `start_angle_degrees` and `end_angle_degrees`, and the
+**sign of the sweep decides the direction**: `0 -> 90` is anticlockwise, `90 -> 0`
+is clockwise. Both are stored as the sweep they describe — the start point is the
+angle you passed as `start`, not whichever end happens to be lower.
+
+Both directions are stored as the arc you asked for, and the read-back compares
+the start point, the midpoint and the end point, so a request that came back as
+the complementary arc is reported as a mismatch rather than a success. An arc
+whose start and end land on the same point is refused — use `circle` for a full
+turn.
+
 ## Constraints are the contract
 
 * `dof` counts unconstrained degrees of freedom. `feature_ready` is true only

@@ -103,10 +103,16 @@ class _Geom:
         Only arcs need it: the read-back uses the midpoint of the parameter
         range to tell an arc apart from its complement, which share both
         endpoints, centre and radius.
+
+        A reversed arc is evaluated on a flipped basis (Reverse() negates the
+        conic's Z axis, so the Y direction flips with it), which the fake mirrors
+        through the ``_reversed`` flag set when it was built. Getting this wrong
+        is what made a reversed arc's midpoint land in the opposite quadrant.
         """
+        sign = -1.0 if getattr(self, "_reversed", False) else 1.0
         return _Vec(
             self.Center.x + self.Radius * math.cos(parameter),
-            self.Center.y + self.Radius * math.sin(parameter),
+            self.Center.y + sign * self.Radius * math.sin(parameter),
             0.0,
         )
 
@@ -338,35 +344,55 @@ class FakePart(types.ModuleType):
         )
 
     def ArcOfCircle(self, circle, start_angle, end_angle, sense=True):
-        """Model the host's ``sense`` handling, including its default.
+        """Model the host's ``sense`` semantics as the OCC source defines them.
 
-        ``ArcOfCirclePyImp.cpp`` defaults ``sense`` to True, and
-        ``GC_MakeArcOfCircle`` normalises a negative delta to +2*PI when it is.
-        That is the behaviour that silently turned a 90 -> 0 request into a 270
-        degree arc, so the fake reproduces it rather than assuming the sane
-        behaviour: a caller that omits ``sense`` gets the wrong arc back, and
-        only an explicit argument is honoured.
+        ``sense`` is not "which way to sweep". ArcOfCirclePyImp.cpp defaults it
+        to Py_True and forwards it to GC_MakeArcOfCircle, which passes it to
+        Geom_TrimmedCurve::SetTrim. There the meaning is "keep the basis curve's
+        orientation", and the basis (a Geom_Circle) is periodic, so SetTrim takes
+        its periodic branch: ``sameSense = Sense`` with no parameter swap, and
+        only a false Sense calls Reverse() - which flips the conic's Z axis and
+        moves the range to 2*pi - U.
+
+        So True stores the caller's angles in order (start 90, end 0 stays a
+        90 degree arc through 45), and False returns that arc traversed the other
+        way. The fake reproduces the source rather than the plausible-looking
+        "negative delta normalises to +2*PI" reading, which is what made the real
+        hosts disagree with the previous implementation.
         """
-        if sense and end_angle < start_angle:
-            end_angle = end_angle + 2 * math.pi
+        if sense:
+            first, last = start_angle, end_angle
+
+            def point(t, _flip=1.0):
+                return math.cos(_flip * t), math.sin(_flip * t)
+
+        else:
+            # Reverse(): parameters become 2*pi - U, evaluated on a flipped basis.
+            first, last = 2 * math.pi - end_angle, 2 * math.pi - start_angle
+
+            def point(t, _flip=-1.0):
+                return math.cos(_flip * t), math.sin(_flip * t)
+
         cx, cy = circle.Center.x, circle.Center.y
-        return _Geom(
+        geometry = _Geom(
             "Part::GeomArcOfCircle",
             Center=circle.Center,
             Radius=circle.Radius,
-            FirstParameter=start_angle,
-            LastParameter=end_angle,
+            FirstParameter=first,
+            LastParameter=last,
             StartPoint=_Vec(
-                cx + circle.Radius * math.cos(start_angle),
-                cy + circle.Radius * math.sin(start_angle),
+                cx + circle.Radius * point(first)[0],
+                cy + circle.Radius * point(first)[1],
                 0.0,
             ),
             EndPoint=_Vec(
-                cx + circle.Radius * math.cos(end_angle),
-                cy + circle.Radius * math.sin(end_angle),
+                cx + circle.Radius * point(last)[0],
+                cy + circle.Radius * point(last)[1],
                 0.0,
             ),
         )
+        geometry._reversed = not sense
+        return geometry
 
 
 class FakeSketcher(types.ModuleType):
@@ -583,14 +609,18 @@ def test_add_geometry_appends_after_existing_elements(host, tmp_path):
     assert result["elements"][0]["key_points"] == [2.0, 3.0, 4.0]
 
 
-def test_add_geometry_catches_a_reversed_arc_sweep(host, tmp_path):
-    """A negative sweep must come back as the arc that was asked for.
+def test_add_geometry_stores_the_negative_sweep_it_was_asked_for(host, tmp_path):
+    """A clockwise arc must come back as the arc that was asked for.
 
-    This is the failure the midpoint read-back exists for. The host defaults
-    ``sense`` to True, which turns a 90 -> 0 request into a 270 degree arc in the
-    opposite quadrant -- while both endpoints, the centre and the radius still
-    match the request exactly. Only the midpoint differs, so without it the
-    write-after-read passed and a wrong profile was reported as correct.
+    Passing ``sense`` as ``not clockwise`` used to store the *complement*: a
+    90 -> 0 request came back as a 270 degree arc, because ``sense`` does not
+    mean "sweep this way". Per Geom_TrimmedCurve::SetTrim, on a periodic basis
+    ``sameSense = Sense`` with no swap, and only a false Sense reverses - which
+    flips the conic's Z axis instead of sweeping backwards. True stores the
+    caller's angles in order, for a negative sweep as much as a positive one.
+
+    Both endpoints, the centre and the radius match either way, so the midpoint
+    is the only compared value that tells the two apart.
     """
     _doc, path = _document(host, tmp_path)
     _create(host, path, name="Profile")
@@ -628,15 +658,60 @@ def test_add_geometry_catches_a_reversed_arc_sweep(host, tmp_path):
         }
     )
 
-    # Both share endpoints, centre and radius; their midpoints are opposite.
+    # Both arcs sweep through the first quadrant; what differs is which end is
+    # the start, so an arc and its complement are told apart by all three points.
     first = clockwise["elements"][0]["key_points"]
     second = anticlockwise["elements"][0]["key_points"]
-    assert _close(first[0:2], (0.0, 10.0)), "the requested start point"
+    assert _close(first[0:2], (0.0, 10.0)), "the requested start point, at 90 degrees"
     assert _close(first[2:4], (7.0710678118654755, 7.0710678118654755)), (
         "a 90 -> 0 sweep passes through the first quadrant, not the third"
     )
-    assert _close(first[4:6], (10.0, 0.0)), "the requested end point"
+    assert _close(first[4:6], (10.0, 0.0)), "the requested end point, at 0 degrees"
+    assert _close(second[0:2], (10.0, 0.0)), "the anticlockwise arc starts at 0 degrees"
     assert _close(second[2:4], (7.0710678118654755, 7.0710678118654755))
+    assert _close(second[4:6], (0.0, 10.0)), "and ends at 90 degrees"
+
+
+@pytest.mark.parametrize("sense", [True, False])
+def test_the_arc_is_built_with_sense_true_whatever_the_direction(host, tmp_path, sense):
+    """Pin the ``sense`` semantics that real hosts disproved.
+
+    ``sense=False`` does not sweep backwards: on a periodic basis it reverses the
+    curve, which flips the conic's Z axis and moves the parameter range to
+    2*pi - U. Only ``sense=True`` stores the caller's angles in order, so that is
+    what the driver passes for both directions. This test fails if anyone
+    reinstates ``not clockwise``, which real 1.0.2 and 1.1.4 runs rejected.
+    """
+    _doc, path = _document(host, tmp_path)
+    _create(host, path, name="Profile")
+    seen = []
+    original = host.part.ArcOfCircle
+
+    def recorder(circle, start, end, sense=True):
+        seen.append(sense)
+        return original(circle, start, end, sense)
+
+    host.part.ArcOfCircle = recorder
+    start, end = (90, 0) if sense else (0, 90)
+
+    freecad_driver.sketch_add_geometry(
+        {
+            "document_path": path,
+            "sketch_name": "Profile",
+            "geometry": [
+                {
+                    "type": "arc",
+                    "cx": 0,
+                    "cy": 0,
+                    "radius": 10,
+                    "start_angle_degrees": start,
+                    "end_angle_degrees": end,
+                }
+            ],
+        }
+    )
+
+    assert seen == [True], "sense must be True for a clockwise and an anticlockwise arc alike"
 
 
 def test_add_geometry_refuses_an_arc_whose_midpoint_cannot_be_read(host, tmp_path):
