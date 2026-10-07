@@ -3,7 +3,10 @@
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
+import time
 
 _MATRIX_FILENAME = "compat_matrix.json"
 _CONTRACT_FILENAME = "write_contract.py"
@@ -3964,6 +3967,1797 @@ def sketch_info(params):
         _close_document(App, doc)
 
 
+def main():
+    request_path = sys.argv[-2]
+    result_path = sys.argv[-1]
+    try:
+        with open(request_path, "r", encoding="utf-8") as stream:
+            request = json.load(stream)
+        method = request.get("method")
+        if method not in _METHODS:
+            raise ValueError("Unknown FreeCAD method: %s" % method)
+        if method != "system.status":
+            # Pre-flight gate: an unverified host must not reach geometry work.
+            _require_supported_host(_host_version())
+        result = _METHODS[method](request.get("params") or {})
+        payload = {"ok": True, "result": result}
+    except Exception as exc:
+        payload = {
+            "ok": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+        # A typed refusal from the geometry tools carries a stable code, so the
+        # caller can branch on "why" instead of parsing a sentence.
+        code = getattr(exc, "code", None)
+        if code:
+            payload["error"]["code"] = code
+        # A read-back mismatch carries expected/actual across the process
+        # boundary verbatim, so the caller can act on the numbers instead of
+        # re-reading a sentence. A structured FEM failure carries its error code
+        # the same way: the code decides the next action, so it must survive the
+        # boundary as a field rather than as prose.
+        verification = getattr(exc, "payload", None)
+        if isinstance(verification, dict):
+            if verification.get("error_code"):
+                payload["error"]["error_code"] = verification["error_code"]
+                payload["error"]["fem_error"] = verification
+            else:
+                payload["error"]["write_verification"] = verification
+        # A sketch that must not be consumed carries the measured state that
+        # explains the refusal, so the caller can act on the numbers instead
+        # of re-reading a sentence that differs between host versions.
+        state = getattr(exc, "state_payload", None)
+        if isinstance(state, dict):
+            payload["error"]["sketch_state"] = state
+    with open(result_path, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# FEM structural analysis
+#
+# A structural solve is the one operation in this adapter whose answer can look
+# entirely plausible and still be wrong by three orders of magnitude: the solver
+# is unit-agnostic, so it converges just as happily on a load expressed in kN
+# when the caller meant N. Two guards make that impossible here.
+#
+#   * Every quantity entering the analysis carries its unit and is converted
+#     through a declared table (``fem_contract``). A bare float is refused
+#     rather than assumed.
+#   * The generated solver input is read back before any number is reported:
+#     node coordinates identify the unit schema the workbench actually wrote,
+#     and the summed ``*CLOAD`` block proves the applied force is the force that
+#     was asked for. An unverifiable schema is an error, never a guess.
+#
+# A solve never touches the caller's document: the bridge stages a copy into the
+# solver work directory, this driver only ever opens that copy, and the
+# resulting document object is never saved.
+# ---------------------------------------------------------------------------
+
+_CCX_BINARY_NAMES = ("ccx", "ccx_2.22", "ccx_2.21", "ccx_2.20", "ccx_2.19", "ccx_2.18")
+_GMSH_BINARY_NAMES = ("gmsh",)
+# FEM ships most of its objects as Python features: the type id you pass to
+# addObject is the *base* document type, and the behaviour lives in a Proxy that
+# must be attached afterwards. The friendly names ("Fem::SolverCcxTools",
+# "Fem::FemMeshGmsh") are only Proxy `Type` markers -- addObject rejects them.
+_SOLVER_TYPE_IDS = ("Fem::FemSolverObjectPython",)
+_SOLVER_PROXIES = (("femobjects.solver_ccxtools", "SolverCcxTools"),)
+_MESH_TYPE_IDS = ("Fem::FemMeshShapeBaseObjectPython",)
+_MESH_PROXIES = (("femobjects.mesh_gmsh", "MeshGmsh"),)
+_MATERIAL_TYPE_IDS = ("App::MaterialObjectPython",)
+_MATERIAL_PROXIES = (("femobjects.material_common", "MaterialCommon"),)
+_ANALYSIS_TYPE_ID = "Fem::FemAnalysis"
+_MESH_SIZE_PROPERTIES = ("CharacteristicLengthMax", "MeshSize", "MaxSize", "MaxElementSize")
+_MESH_GEOMETRY_PROPERTIES = ("Shape", "Part")
+_DEFAULT_MESH_SIZE_MM = 2.0
+_FEM_LOG_TAIL = 4000
+_FEM_ELEMENT_KINDS = {"Face": "Faces", "Edge": "Edges", "Vertex": "Vertexes"}
+
+
+def _fem_error(code, message, version, remediation=None, details=None, params=None):
+    return _fem_module().FemError(
+        code,
+        message,
+        remediation=remediation,
+        details=details,
+        host_version=version,
+        params=params,
+    )
+
+
+def _fem_preference(app, key, group):
+    """Read a FEM preference, tolerating a group path that moved across hosts."""
+    for base in (
+        "User parameter:BaseApp/Preferences/Mod/Fem/%s" % group,
+        "User parameter:BaseApp/Preferences/Mod/Fem",
+    ):
+        try:
+            value = (app.ParamGet(base).GetString(key, "") or "").strip()
+        except Exception:
+            value = ""
+        if value:
+            return value
+    return ""
+
+
+def _set_fem_preference(app, key, group, value):
+    """Point the workbench at a solver binary this driver found, best effort.
+
+    A host that ignores the write still runs: the binary is passed to the
+    solver explicitly as well, so this is a convenience for the workbench's own
+    prerequisite check, not the only channel.
+    """
+    try:
+        app.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/%s" % group).SetString(key, value)
+    except Exception:
+        pass
+
+
+def _discover_binary(names, preference_value):
+    """Resolve an external binary: an operator-configured path, then PATH."""
+    if preference_value:
+        candidate = os.path.abspath(os.path.expanduser(preference_value))
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return os.path.abspath(found)
+    return None
+
+
+_USAGE_OUTPUT_MARKERS = ("usage:", "usage ", "options:", "unknown option", "invalid option")
+
+
+def _binary_version(path):
+    """Ask a solver binary to identify itself; unavailability is not fatal.
+
+    These binaries disagree about the flag: ccx takes ``-v``, gmsh only
+    understands ``--version``. A version string is a line that carries a digit
+    and does not look like a usage message, so a binary that rejects the flag
+    yields ``None`` rather than a help banner reported as a version.
+    """
+    for flag in ("-v", "--version"):
+        try:
+            completed = subprocess.run(
+                [path, flag],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=30,
+            )
+        except Exception:
+            continue
+        text = (completed.stdout or "") + (completed.stderr or "")
+        for line in text.splitlines():
+            candidate = line.strip()
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            if any(marker in lowered for marker in _USAGE_OUTPUT_MARKERS):
+                continue
+            if any(character.isdigit() for character in candidate):
+                return candidate[:120]
+    return None
+    return None
+
+
+def _fem_objects_constructible(app):
+    """Build the FEM objects a solve needs in a throwaway document, then delete it.
+
+    A probe that only imports modules answers "is FEM installed", not "can a
+    solve run here". Constructing the objects answers the second question, and
+    the document is closed again so the probe leaves no state behind.
+    """
+    try:
+        doc = app.newDocument("DccMcpFemProbe")
+    except Exception as exc:
+        return {"ok": False, "message": "cannot open a probe document (%s)" % exc, "attempts": []}
+    attempts = []
+    try:
+        for label, type_ids, proxies in (
+            ("solver", _SOLVER_TYPE_IDS, _SOLVER_PROXIES),
+            ("mesh", _MESH_TYPE_IDS, _MESH_PROXIES),
+            ("material", _MATERIAL_TYPE_IDS, _MATERIAL_PROXIES),
+        ):
+            obj, _type_id, failed = _add_fem_python_object(doc, type_ids, proxies, "Probe" + label)
+            if obj is None:
+                attempts.extend({"object": label, **item} for item in failed)
+        if attempts:
+            return {
+                "ok": False,
+                "message": "cannot construct FEM objects: %s" % _format_attempts(attempts),
+                "attempts": attempts,
+            }
+        return {"ok": True, "message": None, "attempts": []}
+    finally:
+        try:
+            app.closeDocument(doc.Name)
+        except Exception:
+            pass
+
+
+def _fem_availability(app):
+    """Report what this host can actually do, without attempting a solve."""
+    contract = _fem_module()
+    version = _host_version()
+    blocking = []
+    try:
+        __import__("Fem")
+        fem_module = True
+    except Exception as exc:
+        fem_module = False
+        blocking.append(
+            {
+                "code": contract.FemError.ERROR_WORKBENCH_MISSING,
+                "message": "the FreeCAD FEM workbench is not importable (%s)" % exc,
+                "remediation": "Install a FreeCAD build that ships the FEM workbench.",
+            }
+        )
+    try:
+        __import__("femtools.ccxtools")
+        ccxtools = True
+    except Exception as exc:
+        ccxtools = False
+        blocking.append(
+            {
+                "code": contract.FemError.ERROR_SOLVER_API,
+                "message": "femtools.ccxtools is not importable (%s)" % exc,
+                "remediation": "Install a FreeCAD build that ships the FEM CalculiX solver tools.",
+            }
+        )
+    ccx = _discover_binary(_CCX_BINARY_NAMES, _fem_preference(app, "ccxBinaryPath", "Ccx"))
+    gmsh = _discover_binary(_GMSH_BINARY_NAMES, _fem_preference(app, "gmsh_binary_path", "Gmsh"))
+    if not ccx:
+        blocking.append(
+            {
+                "code": contract.FemError.ERROR_SOLVER_MISSING,
+                "message": "the CalculiX solver binary (ccx) was not found on PATH or in the FEM "
+                "preference ccxBinaryPath",
+                "remediation": "Install CalculiX (Debian/Ubuntu: `apt-get install calculix-ccx`; "
+                "conda: `conda install -c conda-forge calculix`) and either put `ccx` on PATH or "
+                "set the FreeCAD FEM preference Mod/Fem/Ccx/ccxBinaryPath to it.",
+            }
+        )
+    if not gmsh:
+        blocking.append(
+            {
+                "code": contract.FemError.ERROR_MESHER_MISSING,
+                "message": "the Gmsh mesher binary was not found on PATH or in the FEM preference "
+                "gmsh_binary_path",
+                "remediation": "Install Gmsh (Debian/Ubuntu: `apt-get install gmsh`; conda: "
+                "`conda install -c conda-forge gmsh`) and either put `gmsh` on PATH or set the "
+                "FreeCAD FEM preference Mod/Fem/Gmsh/gmsh_binary_path to it.",
+            }
+        )
+    # Importability is not the same as usability: a host can import Fem and ship
+    # both binaries yet still be unable to construct the objects a solve needs.
+    # Build each one in a throwaway document and throw it away, so the probe
+    # reports the same verdict a real solve would reach.
+    constructible = _fem_objects_constructible(app)
+    if not constructible["ok"]:
+        blocking.append(
+            {
+                "code": contract.FemError.ERROR_SOLVER_API,
+                "message": constructible["message"],
+                "remediation": "Install a FreeCAD build whose FEM workbench ships the "
+                "CalculiX solver, Gmsh mesh and solid material objects.",
+            }
+        )
+    return {
+        "host_version": version,
+        "fem_workbench": fem_module,
+        "solver_tools": ccxtools,
+        "objects_constructible": constructible,
+        "solver": {
+            "name": "calculix",
+            "binary": ccx,
+            "version": _binary_version(ccx) if ccx else None,
+        },
+        "mesher": {
+            "name": "gmsh",
+            "binary": gmsh,
+            "version": _binary_version(gmsh) if gmsh else None,
+        },
+        "available": not blocking,
+        "status": "ready" if not blocking else "host_limited",
+        "blocking": blocking,
+        "remediation": [item["remediation"] for item in blocking],
+    }
+
+
+def _is_fem_analysis(obj):
+    if obj is None:
+        return False
+    is_derived = getattr(obj, "isDerivedFrom", None)
+    if callable(is_derived):
+        try:
+            if is_derived(_ANALYSIS_TYPE_ID):
+                return True
+        except Exception:
+            pass
+    return str(getattr(obj, "TypeId", "")) == _ANALYSIS_TYPE_ID
+
+
+def _fem_checks(version, params):
+    """Bounded read-back recorder for one solve (see ``_ReadBack``)."""
+
+    class _Checks:
+        def __init__(self):
+            self.names = []
+
+        def record(self, name):
+            """Note a check that already ran, so it appears in the evidence."""
+            self.names.append(name)
+
+        def check(self, condition, name, expected, actual, code, remediation, extra=None):
+            """Fail with a named code, carrying whatever evidence the caller has.
+
+            ``extra`` is how solver output reaches the error surface. A failure
+            here often means the solver exited successfully but produced
+            nothing, and without its own output the only thing left to report is
+            the name of the check that failed -- which says nothing about why.
+            """
+            self.names.append(name)
+            if condition:
+                return True
+            details = {
+                "check": name,
+                "expected": _fem_module().jsonable(expected),
+                "actual": _fem_module().jsonable(actual),
+                "verified": self.names,
+            }
+            if extra:
+                details.update(extra)
+            raise _fem_error(
+                code,
+                "run_fem_analysis could not verify %s" % name,
+                version,
+                remediation=remediation,
+                details=details,
+                params=params,
+            )
+
+    return _Checks()
+
+
+def _element_resolves(shape, name, kind):
+    """True when this host resolves ``name`` to a real sub-element of ``shape``.
+
+    FreeCAD 1.0 moved sub-element naming, so a name that was valid on 1.0.x can
+    resolve to nothing on 1.1.x. The reference is only accepted when the host
+    resolves it to the sub-element the caller picked; otherwise the constraint
+    would silently apply to a different face (or none) and the solve would still
+    converge.
+    """
+    try:
+        found = shape.getElement(name)
+    except Exception:
+        return False
+    return getattr(found, "ShapeType", "") == kind
+
+
+def _face_entries(shape):
+    """Index-ordered face descriptors carrying the host's own element name."""
+    entries = []
+    for index, face in enumerate(getattr(shape, "Faces", ()) or (), start=1):
+        name = "Face%d" % index
+        center = getattr(face, "CenterOfMass", None)
+        normal = None
+        try:
+            u_min, u_max, v_min, v_max = face.ParameterRange
+            normal = face.normalAt((u_min + u_max) / 2.0, (v_min + v_max) / 2.0)
+        except Exception:
+            normal = None
+        entries.append(
+            {
+                "index": index,
+                "name": name,
+                "area": getattr(face, "Area", None),
+                "center": [center.x, center.y, center.z] if center is not None else None,
+                "normal": [normal.x, normal.y, normal.z] if normal is not None else None,
+                "resolves": _element_resolves(shape, name, "Face"),
+            }
+        )
+    return entries
+
+
+def _resolve_reference(doc, text, tool, version):
+    """Turn ``"Object:Face1"`` into a solved FEM reference tuple."""
+    contract = _fem_module()
+    object_name, element = contract.parse_reference(text)
+    kind = element.rstrip("0123456789")
+    collection_name = _FEM_ELEMENT_KINDS.get(kind)
+    if collection_name is None:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: unsupported sub-element type in %r" % (tool, text),
+            version,
+            remediation="Use a Face, Edge or Vertex reference.",
+        )
+    obj = doc.getObject(object_name)
+    if obj is None:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: the document has no object named %s" % (tool, object_name),
+            version,
+            remediation="Inspect the document and reference an object that exists.",
+        )
+    shape = getattr(obj, "Shape", None)
+    if shape is None or shape.isNull():
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: %s has no shape to constrain" % (tool, object_name),
+            version,
+            remediation="Reference an object with a non-null Part shape.",
+        )
+    index = int(element[len(kind) :])
+    if not 1 <= index <= len(getattr(shape, collection_name, ()) or ()):
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: %s has no %s" % (tool, object_name, element),
+            version,
+            remediation="Use list_faces to discover the references this host reports.",
+        )
+    if not _element_resolves(shape, element, kind):
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: this host does not resolve %r on %s" % (tool, text, object_name),
+            version,
+            remediation="Sub-element naming moved between FreeCAD releases; call list_faces "
+            "on this host and use a reference it reports as resolvable.",
+        )
+    return (obj, (element,)), {
+        "object": object_name,
+        "element": element,
+        "reference": "%s:%s" % (object_name, element),
+    }
+
+
+def _format_attempts(attempts):
+    """Render object-construction failures as one diagnostic line.
+
+    The original error text is kept: without it a host that rejects a type id is
+    indistinguishable from a host that is missing the workbench entirely.
+    """
+    if not attempts:
+        return "the host offered no candidate type"
+    return "; ".join(
+        "%s (%s): %s" % (item["type_id"], item["stage"], item["error"]) for item in attempts
+    )
+
+
+def _add_fem_python_object(doc, type_ids, proxies, name):
+    """Create a FEM Python-feature object, attaching the Proxy it needs.
+
+    FEM objects are documented by their friendly type name but created from a
+    generic base type id; without the Proxy the object has none of the
+    properties the solver workbench expects. Returns ``(object, type_id,
+    attempts)``; on failure the object is ``None`` and ``attempts`` carries the
+    error text for every stage tried, so a host that cannot build the object
+    says why instead of only saying that it cannot.
+    """
+    attempts = []
+    for type_id in type_ids:
+        obj = None
+        try:
+            obj = doc.addObject(type_id, name)
+        except Exception as exc:
+            attempts.append({"type_id": type_id, "stage": "addObject", "error": "%s" % exc})
+            continue
+        for module_path, class_name in proxies:
+            try:
+                module = __import__(module_path, fromlist=[class_name])
+                getattr(module, class_name)(obj)
+            except Exception as exc:
+                attempts.append(
+                    {
+                        "type_id": type_id,
+                        "stage": "%s.%s" % (module_path, class_name),
+                        "error": "%s" % exc,
+                    }
+                )
+                obj = None
+                break
+        if obj is not None:
+            return obj, type_id, attempts
+    return None, None, attempts
+
+
+def _set_first_property(obj, names, value):
+    """Set the first property in ``names`` the host exposes; return its name.
+
+    Host API drift is reported rather than absorbed: the caller decides whether
+    an unset property is fatal and names it in the result.
+    """
+    for name in names:
+        if not hasattr(obj, name):
+            continue
+        try:
+            setattr(obj, name, value)
+        except Exception:
+            continue
+        return name
+    return None
+
+
+def _create_fem_analysis(app, doc, params, version):
+    """Build a complete typed static analysis: mesh, material, fixed, load."""
+    contract = _fem_module()
+    tool = "analysis.run_fem"
+    target_name = params.get("target_object")
+    if not target_name:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s requires target_object when analysis_name is not given" % tool,
+            version,
+            remediation="Name the object to analyse, or pass analysis_name to reuse an analysis "
+            "the document already contains.",
+        )
+    target = doc.getObject(target_name)
+    if target is None:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: the document has no object named %s" % (tool, target_name),
+            version,
+        )
+    shape = getattr(target, "Shape", None)
+    if shape is None or shape.isNull() or not shape.isValid():
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: %s does not carry a valid shape" % (tool, target_name),
+            version,
+            remediation="Validate the document, then analyse an object with a valid solid.",
+        )
+    if not shape.Solids:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s: %s has no solid, so it cannot be meshed for a structural solve"
+            % (tool, target_name),
+            version,
+            remediation="Analyse a solid body.",
+        )
+    if params.get("load") is None:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_LOAD,
+            "%s requires load when analysis_name is not given" % tool,
+            version,
+            remediation="Pass load.force as a {value, unit} object plus a direction and faces.",
+        )
+    load = contract.load_payload(params["load"])
+    fixed_texts = [str(item) for item in (params.get("fixed_faces") or ())]
+    if not fixed_texts:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_REFERENCE,
+            "%s requires at least one entry in fixed_faces when analysis_name is not given" % tool,
+            version,
+            remediation="A static solve needs a restraint; name the faces to fix.",
+        )
+    if not load["faces"]:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_LOAD,
+            "%s requires load.faces" % tool,
+            version,
+            remediation="Name the faces the force is applied to.",
+        )
+    fixed_references = []
+    fixed_reported = []
+    for text in fixed_texts:
+        reference, reported = _resolve_reference(doc, text, tool, version)
+        fixed_references.append(reference)
+        fixed_reported.append(reported)
+    load_references = []
+    load_reported = []
+    for text in load["faces"]:
+        reference, reported = _resolve_reference(doc, text, tool, version)
+        load_references.append(reference)
+        load_reported.append(reported)
+    shared = sorted(
+        {item["reference"] for item in fixed_reported}
+        & {item["reference"] for item in load_reported}
+    )
+    if shared:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_LOAD,
+            "%s: %s is both fixed and loaded" % (tool, ", ".join(shared)),
+            version,
+            remediation="A face cannot carry a restraint and the applied load at once.",
+        )
+    for reference in fixed_references + load_references:
+        if reference[0] is not target:
+            raise _fem_error(
+                contract.FemError.ERROR_INVALID_REFERENCE,
+                "%s: every reference must belong to %s" % (tool, target_name),
+                version,
+            )
+    material = contract.material_payload(params.get("material"))
+    mesh_size = params.get("mesh_size") or {"value": _DEFAULT_MESH_SIZE_MM, "unit": "mm"}
+    if not isinstance(mesh_size, dict):
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_MESH_SIZE,
+            "%s: mesh_size must be a {value, unit} object" % tool,
+            version,
+        )
+    mesh_quantity = contract.quantity_payload(
+        mesh_size.get("value"), mesh_size.get("unit"), "length"
+    )
+    if mesh_quantity["value"] <= 0:
+        raise _fem_error(
+            contract.FemError.ERROR_INVALID_MESH_SIZE,
+            "%s: mesh_size must be positive" % tool,
+            version,
+        )
+
+    solver, solver_type_id, solver_attempts = _add_fem_python_object(
+        doc,
+        _SOLVER_TYPE_IDS,
+        _SOLVER_PROXIES,
+        "DccMcpSolverCcx",
+    )
+    if solver is None:
+        raise _fem_error(
+            contract.FemError.ERROR_SOLVER_API,
+            "%s: this host cannot build a CalculiX solver object; the attempts were: %s"
+            % (tool, _format_attempts(solver_attempts)),
+            version,
+            remediation="Install a FreeCAD build that ships the FEM CalculiX solver object.",
+            details={"attempts": solver_attempts},
+        )
+    analysis = doc.addObject(_ANALYSIS_TYPE_ID, "DccMcpAnalysis")
+    mesh, _mesh_type_id, mesh_attempts = _add_fem_python_object(
+        doc,
+        _MESH_TYPE_IDS,
+        _MESH_PROXIES,
+        "DccMcpMeshGmsh",
+    )
+    material_object, _material_type_id, material_attempts = _add_fem_python_object(
+        doc,
+        _MATERIAL_TYPE_IDS,
+        _MATERIAL_PROXIES,
+        "DccMcpMaterial",
+    )
+    if mesh is None or material_object is None:
+        raise _fem_error(
+            contract.FemError.ERROR_WORKBENCH_MISSING,
+            "%s: this host cannot build the FEM mesh/material objects; the attempts were: %s"
+            % (tool, _format_attempts(mesh_attempts + material_attempts)),
+            version,
+            remediation="Install a FreeCAD build that ships the FEM mesh and material objects.",
+            details={"attempts": mesh_attempts + material_attempts},
+        )
+    material_object.Category = "Solid"
+    fixed = doc.addObject("Fem::ConstraintFixed", "DccMcpConstraintFixed")
+    force = doc.addObject("Fem::ConstraintForce", "DccMcpConstraintForce")
+
+    # The mesh's geometry link is `Shape` (PropertyLinkGlobal) since FreeCAD 1.0;
+    # `Part` was the pre-1.0 Fem::FemMeshObjectPython name and no longer exists.
+    geometry_property = _set_first_property(mesh, _MESH_GEOMETRY_PROPERTIES, target)
+    if geometry_property is None:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: this host's FEM mesh object exposes none of %s, so no geometry can be "
+            "attached to the mesh" % (tool, ", ".join(_MESH_GEOMETRY_PROPERTIES)),
+            version,
+            remediation="Without a geometry link the mesher has nothing to mesh.",
+            details={"type_id": mesh.TypeId},
+        )
+    size_property = _set_first_property(mesh, _MESH_SIZE_PROPERTIES, mesh_quantity["value"])
+    if size_property is None:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: this host's FEM mesh object exposes none of %s, so the mesh size cannot be "
+            "controlled" % (tool, ", ".join(_MESH_SIZE_PROPERTIES)),
+            version,
+            remediation="An uncontrolled mesh size makes the result unverifiable.",
+        )
+    order_property = None
+    if hasattr(mesh, "ElementOrder"):
+        mesh.ElementOrder = "2nd"
+        order_property = "ElementOrder"
+    elif hasattr(mesh, "SecondOrder"):
+        mesh.SecondOrder = True
+        order_property = "SecondOrder"
+    if order_property is None:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: this host's FEM mesh object exposes no element order property" % tool,
+            version,
+            remediation="A first-order mesh is too stiff in bending to verify against an "
+            "analytic solution.",
+        )
+    # Building a mesh object only describes a mesh; the nodes exist once Gmsh has
+    # actually run. The solver reads the computed FemMesh, so without this step
+    # every solve reports "the mesher produced no nodes".
+    _run_mesher(app, doc, mesh, tool, version)
+
+    material_object.Material = {
+        "Name": material["name"],
+        "YoungsModulus": "%r MPa" % material["youngs_modulus"]["value"],
+        "PoissonRatio": str(material["poisson_ratio"]),
+        "Density": "%r t/mm^3" % material["density"]["value"],
+    }
+    fixed.References = fixed_references
+    force.References = load_references
+    force.Force = _force_quantity(app, load["force"]["value"])
+    # `Direction` is a PropertyLinkSub, so the axis is given as geometry; the
+    # host derives DirectionVector from it. Assigning a Base::Vector here throws
+    # `type must be 'DocumentObject' ... not Base.Vector` on both release lines.
+    direction_line, direction_sub = _direction_reference(
+        app, doc, load["unit_direction"], "DccMcpForceDirection"
+    )
+    force.Direction = (direction_line, direction_sub)
+    if hasattr(force, "Reversed"):
+        force.Reversed = False
+    if hasattr(solver, "AnalysisType"):
+        solver.AnalysisType = "static"
+
+    # Write-after-read: the host resolves the axis from the line we just made, so
+    # confirm it equals what was asked for. A silently reversed load converges to
+    # the same magnitudes and would pass a magnitude-only check.
+    applied_direction = _read_direction(app, force)
+    if applied_direction is not None:
+        requested = [float(component) for component in load["unit_direction"]]
+        if not _vectors_agree(applied_direction, requested):
+            raise _fem_error(
+                contract.FemError.ERROR_INVALID_LOAD,
+                "%s: the host resolved the load direction as %s but %s was requested"
+                % (tool, _format_vector(applied_direction), _format_vector(requested)),
+                version,
+                remediation="The load axis is taken from reference geometry; the direction "
+                "the host derived does not match the requested one.",
+                details={"requested": requested, "applied": list(applied_direction)},
+            )
+
+    for member in (solver, mesh, material_object, fixed, force):
+        analysis.addObject(member)
+    return {
+        "analysis": analysis,
+        "solver": solver,
+        "mesh": mesh,
+        "material_object": material_object,
+        "force": force,
+        "fixed": fixed,
+        "target": target,
+        "material": material,
+        "load": load,
+        "fixed_reported": fixed_reported,
+        "load_reported": load_reported,
+        "mesh_size": mesh_quantity,
+        "size_property": size_property,
+        "order_property": order_property,
+    }
+
+
+def _read_direction(app, force):
+    """Read the axis the host resolved for a force constraint, or ``None``.
+
+    ``DirectionVector`` is what the solver actually uses and is maintained by the
+    host from the geometry reference, so it is the value worth verifying. A host
+    that has not resolved it yet reports the zero vector, which is not a
+    direction and so is not compared.
+    """
+    vector = getattr(force, "DirectionVector", None)
+    if vector is None:
+        return None
+    length = getattr(vector, "Length", None)
+    if length is None:
+        return None
+    if length < 1e-9:
+        return None
+    return (vector.x, vector.y, vector.z)
+
+
+def _vectors_agree(applied, requested, tolerance=1e-6):
+    """Compare two direction triplets, tolerating a host that does not normalize.
+
+    The reference geometry yields a unit vector, but the check should not fail on
+    a host that reports a scaled one, so compare after normalizing both.
+    """
+    applied_norm = math.sqrt(sum(component * component for component in applied))
+    requested_norm = math.sqrt(sum(component * component for component in requested))
+    if applied_norm < 1e-9 or requested_norm < 1e-9:
+        return False
+    scaled = [component / applied_norm for component in applied]
+    wanted = [component / requested_norm for component in requested]
+    return all(abs(a - b) <= tolerance for a, b in zip(scaled, wanted))
+
+
+def _format_vector(vector):
+    return "[%s]" % ", ".join("%.6g" % component for component in vector)
+
+
+def _direction_reference(app, doc, unit_direction, name="DccMcpForceDirection"):
+    """Build a line along ``unit_direction`` and return it as a (object, sub) pair.
+
+    ``Fem::ConstraintForce.Direction`` is an ``App::PropertyLinkSub``: the host
+    derives the load axis from referenced geometry, not from a vector, and
+    ``DirectionVector`` is read-only so it cannot be written directly. The
+    reference is therefore the only way to state a direction, and a line from
+    the origin along the requested axis is the simplest geometry that yields it:
+    ``Fem::Tools::getDirectionFromShape`` takes a linear edge's own direction,
+    which is already a unit vector.
+
+    The line is placed outside the target's bounding box so it can never be
+    mistaken for part of the model being meshed.
+    """
+    origin = app.Vector(0.0, 0.0, 0.0)
+    tip = app.Vector(*[float(component) for component in unit_direction])
+    if tip.Length < 1e-9:
+        raise ValueError("a force direction must not be the zero vector")
+    line = doc.addObject("Part::Line", name)
+    line.X1, line.Y1, line.Z1 = origin.x, origin.y, origin.z
+    line.X2, line.Y2, line.Z2 = tip.x, tip.y, tip.z
+    return line, ["Edge1"]
+
+
+def _force_quantity(app, newtons):
+    """Express a force in N the way this host stores it, preferring a Quantity."""
+    units = getattr(app, "Units", None)
+    if units is not None:
+        try:
+            return units.Quantity("%.17g N" % newtons)
+        except Exception:
+            pass
+    return float(newtons)
+
+
+def _read_force_newtons(app, force):
+    """Read a constraint force back as newtons, whatever the host stores.
+
+    A host that stores a plain float gives no unit with it, so the value is
+    reported as newtons but is not trusted: the summed ``*CLOAD`` block of the
+    generated input is what actually proves the magnitude.
+    """
+    value = getattr(force, "Force", None)
+    getter = getattr(value, "getValueAs", None)
+    if callable(getter):
+        try:
+            return getter("N"), True
+        except Exception:
+            pass
+    if hasattr(value, "Value"):
+        return float(value.Value), True
+    return float(value), False
+
+
+def _fem_tools(analysis, solver, version):
+    """Instantiate the host's CalculiX driver, whatever its constructor takes."""
+    contract = _fem_module()
+    try:
+        __import__("femtools.ccxtools")
+        ccxtools = sys.modules["femtools.ccxtools"]
+    except Exception as exc:
+        raise _fem_error(
+            contract.FemError.ERROR_SOLVER_API,
+            "femtools.ccxtools is not importable (%s)" % exc,
+            version,
+            remediation="Install a FreeCAD build that ships the FEM CalculiX solver tools.",
+        ) from None
+    import inspect
+
+    try:
+        parameters = inspect.signature(ccxtools.FemToolsCcx).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    keyword_arguments = {}
+    if "analysis" in parameters:
+        keyword_arguments["analysis"] = analysis
+    if "solver" in parameters:
+        keyword_arguments["solver"] = solver
+    try:
+        return ccxtools.FemToolsCcx(**keyword_arguments)
+    except TypeError as exc:
+        raise _fem_error(
+            contract.FemError.ERROR_SOLVER_API,
+            "FemToolsCcx does not accept this host's constructor signature (%s)" % exc,
+            version,
+            remediation="The FEM solver API moved outside the verified matrix; pin a supported "
+            "FreeCAD.",
+        ) from None
+
+
+def _run_mesher(app, doc, mesh, tool, version):
+    """Generate the mesh described by ``mesh`` and verify nodes were produced.
+
+    A Gmsh mesh object is inert until the mesher runs: ``addObject`` plus its
+    Proxy only create the object and its properties. ``GmshTools.create_mesh()``
+    is the entry point FreeCAD itself uses (see the worked example in
+    ``femmesh/gmshtools.py``), and it returns an error string rather than
+    raising, so the return value has to be checked explicitly.
+
+    The failure is reported with the mesher's own message: "no nodes" on its own
+    does not say whether Gmsh was missing, refused the geometry, or silently
+    produced an empty mesh.
+    """
+    contract = _fem_module()
+    try:
+        from femmesh.gmshtools import GmshTools  # noqa: PLC0415
+
+        mesher = GmshTools(mesh)
+    except Exception as exc:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: the Gmsh mesher could not be started: %s" % (tool, exc),
+            version,
+            remediation="This host ships no Gmsh mesher for the FEM workbench.",
+        ) from None
+    create = getattr(mesher, "create_mesh", None)
+    if not callable(create):
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: this host's Gmsh mesher exposes no create_mesh method" % tool,
+            version,
+            remediation="The mesh cannot be generated, so there is nothing to solve.",
+        )
+    try:
+        error = create()
+    except Exception as exc:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: the Gmsh mesher failed: %s" % (tool, exc),
+            version,
+            remediation="Check that gmsh is installed and the geometry is meshable.",
+        ) from None
+    if error:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: the Gmsh mesher reported: %s" % (tool, error),
+            version,
+            remediation="The mesh was not generated, so there is nothing to solve.",
+        )
+    doc.recompute()
+    node_count = getattr(getattr(mesh, "FemMesh", None), "NodeCount", 0) or 0
+    if node_count <= 0:
+        raise _fem_error(
+            contract.FemError.ERROR_MESHER_MISSING,
+            "%s: the mesher finished but produced no nodes" % tool,
+            version,
+            remediation="An empty mesh means the solver has nothing to solve; check the "
+            "mesh size and the geometry being meshed.",
+            details={"size_property": getattr(mesh, "CharacteristicLengthMax", None)},
+        )
+    return node_count
+
+
+def _fem_call(fea, names, version, failure_code, what):
+    """Call the first method in ``names`` the host's solver driver exposes.
+
+    Every FEM driver call is version-sensitive, and a missing method is a
+    different failure from a failing one: the first is named as an API gap, the
+    second propagates with the host's own message.
+    """
+    contract = _fem_module()
+    for name in names:
+        function = getattr(fea, name, None)
+        if not callable(function):
+            continue
+        try:
+            function()
+        except TypeError:
+            continue
+        except Exception as exc:
+            raise _fem_error(
+                contract.FemError.ERROR_SOLVER_API if failure_code is None else failure_code,
+                "%s failed: %s" % (what, exc),
+                version,
+            ) from None
+        return name
+    raise _fem_error(
+        contract.FemError.ERROR_SOLVER_API,
+        "the host's FEM solver driver exposes none of %s, so %s is impossible"
+        % (", ".join("%s()" % name for name in names), what),
+        version,
+        remediation="The FEM solver API moved outside the verified matrix; pin a supported "
+        "FreeCAD.",
+    )
+
+
+def _setup_working_dir(fea, workdir):
+    function = getattr(fea, "setup_working_dir", None)
+    if not callable(function):
+        return None
+    try:
+        function(workdir)
+    except TypeError:
+        function()
+    return "setup_working_dir"
+
+
+def _latest_input_file(workdir):
+    newest = None
+    newest_mtime = -1.0
+    for name in os.listdir(workdir):
+        if not name.lower().endswith(".inp"):
+            continue
+        path = os.path.join(workdir, name)
+        if not os.path.isfile(path):
+            continue
+        mtime = os.path.getmtime(path)
+        if mtime >= newest_mtime:
+            newest_mtime = mtime
+            newest = path
+    return newest
+
+
+def _parse_cload(path):
+    """Sum a CalculiX ``*CLOAD`` block per degree of freedom.
+
+    Returns ``{1: fx, 2: fy, 3: fz}`` in the unit the input was written with, or
+    ``None`` when the block is absent. ``None`` and a block of zeros are
+    deliberately different results: the first means the load was never written
+    and cannot be checked, the second means it was written as nothing, which is a
+    real mismatch the caller must see.
+
+    This is the read-back that turns a silent 1000x force error into a named
+    mismatch: the workbench distributes the constraint force over the referenced
+    face's nodes, so the components sum to the total the analysis applies.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    totals = {}
+    inside = False
+    seen = False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # CalculiX comments are `**`; keywords are a single `*`. Upstream
+                # writes a `** <label>` line after `*CLOAD` and again before each
+                # referenced shape's node rows, so a comment line must be skipped
+                # without touching `inside` -- treating it as a keyword ends the
+                # block and every node row is then discarded.
+                if stripped.startswith("**"):
+                    continue
+                if stripped.startswith("*"):
+                    inside = stripped.upper().startswith("*CLOAD")
+                    seen = seen or inside
+                    continue
+                if not inside:
+                    continue
+                parts = [item.strip() for item in stripped.split(",")]
+                parts = [item for item in parts if item]
+                if len(parts) < 3:
+                    continue
+                try:
+                    degree = int(float(parts[1]))
+                    value = float(parts[2])
+                except (TypeError, ValueError):
+                    continue
+                if degree not in (1, 2, 3):
+                    continue
+                totals[degree] = totals.get(degree, 0.0) + value
+    except OSError:
+        return None
+    if not seen:
+        return None
+    return {degree: totals.get(degree, 0.0) for degree in (1, 2, 3)}
+
+
+def _parse_node_extents(path):
+    """Measure the axis extents of a CalculiX ``*NODE`` block."""
+    if not path or not os.path.isfile(path):
+        return None
+    minima = [None, None, None]
+    maxima = [None, None, None]
+    inside = False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # `**` is a CalculiX comment, not a keyword; it must not end the
+                # block. See _parse_cload for why this matters.
+                if stripped.startswith("**"):
+                    continue
+                if stripped.startswith("*"):
+                    inside = stripped.upper().startswith("*NODE")
+                    continue
+                if not inside:
+                    continue
+                parts = [item.strip() for item in stripped.split(",")]
+                parts = [item for item in parts if item]
+                if len(parts) < 4:
+                    continue
+                try:
+                    coordinates = [float(item) for item in parts[1:4]]
+                except (TypeError, ValueError):
+                    continue
+                for axis, value in enumerate(coordinates):
+                    if minima[axis] is None or value < minima[axis]:
+                        minima[axis] = value
+                    if maxima[axis] is None or value > maxima[axis]:
+                        maxima[axis] = value
+    except OSError:
+        return None
+    if any(item is None for item in minima):
+        return None
+    return [maxima[axis] - minima[axis] for axis in range(3)]
+
+
+def _run_ccx(binary, input_path, workdir, timeout, version):
+    """Run CalculiX on a written input and return its exit code and logs."""
+    contract = _fem_module()
+    stem = os.path.basename(input_path)[: -len(".inp")]
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            [binary, stem],
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=timeout,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or "" if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr or "" if isinstance(exc.stderr, str) else ""
+        _write_fem_logs(workdir, stdout, stderr)
+        raise _fem_error(
+            contract.FemError.ERROR_SOLVER_TIMEOUT,
+            "CalculiX exceeded the %.1f second solver budget" % timeout,
+            version,
+            remediation="The partial solver output is in the reported solver_workdir; retry with "
+            "a coarser mesh_size or a larger timeout_secs.",
+            details={
+                "solver_workdir": workdir,
+                "input_file": input_path,
+                "elapsed_secs": round(time.monotonic() - started, 3),
+                "partial_stdout": stdout[-_FEM_LOG_TAIL:],
+                "partial_stderr": stderr[-_FEM_LOG_TAIL:],
+            },
+        ) from None
+    log_paths = _write_fem_logs(workdir, stdout, stderr)
+    if returncode != 0:
+        raise _fem_error(
+            contract.FemError.ERROR_SOLVER_FAILED,
+            "CalculiX exited with code %s" % returncode,
+            version,
+            remediation="Read the solver log in the reported solver_workdir; a non-zero exit "
+            "means the analysis did not converge, so no result is reported.",
+            details={
+                "solver_workdir": workdir,
+                "input_file": input_path,
+                "exit_code": returncode,
+                "stdout": stdout[-_FEM_LOG_TAIL:],
+                "stderr": stderr[-_FEM_LOG_TAIL:],
+            },
+        )
+    # A zero exit does not mean the analysis was solved: CalculiX can report
+    # success and still write a .frd with nodes but no result set, which surfaces
+    # later as an empty result. Detect it here, where the solver's own output is
+    # still in hand, instead of leaving it to a downstream node-count check that
+    # cannot say why.
+    frd_path = os.path.join(str(workdir), "%s.frd" % stem)
+    if os.path.isfile(frd_path):
+        if not _frd_has_results(frd_path):
+            raise _fem_error(
+                contract.FemError.ERROR_RESULTS_MISSING,
+                "CalculiX exited with code 0 but wrote no result set",
+                version,
+                remediation="The solver did not produce results; this is what a degenerate mesh "
+                "(for example a non-positive jacobian) or an unconstrained model looks like. "
+                "Retry with a coarser mesh_size and check that restraints and loads land on "
+                "nodes of the mesh.",
+                details={
+                    "solver_workdir": workdir,
+                    "input_file": input_path,
+                    "frd_file": frd_path,
+                    "exit_code": returncode,
+                    "stdout": stdout[-_FEM_LOG_TAIL:],
+                    "stderr": stderr[-_FEM_LOG_TAIL:],
+                },
+            )
+    return {
+        "exit_code": returncode,
+        "command": [binary, stem],
+        "duration_secs": round(time.monotonic() - started, 3),
+        "stdout_file": log_paths[0],
+        "stderr_file": log_paths[1],
+        "stdout_tail": stdout[-_FEM_LOG_TAIL:],
+        "stderr_tail": stderr[-_FEM_LOG_TAIL:],
+        "frd_file": frd_path if os.path.isfile(frd_path) else None,
+    }
+
+
+def _write_fem_logs(workdir, stdout, stderr):
+    """Keep the solver's own output next to its other artefacts."""
+    paths = []
+    for name, text in (("dcc-mcp-ccx.stdout.log", stdout), ("dcc-mcp-ccx.stderr.log", stderr)):
+        path = os.path.join(workdir, name)
+        try:
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(text or "")
+        except OSError:
+            pass
+        paths.append(path)
+    return paths
+
+
+def _frd_has_results(path):
+    """True when a CalculiX ``.frd`` carries at least one result dataset.
+
+    A .frd can contain the node coordinates and nothing else: the solver wrote
+    the mesh but no displacements or stresses. That file parses cleanly, the
+    reader builds an empty result object, and the failure only surfaces later
+    as a zero node count that says nothing about the cause.
+
+    The markers, as they appear in FreeCAD's own golden result files:
+
+    - ``2C`` starts the node coordinate block and ``3C`` the element block, so
+      neither is a result.
+    - A result dataset header starts with ``100C`` (written as ``100CL``).
+    - The step key ``1PSTEP`` sits *before* the header it belongs to -- and not
+      adjacent to it, the offset differs between analyses -- so it cannot be
+      used to validate a header.
+
+    So a result is present when a dataset header exists **and** a component
+    record follows it; requiring the component is what rules out a header with
+    no values under it. The file is read streaming: a result file is large and
+    the answer is usually in the first block.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as stream:
+            header_seen = False
+            for line in stream:
+                if not line.strip():
+                    continue
+                token = line.split(None, 1)[0] if line.split(None, 1) else ""
+                if token.startswith("100C"):
+                    header_seen = True
+                    continue
+                if not header_seen:
+                    continue
+                # -4 <name> opens a result component (DISP, STRESS, TOSTRAIN, ...)
+                # and -5 opens one of its value records.
+                if token in ("-4", "-5"):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _solver_evidence(workdir, solver_run=None):
+    """Collect whatever the solver left behind, for the failure details.
+
+    A solve can exit successfully and still produce nothing usable, so the exit
+    code alone cannot explain an empty result. This reads the logs back from
+    disk as well as taking the captured tails, because the artefacts on disk are
+    what a caller can actually go and read afterwards.
+    """
+    evidence = {"solver_workdir": str(workdir)}
+    if solver_run:
+        evidence["solver_exit_code"] = solver_run.get("exit_code")
+        evidence["solver_duration_secs"] = solver_run.get("duration_secs")
+        for key in ("stdout_tail", "stderr_tail"):
+            if solver_run.get(key):
+                evidence[key] = solver_run[key]
+        for key in ("stdout_file", "stderr_file"):
+            if solver_run.get(key):
+                evidence[key] = solver_run[key]
+    for name, key in (
+        ("dcc-mcp-ccx.stdout.log", "ccx_stdout_from_disk"),
+        ("dcc-mcp-ccx.stderr.log", "ccx_stderr_from_disk"),
+    ):
+        path = os.path.join(str(workdir), name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as stream:
+                text = stream.read(_FEM_LOG_TAIL)
+        except OSError:
+            continue
+        if text.strip():
+            evidence[key] = text
+    return evidence
+
+
+def _result_object(analysis):
+    for obj in getattr(analysis, "Group", ()) or ():
+        is_derived = getattr(obj, "isDerivedFrom", None)
+        if callable(is_derived):
+            try:
+                if is_derived("Fem::FemResultObject"):
+                    return obj
+            except Exception:
+                pass
+        if "Result" in str(getattr(obj, "TypeId", "")):
+            return obj
+    return None
+
+
+def _extract_results(result, axis=None):
+    """Pull bounded, finite scalars out of a FreeCAD FEM result object.
+
+    ``axis``, when given, is the requested load direction: the extreme signed
+    displacement along it is reported alongside the magnitudes, because a
+    magnitude alone cannot distinguish a load applied along an axis from the
+    same load applied against it.
+    """
+    mesh = getattr(result, "Mesh", None)
+    nodes = getattr(mesh, "Nodes", None)
+    node_count = len(nodes) if nodes is not None else int(getattr(result, "NodeCount", 0) or 0)
+    von_mises = [float(item) for item in (getattr(result, "vonMises", None) or ())]
+    vectors = getattr(result, "DisplacementVectors", None) or ()
+    magnitudes = []
+    signed = []
+    for vector in vectors:
+        x = getattr(vector, "x", 0.0)
+        y = getattr(vector, "y", 0.0)
+        z = getattr(vector, "z", 0.0)
+        magnitudes.append(math.sqrt(x * x + y * y + z * z))
+        if axis is not None:
+            signed.append(x * axis[0] + y * axis[1] + z * axis[2])
+    return {
+        "node_count": node_count,
+        "max_von_mises": max(von_mises) if von_mises else None,
+        "min_von_mises": min(von_mises) if von_mises else None,
+        "max_displacement": max(magnitudes) if magnitudes else None,
+        "min_displacement": min(magnitudes) if magnitudes else None,
+        "axis_displacement": (max(signed, key=abs) if signed else None),
+    }
+
+
+def analysis_list_faces(params):
+    """Report the faces of one object with the references this host resolves."""
+    import FreeCAD as App
+
+    tool = "analysis.list_faces"
+    doc = _open_document(App, _required(params, "document_path", tool))
+    try:
+        object_name = _required(params, "object_name", tool)
+        obj = doc.getObject(object_name)
+        if obj is None:
+            raise ValueError("Object does not exist: %s" % object_name)
+        shape = getattr(obj, "Shape", None)
+        if shape is None or shape.isNull():
+            raise ValueError("Object has no shape: %s" % object_name)
+        faces = _face_entries(shape)
+        for face in faces:
+            face["reference"] = "%s:%s" % (obj.Name, face["name"])
+        return {
+            "object_name": obj.Name,
+            "face_count": len(faces),
+            "solids": len(shape.Solids),
+            "faces": faces,
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def system_fem_probe(_params):
+    """Report what this host can do, without attempting a solve."""
+    import FreeCAD as App
+
+    return _fem_availability(App)
+
+
+def analysis_run_fem(params):
+    """Solve one static structural case and report it with verified units."""
+    import FreeCAD as App
+
+    contract = _fem_module()
+    tool = "analysis.run_fem"
+    version = _host_version()
+    workdir = os.path.abspath(str(_required(params, "workdir", tool)))
+    if not os.path.isdir(workdir):
+        raise ValueError("Solver work directory does not exist: %s" % workdir)
+    solver_timeout = float(params.get("solver_timeout_secs") or 600)
+    if not math.isfinite(solver_timeout) or solver_timeout <= 0:
+        raise ValueError("solver_timeout_secs must be a positive finite number")
+
+    availability = _fem_availability(App)
+    if not availability["available"]:
+        raise _fem_error(
+            contract.FemError.ERROR_HOST_LIMITED,
+            "this host cannot run a structural solve",
+            version,
+            remediation=" ".join(availability["remediation"]),
+            details=availability,
+            params=params,
+        )
+    ccx = availability["solver"]["binary"]
+    _set_fem_preference(App, "ccxBinaryPath", "Ccx", ccx)
+    _set_fem_preference(App, "gmsh_binary_path", "Gmsh", availability["mesher"]["binary"])
+
+    checks = _fem_checks(version, params)
+    doc = _open_document(App, _required(params, "document_path", tool))
+    try:
+        analysis_name = params.get("analysis_name")
+        built = None
+        mode = "reused"
+        if analysis_name:
+            analysis = doc.getObject(str(analysis_name))
+            if not _is_fem_analysis(analysis):
+                raise _fem_error(
+                    contract.FemError.ERROR_NO_ANALYSIS,
+                    "%s: the document has no FEM analysis named %s" % (tool, analysis_name),
+                    version,
+                    remediation="Inspect the document for an existing Fem::FemAnalysis, or omit "
+                    "analysis_name to have one built.",
+                )
+        else:
+            mode = "created"
+            built = _create_fem_analysis(App, doc, params, version)
+            analysis = built["analysis"]
+        doc.recompute()
+
+        members = list(getattr(analysis, "Group", ()) or ())
+        solver = (
+            built["solver"]
+            if built
+            else next(
+                (
+                    obj
+                    for obj in members
+                    if "Solver" in str(getattr(obj, "TypeId", ""))
+                    or "Ccx" in str(getattr(obj, "TypeId", ""))
+                ),
+                None,
+            )
+        )
+        if solver is None:
+            raise _fem_error(
+                contract.FemError.ERROR_NO_ANALYSIS,
+                "%s: the analysis contains no solver object" % tool,
+                version,
+                remediation="Add a CalculiX solver to the analysis, or omit analysis_name.",
+            )
+        if hasattr(solver, "WorkingDir"):
+            solver.WorkingDir = workdir
+        if built is not None:
+            mesh = built["mesh"]
+            mesh_nodes = getattr(getattr(mesh, "FemMesh", None), "NodeCount", 0) or 0
+            checks.check(
+                mesh_nodes > 0,
+                "mesh.node_count",
+                ">0",
+                mesh_nodes,
+                contract.FemError.ERROR_MESHER_MISSING,
+                "The mesher produced no nodes, so there is nothing to solve.",
+            )
+
+        fea = _fem_tools(analysis, solver, version)
+        # FemToolsCcx does not resolve the analysis members in its constructor:
+        # `self.mesh` is only bound by update_objects(), and without it
+        # check_prerequisites() raises AttributeError. Upstream's own run() calls
+        # update_objects -> setup_working_dir -> check_prerequisites in that
+        # order; skipping the first step is why the solve died before writing
+        # any input.
+        updater = getattr(fea, "update_objects", None)
+        if callable(updater):
+            updater()
+        _setup_working_dir(fea, workdir)
+        prerequisites = ""
+        checker = getattr(fea, "check_prerequisites", None)
+        if callable(checker):
+            try:
+                prerequisites = checker() or ""
+            except TypeError:
+                # An older signature that takes an argument; there is nothing to
+                # pass here, so fall back to letting the solver's own checks run.
+                prerequisites = ""
+            except AttributeError as exc:
+                # The solver driver is missing state it should have resolved. Let
+                # it out as a coded failure: swallowing this yields an error with
+                # no code, which a caller cannot branch on.
+                raise _fem_error(
+                    contract.FemError.ERROR_SOLVER_API,
+                    "the FEM solver driver is not ready to check its prerequisites: %s" % exc,
+                    version,
+                    remediation="The analysis members could not be resolved; check that the "
+                    "analysis contains a mesh, a material, a restraint and a load.",
+                ) from None
+        if prerequisites:
+            raise _fem_error(
+                contract.FemError.ERROR_PREREQUISITES,
+                "the FEM solver refused the analysis: %s" % prerequisites,
+                version,
+                remediation="Complete the analysis in FreeCAD (mesh, material, at least one "
+                "restraint and one load), or omit analysis_name to have one built.",
+                details={"prerequisites": str(prerequisites)},
+            )
+        _fem_call(
+            fea,
+            ("write_inp_file", "setup_ccx"),
+            version,
+            contract.FemError.ERROR_WRITE_FAILED,
+            "writing the solver input",
+        )
+        input_path = _latest_input_file(workdir)
+        if input_path is None:
+            raise _fem_error(
+                contract.FemError.ERROR_WRITE_FAILED,
+                "no CalculiX input file was produced in %s" % workdir,
+                version,
+                details={"solver_workdir": workdir, "listing": sorted(os.listdir(workdir))[:200]},
+            )
+
+        # Unit schema detection: the workbench writes its input in a
+        # configurable unit schema, so a result is meaningless until that schema
+        # is known. Node coordinates measured against the target's real extent
+        # name the length unit, and the length unit names the rest.
+        schema = None
+        expected_extents = None
+        if built is not None:
+            box = getattr(built["target"].Shape, "BoundBox", None)
+            expected_extents = [box.XLength, box.YLength, box.ZLength] if box is not None else None
+            observed = _parse_node_extents(input_path)
+            length_unit = (
+                contract.match_length_scale(observed, expected_extents)
+                if observed is not None and expected_extents is not None
+                else None
+            )
+            if length_unit is None:
+                raise _fem_error(
+                    contract.FemError.ERROR_UNIT_SCHEMA_UNKNOWN,
+                    "the unit schema of %s could not be identified from its node coordinates"
+                    % input_path,
+                    version,
+                    remediation="Set the FreeCAD FEM unit schema preference to a supported "
+                    "schema (mm-N-s, SI or imperial) and retry.",
+                    details={
+                        "input_file": input_path,
+                        "observed_node_extents": observed,
+                        "expected_extents_mm": expected_extents,
+                        "supported_length_units": sorted(contract.SCHEMA_BY_LENGTH_UNIT),
+                    },
+                    params=params,
+                )
+            force_unit, stress_unit = contract.unit_schema_for_length(length_unit)
+            schema = {
+                "length": length_unit,
+                "force": force_unit,
+                "stress": stress_unit,
+                "source": "detected_from_solver_input",
+                "observed_node_extents": observed,
+                "expected_extents_mm": expected_extents,
+            }
+            checks.record("unit_schema.detected")
+            # Force read-back: the summed *CLOAD block is what proves the
+            # magnitude actually reached the solver. A bare-float force property
+            # carries no unit, so this is the check, not the property.
+            totals = _parse_cload(input_path)
+            if totals is None:
+                raise _fem_error(
+                    contract.FemError.ERROR_UNIT_READBACK,
+                    "no *CLOAD block was found in %s, so the applied force cannot be verified"
+                    % input_path,
+                    version,
+                    remediation="Refusing to report results whose load was never proven.",
+                    details={"input_file": input_path},
+                    params=params,
+                )
+            requested = built["load"]["force"]["value"]
+            # The workbench writes the load with `Force.getValueAs("N")`, and the
+            # CalculiX writer's units_information block states Force: N -- the
+            # unit schema only governs lengths and masses upstream, not forces.
+            # Dividing by the schema's force factor here would compare a newton
+            # value against a scaled expectation.
+            expected_vector = [
+                component * requested for component in built["load"]["unit_direction"]
+            ]
+            actual_vector = [totals[1], totals[2], totals[3]]
+            # The workbench spreads the constraint force across the referenced
+            # face's nodes, so the summed components approximate the total rather
+            # than equalling it. Upstream itself only flags a deviation beyond 1%
+            # (femmesh/meshtools.py), so a tighter tolerance here rejects meshes
+            # that are genuinely correct.
+            checks.check(
+                _contract_module().sequences_match(
+                    expected_vector, actual_vector, rel_tolerance=1e-2
+                ),
+                "load.total_force",
+                {
+                    "vector": expected_vector,
+                    "unit": force_unit,
+                    "requested_N": requested,
+                },
+                {"vector": actual_vector, "unit": force_unit},
+                contract.FemError.ERROR_UNIT_READBACK,
+                "The force the solver was given does not match the force that was asked for; "
+                "this is the failure mode a unit mix-up produces.",
+            )
+            material_object = built["material_object"]
+            applied_modulus = None
+            try:
+                applied_modulus = App.Units.Quantity(
+                    str((material_object.Material or {}).get("YoungsModulus"))
+                ).getValueAs("MPa")
+            except Exception:
+                applied_modulus = None
+            checks.check(
+                applied_modulus is not None
+                and _contract_module().numbers_match(
+                    built["material"]["youngs_modulus"]["value"], applied_modulus
+                ),
+                "material.youngs_modulus",
+                built["material"]["youngs_modulus"]["value"],
+                applied_modulus,
+                contract.FemError.ERROR_INVALID_MATERIAL,
+                "The material that reached the analysis is not the material that was requested.",
+            )
+            stored_force = len(getattr(built["force"], "References", ()) or ())
+            checks.check(
+                stored_force == len(built["load_reported"]),
+                "load.references",
+                len(built["load_reported"]),
+                stored_force,
+                contract.FemError.ERROR_INVALID_REFERENCE,
+                "The force constraint does not reference the requested faces.",
+            )
+            stored_newtons, force_unit_known = _read_force_newtons(App, built["force"])
+            checks.check(
+                not force_unit_known
+                or _contract_module().numbers_match(requested, stored_newtons, rel_tolerance=1e-9),
+                "load.property",
+                requested,
+                stored_newtons,
+                contract.FemError.ERROR_UNIT_READBACK,
+                "The force stored on the constraint does not match the request.",
+            )
+
+        solver_run = _run_ccx(ccx, input_path, workdir, solver_timeout, version)
+        solver_evidence = _solver_evidence(workdir, solver_run)
+        _fem_call(
+            fea,
+            ("load_results", "ccx_results", "get_results"),
+            version,
+            contract.FemError.ERROR_RESULTS_MISSING,
+            "loading the solver results",
+        )
+        result = _result_object(analysis)
+        # A result object existing is not the same as it holding results: when
+        # the .frd has nodes but no result set, upstream builds an empty result
+        # object rather than reporting failure, so the mesh is what proves it.
+        if result is not None and getattr(result, "Mesh", None) is None:
+            result = None
+        checks.check(
+            result is not None,
+            "results.present",
+            "a result object holding a result mesh",
+            None,
+            contract.FemError.ERROR_RESULTS_MISSING,
+            "The solver reported success but no usable result object was created.",
+            extra=solver_evidence,
+        )
+        # Reused analyses have no requested direction, and the signed component
+        # is only meaningful against one; fall back to magnitudes there.
+        axis = built["load"]["unit_direction"] if built is not None else None
+        extracted = _extract_results(result, axis)
+        checks.check(
+            extracted["node_count"] > 0,
+            "results.node_count",
+            ">0",
+            extracted["node_count"],
+            contract.FemError.ERROR_RESULTS_MISSING,
+            "An empty result set is not a result.",
+            extra=solver_evidence,
+        )
+        checks.check(
+            extracted["max_displacement"] is not None
+            and math.isfinite(extracted["max_displacement"])
+            and extracted["max_displacement"] >= 0,
+            "results.max_displacement",
+            "a finite non-negative displacement",
+            extracted["max_displacement"],
+            contract.FemError.ERROR_RESULTS_MISSING,
+            "The result carries no usable displacement field.",
+        )
+        checks.check(
+            extracted["max_von_mises"] is not None
+            and math.isfinite(extracted["max_von_mises"])
+            and extracted["max_von_mises"] >= 0,
+            "results.max_von_mises",
+            "a finite non-negative von Mises stress",
+            extracted["max_von_mises"],
+            contract.FemError.ERROR_RESULTS_MISSING,
+            "The result carries no usable stress field.",
+        )
+        checks.check(
+            extracted["max_displacement"] >= extracted["min_displacement"],
+            "results.displacement_ordering",
+            "max >= min",
+            {
+                "max": extracted["max_displacement"],
+                "min": extracted["min_displacement"],
+            },
+            contract.FemError.ERROR_RESULTS_MISSING,
+            "The displacement extrema contradict each other.",
+        )
+
+        payload = {
+            "analysis_name": analysis.Name,
+            "mode": mode,
+            "result_object": result.Name,
+            "node_count": extracted["node_count"],
+            "solver_workdir": workdir,
+            "solver_exit_code": solver_run["exit_code"],
+            "solver": {
+                "name": "calculix",
+                "binary": ccx,
+                "version": availability["solver"]["version"],
+                "input_file": input_path,
+                "duration_secs": solver_run["duration_secs"],
+                "stdout_file": solver_run["stdout_file"],
+                "stderr_file": solver_run["stderr_file"],
+                "stdout_tail": solver_run["stdout_tail"],
+                "stderr_tail": solver_run["stderr_tail"],
+            },
+            "mesher": {
+                "name": "gmsh",
+                "binary": availability["mesher"]["binary"],
+                "version": availability["mesher"]["version"],
+            },
+            "verified": list(checks.names),
+        }
+        if schema is not None:
+            # quantity_payload converts to the canonical unit itself, so the
+            # extracted values are handed to it unconverted. Pre-multiplying by
+            # the conversion factor applied it twice, which is invisible for a
+            # mm schema (factor 1) and wrong by the factor for every other one.
+            payload["unit_schema"] = schema
+            payload["max_von_mises"] = contract.quantity_payload(
+                extracted["max_von_mises"], schema["stress"], "stress"
+            )
+            payload["min_von_mises"] = contract.quantity_payload(
+                extracted["min_von_mises"], schema["stress"], "stress"
+            )
+            payload["max_displacement"] = contract.quantity_payload(
+                extracted["max_displacement"], schema["length"], "length"
+            )
+            payload["min_displacement"] = contract.quantity_payload(
+                extracted["min_displacement"], schema["length"], "length"
+            )
+            # Signed component along the requested load axis: the magnitudes above
+            # cannot tell a load applied along an axis from one applied against it.
+            payload["axis_displacement"] = contract.quantity_payload(
+                extracted["axis_displacement"], schema["length"], "length"
+            )
+        else:
+            # A reused analysis owns its own units; report the raw field with the
+            # host's schema rather than inventing one.
+            payload["unit_schema"] = None
+            payload["max_von_mises"] = None
+            payload["min_von_mises"] = None
+            payload["max_displacement"] = None
+            payload["min_displacement"] = None
+        if built is not None:
+            payload.update(
+                {
+                    "target_object": built["target"].Name,
+                    "material": built["material"],
+                    "load": {
+                        "force": built["load"]["force"],
+                        "direction": built["load"]["direction"],
+                        "unit_direction": built["load"]["unit_direction"],
+                        "faces": built["load_reported"],
+                    },
+                    "fixed_faces": built["fixed_reported"],
+                    "mesh": {
+                        "object": built["mesh"].Name,
+                        "element_order": "2nd",
+                        "element_order_property": built["order_property"],
+                        "size": built["mesh_size"],
+                        "size_property": built["size_property"],
+                    },
+                }
+            )
+        return payload
+    finally:
+        _close_document(App, doc)
+
+
+def _fem_module():
+    """Load the typed FEM unit/reference contract that ships next to this driver."""
+    return _load_sibling_module(_FEM_CONTRACT_FILENAME, "dcc_mcp_freecad_fem_contract")
+
+
 _METHODS = {
     "system.status": system_status,
     "document.create": document_create,
@@ -3991,48 +5785,18 @@ _METHODS = {
     "sketch.add_geometry": sketch_add_geometry,
     "sketch.add_constraint": sketch_add_constraint,
     "sketch.info": sketch_info,
+    "system.fem_probe": system_fem_probe,
+    "analysis.run_fem": analysis_run_fem,
+    "analysis.list_faces": analysis_list_faces,
 }
 
 
-def main():
-    request_path = sys.argv[-2]
-    result_path = sys.argv[-1]
-    try:
-        with open(request_path, "r", encoding="utf-8") as stream:
-            request = json.load(stream)
-        method = request.get("method")
-        if method not in _METHODS:
-            raise ValueError("Unknown FreeCAD method: %s" % method)
-        if method != "system.status":
-            # Pre-flight gate: an unverified host must not reach geometry work.
-            _require_supported_host(_host_version())
-        result = _METHODS[method](request.get("params") or {})
-        payload = {"ok": True, "result": result}
-    except Exception as exc:
-        payload = {
-            "ok": False,
-            "error": {"type": type(exc).__name__, "message": str(exc)},
-        }
-        # A typed refusal from the geometry tools carries a stable code, so the
-        # caller can branch on "why" instead of parsing a sentence.
-        code = getattr(exc, "code", None)
-        if code:
-            payload["error"]["code"] = code
-        # A read-back mismatch carries expected/actual across the process
-        # boundary verbatim, so the caller can act on the numbers instead of
-        # re-reading a sentence.
-        verification = getattr(exc, "payload", None)
-        if isinstance(verification, dict):
-            payload["error"]["write_verification"] = verification
-        # A sketch that must not be consumed carries the measured state that
-        # explains the refusal, so the caller can act on the numbers instead
-        # of re-reading a sentence that differs between host versions.
-        state = getattr(exc, "state_payload", None)
-        if isinstance(state, dict):
-            payload["error"]["sketch_state"] = state
-    with open(result_path, "w", encoding="utf-8") as stream:
-        json.dump(payload, stream, ensure_ascii=False)
+_FEM_CONTRACT_FILENAME = "fem_contract.py"
 
-
+# The dispatch entry is deliberately the last statement in the module.
+# FreeCADCmd runs this file as a script with `--pass`, so `main()` is called
+# the moment the guard is reached. Keeping the entry last means anything
+# appended later binds before dispatch, rather than depending on what
+# happens to sit below it.
 if "--pass" in sys.argv:
     main()

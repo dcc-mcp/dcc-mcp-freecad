@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 import capability_checks
@@ -18,6 +19,7 @@ SKILL_NAMES = (
     "freecad-modify",
     "freecad-parts",
     "freecad-sketch",
+    "freecad-analysis",
 )
 
 
@@ -34,8 +36,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 33
-    assert len({tool["name"] for tool in tools}) == 33
+    assert len(tools) == 35
+    assert len({tool["name"] for tool in tools}) == 35
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -233,7 +235,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 33
+    assert len(payload["tools"]) == len(catalog) == 35
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -254,6 +256,57 @@ def test_advertised_limits_match_what_the_driver_enforces():
     assert "MAX_PATTERN_INSTANCES = %d" % payload["max_pattern_instances"] in driver
     assert payload["mirror_planes"] == ["xy", "xz", "yz"]
     assert payload["document_snapshots"] is True
+
+
+def test_the_driver_entry_point_is_the_last_statement():
+    """Dispatching may only happen after the module body has finished.
+
+    FreeCADCmd runs the driver as a script with ``--pass``, so ``main()`` is
+    called the moment the guard is reached -- any name bound below it is still
+    unbound at that point, and every dispatch dies with a NameError. Importing
+    the driver as a module never sees this, which is why the host-free suite
+    cannot catch it: only the real-host lanes run the script path.
+
+    Pinning the entry to the last statement makes the order a property of the
+    file rather than of whatever happens to be appended below it.
+    """
+    driver = (ROOT / "src" / "dcc_mcp_freecad" / "freecad_driver.py").read_text(encoding="utf-8")
+    tree = ast.parse(driver)
+
+    last = tree.body[-1]
+    # Read the literal with literal_eval rather than from an attribute: a string
+    # parses to ast.Constant (exposing .value) on 3.8+ but to ast.Str (exposing
+    # .s, with no .value) on 3.7, and this suite runs on both.
+    comparison = last.test if isinstance(last, ast.If) else None
+    left_value = None
+    if isinstance(comparison, ast.Compare):
+        try:
+            left_value = ast.literal_eval(comparison.left)
+        except (ValueError, SyntaxError, TypeError):
+            left_value = None
+    is_guard = (
+        isinstance(last, ast.If)
+        and isinstance(comparison, ast.Compare)
+        and any(isinstance(op, ast.In) for op in comparison.ops)
+        and left_value == "--pass"
+    )
+    assert is_guard, (
+        "the driver's last statement must be the `--pass` dispatch guard, found: %s"
+        % type(last).__name__
+    )
+
+    # Nothing may be bound after the guard: catch it here rather than on a host.
+    bound_names = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "_FEM_CONTRACT_FILENAME" in bound_names, (
+        "the FEM contract filename constant is missing; the driver cannot load its "
+        "unit contract without it"
+    )
 
 
 def test_capabilities_are_derived_from_the_catalog_not_restated(tmp_path: Path):
@@ -306,7 +359,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 33
+    assert len(catalog) == 35
 
 
 def _replace(path: Path, old: str, new: str) -> None:

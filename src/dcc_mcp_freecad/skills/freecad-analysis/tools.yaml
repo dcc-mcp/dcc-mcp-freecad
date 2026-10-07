@@ -1,0 +1,127 @@
+tools:
+  - name: list_faces
+    description: >-
+      List a solid's faces with the sub-element references this FreeCAD host resolves,
+      including area, centre and normal. Use before run_fem_analysis to pick the faces to
+      restrain and the faces to load; only references reported with resolves=true are accepted.
+    source_file: scripts/list_faces.py
+    input_schema:
+      type: object
+      required: [document_path, object_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/bracket.FCStd", object_name: "Beam"}
+    next-tools: {on-success: [run_fem_analysis]}
+
+  - name: run_fem_analysis
+    description: >-
+      Solve one static structural case on a FreeCAD solid and report max/min displacement and
+      max von Mises stress with explicit, verified units. Every quantity is passed and returned
+      as {value, unit}; a bare float is refused. The document is only read - the solve runs on a
+      staged copy in a reported solver work directory that keeps the input, logs and results.
+      Requires the FEM workbench plus the CalculiX (ccx) solver and the Gmsh mesher; when they are
+      missing, get_capabilities reports this tool as host_limited and a solve fails with a
+      structured error code instead of reporting a result.
+    source_file: scripts/run_fem_analysis.py
+    input_schema:
+      type: object
+      required: [document_path]
+      anyOf:
+        - required: [analysis_name]
+        - required: [target_object, fixed_faces, load]
+      properties:
+        document_path: {type: string, minLength: 1}
+        analysis_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'
+          description: Reuse an existing Fem::FemAnalysis. Omit to build one from target_object, fixed_faces and load.
+        target_object: {type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'}
+        material:
+          type: object
+          additionalProperties: false
+          properties:
+            name: {type: string, minLength: 1, maxLength: 64}
+            youngs_modulus:
+              type: object
+              required: [value, unit]
+              additionalProperties: false
+              properties:
+                value: {type: number}
+                unit: {type: string, enum: [Pa, kPa, MPa, GPa, bar, psi, ksi, "N/mm^2", "N/mm2", "N/m^2", "N/m2", "kN/mm^2", "kN/mm2"]}
+            poisson_ratio: {type: number, minimum: -0.999999, maximum: 0.499999}
+            density:
+              type: object
+              required: [value, unit]
+              additionalProperties: false
+              properties:
+                value: {type: number}
+                unit: {type: string, enum: ["t/mm^3", "kg/mm^3", "g/mm^3", "kg/m^3", "t/m^3", "g/cm^3", "kg/cm^3"]}
+          description: Defaults to structural steel; the resolved material is always echoed back with the fields that were defaulted.
+        fixed_faces:
+          type: array
+          minItems: 1
+          maxItems: 200
+          uniqueItems: true
+          items: {type: string, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$'}
+          description: Sub-element references to restrain, e.g. "Beam:Face3".
+        load:
+          type: object
+          required: [force, direction, faces]
+          additionalProperties: false
+          properties:
+            force:
+              type: object
+              required: [value, unit]
+              additionalProperties: false
+              properties:
+                value: {type: number}
+                unit: {type: string, enum: [N, mN, kN, MN, GN, kgf, gf, tf, lbf, dyn]}
+            direction:
+              type: array
+              minItems: 3
+              maxItems: 3
+              items: {type: number}
+              description: Force direction; normalised internally, may not be the zero vector.
+            faces:
+              type: array
+              minItems: 1
+              maxItems: 200
+              uniqueItems: true
+              items: {type: string, pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$'}
+        mesh_size:
+          type: object
+          required: [value, unit]
+          additionalProperties: false
+          properties:
+            value: {type: number}
+            unit: {type: string, enum: [mm, um, nm, cm, m, km, in, ft, mil]}
+          description: Characteristic element length. Defaults to 2 mm.
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 600}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments:
+          document_path: "projects/bracket.FCStd"
+          target_object: "Beam"
+          fixed_faces: ["Beam:Face3"]
+          load: {force: {value: 100, unit: N}, direction: [0, 0, -1], faces: ["Beam:Face4"]}
+          mesh_size: {value: 2, unit: mm}
