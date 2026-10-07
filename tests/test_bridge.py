@@ -649,6 +649,38 @@ def test_real_freecad_scale_copy_and_mirror(tmp_path: Path):
     assert document.read_bytes() == before, "a refused call must not touch the document"
 
 
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_mirror_keeps_an_object_named_like_its_staging(tmp_path: Path):
+    """A caller's own DccMcpMirrorStage must survive a mirror that stages one.
+
+    Dropping the source builds the mirror under a fixed staging name and then
+    removes it. FreeCAD renames a feature created under a name that is already
+    taken, so removing that string rather than the feature this call actually
+    made would delete the caller's object and leave the staging feature behind
+    in a document that is then saved.
+    """
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "staging.FCStd"
+    bridge.create_document(str(document))
+    bridge.add_primitive(
+        str(document), "cylinder", "DccMcpMirrorStage", dimensions={"radius": 2, "height": 6}
+    )
+    bridge.add_primitive(
+        str(document), "cylinder", "Source", dimensions={"radius": 4, "height": 12}
+    )
+
+    mirrored = bridge.mirror_object(
+        str(document), "Source", "SourceMirror", normal=[1, 0, 0], keep_source=False
+    )
+    assert mirrored["object"]["type_id"] == "Part::Feature"
+
+    names = {obj["name"] for obj in bridge.inspect_document(str(document))["objects"]}
+    assert "DccMcpMirrorStage" in names, "the caller's own object must survive"
+    assert "Source" not in names and "SourceMirror" in names
+    assert bridge.validate_document(str(document))["valid"] is True
+
+
 def _named_object(bridge, document, name):
     """Fetch one object's payload out of a real document inspection."""
     for obj in bridge.inspect_document(str(document))["objects"]:
