@@ -1,13 +1,13 @@
 tools:
   - name: add_primitive
-    description: Add a typed parametric box, cylinder, sphere, cone, or torus with placement.
+    description: Add a typed parametric box, cylinder, sphere, cone, torus, wedge, or helix with placement.
     source_file: scripts/add_primitive.py
     input_schema:
       type: object
       required: [document_path, primitive, name]
       properties:
         document_path: {type: string, minLength: 1}
-        primitive: {type: string, enum: [box, cone, cylinder, sphere, torus]}
+        primitive: {type: string, enum: [box, cone, cylinder, sphere, torus, wedge, helix]}
         name: {type: string, minLength: 1, maxLength: 64}
         label: {type: string, minLength: 1, maxLength: 256}
         dimensions:
@@ -23,6 +23,18 @@ tools:
             angle1: {type: number}
             angle2: {type: number}
             angle3: {type: number}
+            pitch: {type: number, exclusiveMinimum: 0}
+            segment_length: {type: number, minimum: 0}
+            xmin: {type: number}
+            ymin: {type: number}
+            zmin: {type: number}
+            x2min: {type: number}
+            z2min: {type: number}
+            xmax: {type: number}
+            ymax: {type: number}
+            zmax: {type: number}
+            x2max: {type: number}
+            z2max: {type: number}
           additionalProperties: false
         translation: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
         rotation_axis: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
@@ -63,6 +75,18 @@ tools:
             angle1: {type: number}
             angle2: {type: number}
             angle3: {type: number}
+            pitch: {type: number, exclusiveMinimum: 0}
+            segment_length: {type: number, minimum: 0}
+            xmin: {type: number}
+            ymin: {type: number}
+            zmin: {type: number}
+            x2min: {type: number}
+            z2min: {type: number}
+            xmax: {type: number}
+            ymax: {type: number}
+            zmax: {type: number}
+            x2max: {type: number}
+            z2max: {type: number}
           additionalProperties: false
         label: {type: string, minLength: 1, maxLength: 256}
         timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
@@ -97,6 +121,95 @@ tools:
     enforce_thread_affinity: true
     timeout_hint_secs: 1800
     annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+
+  - name: scale_object
+    description: Create a scaled copy of an object's shape as a new Part::Feature.
+    source_file: scripts/scale_object.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, scale, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        scale:
+          description: A uniform factor, or one factor per axis. Must be finite and greater than zero.
+          oneOf:
+            - {type: number, exclusiveMinimum: 0, maximum: 1000}
+            - {type: array, minItems: 3, maxItems: 3, items: {type: number, exclusiveMinimum: 0, maximum: 1000}}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        around: {type: string, enum: [centroid, origin], default: centroid}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", object_name: Body, scale: 2, result_name: BodyScaled}
+      - arguments: {document_path: "projects/enclosure.FCStd", object_name: Body, scale: [1, 1, 2.5], result_name: BodyStretched, around: origin}
+    next-tools: {on-success: [validate_document], on-failure: [inspect_document]}
+
+  - name: copy_object
+    description: >-
+      Duplicate an object under a new name, optionally at a new absolute
+      placement. translation and rotation_degrees are absolute for every source
+      type, so a copy made without them sits at the document origin.
+    source_file: scripts/copy_object.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, new_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        new_name: {type: string, minLength: 1, maxLength: 64}
+        translation: {type: array, minItems: 3, maxItems: 3, items: {type: number}, default: [0, 0, 0]}
+        rotation_axis: {type: array, minItems: 3, maxItems: 3, items: {type: number}, default: [0, 0, 1]}
+        rotation_degrees: {type: number, default: 0}
+        label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", object_name: Body, new_name: BodySecond, translation: [120, 0, 0]}
+    next-tools: {on-success: [validate_document], on-failure: [inspect_document]}
+
+  - name: mirror_object
+    description: Mirror an object about a named plane or an arbitrary plane normal.
+    source_file: scripts/mirror_object.py
+    input_schema:
+      type: object
+      required: [document_path, object_name, result_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        object_name: {type: string, minLength: 1, maxLength: 64}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        plane: {type: string, enum: [xy, xz, yz]}
+        normal: {type: array, minItems: 3, maxItems: 3, items: {type: number}}
+        origin: {type: array, minItems: 3, maxItems: 3, items: {type: number}, default: [0, 0, 0]}
+        keep_source: {type: boolean, default: true}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: true, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/enclosure.FCStd", object_name: Body, result_name: BodyMirrored, plane: yz, origin: [40, 0, 0]}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [inspect_document]}
 
   - name: boolean_operation
     description: Create a parametric union, cut, or intersection from two Part shape objects.
@@ -147,7 +260,7 @@ tools:
     next-tools: {on-success: [validate_document], on-failure: [inspect_document]}
 
   - name: export_geometry
-    description: Export selected Part or Mesh objects to STEP, IGES, BREP, STL, or OBJ with bounded tessellation.
+    description: Export selected Part or Mesh objects to STEP, IGES, BREP, STL, OBJ, or 3MF with bounded tessellation.
     source_file: scripts/export_geometry.py
     input_schema:
       type: object
@@ -171,4 +284,5 @@ tools:
     call_examples:
       - arguments: {document_path: "projects/enclosure.FCStd", object_names: [VentedBody], output_path: "build/enclosure.step"}
       - arguments: {document_path: "projects/enclosure.FCStd", object_names: [VentedBody], output_path: "build/enclosure.stl", linear_deflection: 0.05}
+      - arguments: {document_path: "projects/enclosure.FCStd", object_names: [VentedBody], output_path: "build/enclosure.3mf", linear_deflection: 0.05}
     next-tools: {on-failure: [validate_document, inspect_document]}

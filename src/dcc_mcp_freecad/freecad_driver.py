@@ -10,6 +10,18 @@ _CONTRACT_FILENAME = "write_contract.py"
 _COMPAT_MODULE = None
 _SIBLING_MODULES = {}
 
+# Exchange formats the Mesh module owns. 3MF joined the set because it is the
+# mainstream 3D-printing container and the host's MeshCore writer has shipped a
+# Reader3MF/Writer3MF pair on both supported release lines; it tessellates from
+# the same mesh as STL/OBJ and is therefore guarded by the same assertions.
+_MESH_SUFFIXES = ("stl", "obj", "3mf")
+
+# The unit the host's 3MF writer declares, and the unit FreeCAD models in. A 3MF
+# consumer scales the model by this declaration, so a wrong or missing value
+# silently changes the printed size - it is asserted on every export.
+_3MF_MODEL_PART = "3D/3dmodel.model"
+_3MF_REQUIRED_UNIT = "millimeter"
+
 
 class IncompatibleHostError(RuntimeError):
     """The running FreeCAD host exposes an API the matrix declares as broken."""
@@ -279,6 +291,167 @@ def _rotation(app, axis, degrees):
     if not math.isfinite(angle):
         raise ValueError("rotation_degrees must be finite")
     return app.Rotation(app.Vector(*values), angle)
+
+
+# A scale factor is bounded the way the other numeric knobs are bounded: it is a
+# modelling convenience, not a way to ask the kernel for a degenerate solid.
+_MAX_SCALE = 1000.0
+
+# Scale origins. "centroid" keeps the shape's bounding-box centre fixed, which is
+# what "scale this part about its own middle" means; "origin" scales about the
+# document origin.
+_SCALE_ORIGINS = ("centroid", "origin")
+
+# Mirror planes by name, as the normal of the plane they name.
+_MIRROR_PLANE_NORMALS = {
+    "xy": (0.0, 0.0, 1.0),
+    "xz": (0.0, 1.0, 0.0),
+    "yz": (1.0, 0.0, 0.0),
+}
+
+# The host rejects a helix whose turn count exceeds this in Helix::execute; the
+# adapter refuses it up front with a sentence instead of a kernel failure.
+_MAX_HELIX_TURNS = 1e4
+
+
+def _scale_factors(value, tool):
+    """Accept a scalar or a three-element vector of positive finite factors.
+
+    A zero or negative factor is refused here rather than left to the kernel: a
+    mirror is a different operation with a different read-back, and a zero
+    factor collapses the solid to nothing while the object still exists.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, list)):
+        raise ValueError("%s.scale must be a number or a list of three numbers" % tool)
+    if isinstance(value, list):
+        if len(value) != 3:
+            raise ValueError("%s.scale must contain exactly three numbers" % tool)
+        factors = [float(item) for item in value]
+    else:
+        factors = [float(value)] * 3
+    for item in factors:
+        if not math.isfinite(item):
+            raise ValueError("%s.scale values must be finite" % tool)
+        if item <= 0:
+            raise ValueError("%s.scale values must be greater than zero" % tool)
+        if item > _MAX_SCALE:
+            raise ValueError("%s.scale values must not exceed %g" % (tool, _MAX_SCALE))
+    return factors
+
+
+def _shape_or_error(obj, name, tool):
+    """Return a usable Part shape, or refuse with the object that lacked one."""
+    shape = getattr(obj, "Shape", None)
+    if shape is None or shape.isNull():
+        raise ValueError("%s requires an object with a non-empty Part shape: %s" % (tool, name))
+    return shape
+
+
+def _move_to_local(geometry, source):
+    """Rebase copied geometry out of the source's placement and return it.
+
+    ``obj.Shape`` and ``obj.Mesh`` are reported in document coordinates, so a
+    copy taken straight from the source already carries the source's placement
+    baked in. Assigning ``Placement`` on top of it then composes the two, which
+    makes ``translation`` mean "offset from the source" for a copied solid but
+    "absolute position" for a primitive re-created from its dimensions. The copy
+    is moved back by the inverse placement so that every source type then takes
+    the same absolute ``Placement``.
+
+    The two kinds of geometry transform differently and neither is in place:
+    ``Part.Shape.transformGeometry`` returns a new shape and leaves the original
+    alone, while ``Mesh.Mesh.transform`` mutates the mesh it is called on. So
+    the shape result must be taken from the call and the mesh must not be.
+
+    The rebase is driven by where the geometry actually sits, not by
+    ``source.Placement``. A primitive keeps the two in step, but a boolean
+    result carries an identity ``Placement`` while its ``Shape`` is already baked
+    into document coordinates, so inverting ``Placement`` there is a no-op that
+    leaves the source offset in place. The bounding box minimum is the origin the
+    geometry is really expressed from, so it is the same answer for both.
+    """
+    matrix = _placement_to_local_matrix(geometry, source)
+    if matrix is None:
+        return geometry
+    if hasattr(geometry, "transformGeometry"):
+        return geometry.transformGeometry(matrix)
+    geometry.transform(matrix)
+    return geometry
+
+
+def _placement_to_local_matrix(geometry, source):
+    """Build the matrix that rebases ``geometry`` back onto its own origin.
+
+    Returns ``None`` when there is nothing to undo, so the caller can hand the
+    geometry back untouched instead of applying an identity transform.
+    """
+    import FreeCAD as App
+
+    bounds = getattr(geometry, "BoundBox", None)
+    if bounds is None:
+        return None
+    origin = App.Vector(bounds.XMin, bounds.YMin, bounds.ZMin)
+    if origin.Length == 0:
+        return None
+    # ``Matrix.move`` left-multiplies a pure translation and mutates in place,
+    # so it is started from identity and read after the call. There is no
+    # ``Matrix.translate``; that name exists only on ``Placement``.
+    matrix = App.Matrix()
+    matrix.move(origin.negative())
+    return matrix
+
+
+def _scaled_shape(app, shape, factors, around, tool):
+    """Scale ``shape`` about ``around`` and return the new shape.
+
+    ``FreeCAD`` reports ``obj.Shape`` already carrying the object's placement, so
+    the geometry handled here is in document coordinates. The three steps are
+    applied as separate ``transformGeometry`` calls rather than one composed
+    matrix because a composed ``App.Matrix`` multiplication order is easy to get
+    backwards and impossible to see in the result until a non-uniform factor is
+    used; three explicit steps have one obvious order.
+    """
+    if around not in _SCALE_ORIGINS:
+        raise ValueError("%s.around must be one of %s" % (tool, ", ".join(_SCALE_ORIGINS)))
+    current = shape
+    centre = shape.BoundBox.Center if around == "centroid" else None
+    if centre is not None:
+        step = app.Matrix()
+        step.move(app.Vector(-centre.x, -centre.y, -centre.z))
+        current = current.transformGeometry(step)
+    scale_matrix = app.Matrix()
+    scale_matrix.scale(*factors)
+    current = current.transformGeometry(scale_matrix)
+    if centre is not None:
+        step = app.Matrix()
+        step.move(centre)
+        current = current.transformGeometry(step)
+    return current
+
+
+def _mirror_plane(params, tool):
+    """Resolve a mirror request into a plane normal and a point on the plane.
+
+    Either the named ``plane`` or an explicit ``normal`` may be given; supplying
+    both, or neither, is a refusal rather than a silent precedence rule.
+    """
+    plane = params.get("plane")
+    normal = params.get("normal")
+    origin = params.get("origin")
+    if (plane is None) == (normal is None):
+        raise ValueError("%s requires exactly one of plane or normal" % tool)
+    if plane is not None:
+        if plane not in _MIRROR_PLANE_NORMALS:
+            raise ValueError(
+                "%s.plane must be one of %s" % (tool, ", ".join(sorted(_MIRROR_PLANE_NORMALS)))
+            )
+        values = list(_MIRROR_PLANE_NORMALS[plane])
+    else:
+        values = _vector(normal, "%s.normal" % tool)
+        if sum(item * item for item in values) <= 0:
+            raise ValueError("%s.normal may not be the zero vector" % tool)
+    point = _vector(origin, "%s.origin" % tool) if origin is not None else [0.0, 0.0, 0.0]
+    return values, point
 
 
 def _placement_payload(placement):
@@ -676,21 +849,27 @@ def document_inspect(params):
         _close_document(App, doc)
 
 
+def _invalid_shape_names(doc):
+    """Names of the objects whose shape is empty or invalid after a recompute."""
+    invalid = []
+    empty_shapes = []
+    for obj in doc.Objects:
+        shape = getattr(obj, "Shape", None)
+        if shape is not None:
+            if shape.isNull():
+                empty_shapes.append(obj.Name)
+            elif not shape.isValid():
+                invalid.append(obj.Name)
+    return invalid, empty_shapes
+
+
 def document_validate(params):
     import FreeCAD as App
 
     doc = _open_document(App, params["document_path"])
     try:
         doc.recompute()
-        invalid = []
-        empty_shapes = []
-        for obj in doc.Objects:
-            shape = getattr(obj, "Shape", None)
-            if shape is not None:
-                if shape.isNull():
-                    empty_shapes.append(obj.Name)
-                elif not shape.isValid():
-                    invalid.append(obj.Name)
+        invalid, empty_shapes = _invalid_shape_names(doc)
         return {
             "valid": not invalid,
             "invalid_objects": invalid,
@@ -1038,6 +1217,8 @@ _PRIMITIVE_TYPES = {
     "cylinder": "Part::Cylinder",
     "sphere": "Part::Sphere",
     "torus": "Part::Torus",
+    "wedge": "Part::Wedge",
+    "helix": "Part::Helix",
 }
 
 _DIMENSION_PROPERTIES = {
@@ -1062,7 +1243,38 @@ _DIMENSION_PROPERTIES = {
         "angle2": "Angle2",
         "angle3": "Angle3",
     },
+    # The wedge keeps FreeCAD's own property spelling: it is defined by ten
+    # corner coordinates rather than by a length/width/height triple, and
+    # inventing a friendlier convention would make the read-back compare a
+    # number the host never stored.
+    "Part::Wedge": {
+        "xmin": "Xmin",
+        "ymin": "Ymin",
+        "zmin": "Zmin",
+        "x2min": "X2min",
+        "z2min": "Z2min",
+        "xmax": "Xmax",
+        "ymax": "Ymax",
+        "zmax": "Zmax",
+        "x2max": "X2max",
+        "z2max": "Z2max",
+    },
+    "Part::Helix": {
+        "pitch": "Pitch",
+        "height": "Height",
+        "radius": "Radius",
+        "angle": "Angle",
+        "segment_length": "SegmentLength",
+    },
 }
+
+_POSITIVE_DIMENSIONS = ("length", "width", "height", "radius", "pitch")
+_NON_NEGATIVE_DIMENSIONS = ("radius1", "radius2", "segment_length")
+
+# Helix::execute constrains Angle with the host's apex range, not with the
+# 0..360 sweep the revolved primitives use; a cone angle of 90 degrees would put
+# the apex at infinity.
+_HELIX_ANGLE_LIMIT = 89.9
 
 
 def _apply_dimensions(obj, dimensions, version):
@@ -1076,11 +1288,19 @@ def _apply_dimensions(obj, dimensions, version):
         number = float(value)
         if not math.isfinite(number):
             raise ValueError("%s must be finite" % name)
-        if name in ("length", "width", "height", "radius") and number <= 0:
+        if name in _POSITIVE_DIMENSIONS and number <= 0:
             raise ValueError("%s must be positive" % name)
-        if name in ("radius1", "radius2") and number < 0:
+        if name in _NON_NEGATIVE_DIMENSIONS and number < 0:
             raise ValueError("%s must be non-negative" % name)
-        if name in ("angle", "angle3") and not 0 < number <= 360:
+        if obj.TypeId == "Part::Helix" and name == "angle":
+            # The published schema declares ``minimum: 0`` for every dimension,
+            # so a negative angle is refused here rather than accepted and
+            # silently reaching the host. Refusing keeps the schema honest: a
+            # tightening that let a negative through would make the documented
+            # bound a lie.
+            if not 0 <= number <= _HELIX_ANGLE_LIMIT:
+                raise ValueError("%s must be between 0 and %s" % (name, _HELIX_ANGLE_LIMIT))
+        elif name in ("angle", "angle3") and not 0 < number <= 360:
             raise ValueError("%s must be greater than 0 and no more than 360" % name)
         if name in ("angle1", "angle2"):
             limit = 90 if obj.TypeId == "Part::Sphere" else 180
@@ -1088,6 +1308,13 @@ def _apply_dimensions(obj, dimensions, version):
                 raise ValueError("%s must be between -%s and %s" % (name, limit, limit))
         property_name = _resolve_property(obj, allowed[name], version)
         setattr(obj, property_name, number)
+    if obj.TypeId == "Part::Helix":
+        # The kernel raises "Number of turns too high" from inside execute();
+        # refusing here turns that into a message naming the two dimensions.
+        pitch = float(obj.Pitch)
+        height = float(obj.Height)
+        if pitch > 0 and height / pitch > _MAX_HELIX_TURNS:
+            raise ValueError("helix height/pitch must not exceed %d turns" % int(_MAX_HELIX_TURNS))
 
 
 def _verify_dimensions(read_back, obj, dimensions, prefix="dimension"):
@@ -1230,6 +1457,432 @@ def model_transform_object(params):
         _close_document(App, doc)
 
 
+def _new_object_name(doc, name, tool):
+    """Refuse a name that is taken instead of silently replacing the object.
+
+    A name collision inside a document means replacing whatever holds it, and
+    that object may be an operand of something else. The caller's way forward is
+    explicit: remove the old object first, or pick another name.
+    """
+    if doc.getObject(name) is not None:
+        raise ValueError("%s: object already exists: %s" % (tool, name))
+    return name
+
+
+def _assert_document_recomputed(read_back, doc, tool):
+    """Prove the whole document recomputes into valid shapes after this write.
+
+    A mirror is the operation that can quietly produce degenerate geometry: the
+    feature exists, its shape is non-null, and the kernel only reports the
+    problem when the document is validated. Validating here means a caller that
+    asked for a mirror never has to remember to run ``validate_document`` to
+    find out whether the mirror is usable.
+    """
+    doc.recompute()
+    invalid, empty = _invalid_shape_names(doc)
+    read_back.check(
+        not invalid and not empty,
+        "document.recomputed_valid",
+        "no invalid or empty shapes",
+        {"invalid_objects": invalid, "empty_shape_objects": empty},
+        "The write produced geometry the kernel will not accept, so the "
+        "document is not in a usable state.",
+    )
+    return {"invalid_objects": invalid, "empty_shape_objects": empty}
+
+
+def _bbox_extent(box):
+    return [box.XLength, box.YLength, box.ZLength]
+
+
+def _bbox_centre(box):
+    return [box.Center.x, box.Center.y, box.Center.z]
+
+
+def model_scale_object(params):
+    """Create a scaled copy of an object's shape under ``result_name``.
+
+    The result is a plain ``Part::Feature``: a non-uniform scale of a
+    ``Part::Box`` is no longer a box, so the parametric definition cannot
+    survive, and FreeCAD silently ignores a ``Shape`` assignment on a parametric
+    primitive anyway - the write returns and the geometry is unchanged. Producing
+    a new object is the only form of this operation that can be proven.
+    """
+    import FreeCAD as App
+
+    tool = "model.scale_object"
+    version = _host_version()
+    object_name = _required(params, "object_name", tool)
+    result_name = _required(params, "result_name", tool)
+    factors = _scale_factors(_required(params, "scale", tool), tool)
+    around = params.get("around") or "centroid"
+    result_label = params.get("result_label")
+    doc = _open_document(App, params["document_path"])
+    try:
+        source = doc.getObject(object_name)
+        if source is None:
+            raise ValueError("Object does not exist: %s" % object_name)
+        source_shape = _shape_or_error(source, object_name, tool)
+        # Measured before the write and kept as plain numbers: the read-back
+        # must not depend on a live TopoShape the recompute could still move.
+        source_extent = _bbox_extent(source_shape.BoundBox)
+        source_centre = _bbox_centre(source_shape.BoundBox)
+        expected_extent = [value * factor for value, factor in zip(source_extent, factors)]
+        expected_centre = (
+            [value * factor for value, factor in zip(source_centre, factors)]
+            if around == "origin"
+            else source_centre
+        )
+        _new_object_name(doc, result_name, tool)
+        scaled = _scaled_shape(App, source_shape, factors, around, tool)
+        result = doc.addObject("Part::Feature", result_name)
+        if result_label:
+            result.Label = str(result_label)
+        result.Shape = scaled
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(result_name)
+        read_back.exists("result", result_name, stored)
+        read_back.check(
+            stored.TypeId == "Part::Feature",
+            "result.type_id",
+            "Part::Feature",
+            stored.TypeId,
+            "The scaled result is not the shape holder the tool creates.",
+        )
+        if result_label:
+            read_back.check(
+                stored.Label == str(result_label),
+                "result.label",
+                str(result_label),
+                stored.Label,
+                "The result label was not persisted.",
+            )
+        shape = read_back.shape("result", stored)
+        _verify_box(read_back, "result", getattr(shape, "BoundBox", None))
+        # The extent is the scale: a factor that was dropped, clamped or applied
+        # to the wrong axis shows up here as a box of the wrong size.
+        read_back.sequences(
+            "result.bounding_box.size",
+            expected_extent,
+            _bbox_extent(shape.BoundBox),
+            "The scaled geometry is not the requested multiple of the source, so "
+            "the scale did not apply as asked.",
+        )
+        read_back.sequences(
+            "result.bounding_box.center",
+            expected_centre,
+            _bbox_centre(shape.BoundBox),
+            "Scaling about the origin must move the centre by the same factors; "
+            "scaling about the centroid must leave it where it was.",
+        )
+        _assert_document_recomputed(read_back, doc, tool)
+        return {
+            "object": _object_payload(stored),
+            "source_object": object_name,
+            "scale": factors,
+            "around": around,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def model_copy_object(params):
+    """Duplicate an object under ``new_name``, optionally at a new placement.
+
+    A primitive is re-created as the same parametric type with the same
+    dimensions, so the copy stays editable. Anything else - an imported solid, a
+    boolean result, a mesh - is duplicated as a shape or mesh copy, because
+    there is no parametric definition to carry over.
+
+    ``translation`` is absolute for every source type, not relative to the
+    source: a copy made without it lands at the document origin, the same as a
+    primitive copy does. The shape and mesh branches copy geometry FreeCAD
+    reports in document coordinates, so it is moved back onto its own bounding
+    box first; only then does the requested translation mean the same thing it
+    means for a primitive re-created from its own dimensions.
+
+    ``rotation_degrees`` is absolute only for a primitive, which is re-created
+    from its dimensions and so carries no orientation of its own. For a shape or
+    mesh copy the request composes on top of the orientation already baked into
+    the copied geometry: a boolean result and a mesh hold their orientation in
+    their coordinates with an identity ``Placement``, so there is nothing for the
+    rebase to invert and the source's rotation cannot be recovered. A caller that
+    needs a known orientation for those sources should copy a primitive, or
+    rotate the source before copying it.
+    """
+    import FreeCAD as App
+
+    tool = "model.copy_object"
+    version = _host_version()
+    object_name = _required(params, "object_name", tool)
+    new_name = _required(params, "new_name", tool)
+    label = params.get("label")
+    doc = _open_document(App, params["document_path"])
+    try:
+        source = doc.getObject(object_name)
+        if source is None:
+            raise ValueError("Object does not exist: %s" % object_name)
+        _new_object_name(doc, new_name, tool)
+        placement = App.Placement(
+            App.Vector(*_vector(params.get("translation") or [0, 0, 0], "translation")),
+            _rotation(
+                App,
+                params.get("rotation_axis") or [0, 0, 1],
+                params.get("rotation_degrees") or 0,
+            ),
+        )
+        dimensions = _DIMENSION_PROPERTIES.get(source.TypeId)
+        mesh = getattr(source, "Mesh", None)
+        copied_dimensions = {}
+        if dimensions is not None:
+            result = doc.addObject(source.TypeId, new_name)
+            for name, property_name in dimensions.items():
+                if not hasattr(source, property_name):
+                    continue
+                value = getattr(source, property_name)
+                copied_dimensions[name] = float(value)
+                setattr(result, property_name, value)
+        elif mesh is not None and getattr(mesh, "CountPoints", 0):
+            result = doc.addObject("Mesh::Feature", new_name)
+            # The mesh is transformed in place, so it is assigned after the
+            # call rather than from its return value.
+            copied = mesh.copy()
+            _move_to_local(copied, source)
+            result.Mesh = copied
+        else:
+            result = doc.addObject("Part::Feature", new_name)
+            # transformGeometry returns a new shape, so the rebound copy is
+            # what has to be stored - assigning the original would undo the
+            # rebase and leave translation relative to the source again.
+            result.Shape = _move_to_local(_shape_or_error(source, object_name, tool).copy(), source)
+        if label:
+            result.Label = str(label)
+        if hasattr(result, "Placement"):
+            result.Placement = placement
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(new_name)
+        read_back.exists("copy", new_name, stored)
+        expected_type = source.TypeId if dimensions is not None else result.TypeId
+        read_back.check(
+            stored.TypeId == expected_type,
+            "copy.type_id",
+            expected_type,
+            stored.TypeId,
+            "The copy was created as a different type than the source, so it is "
+            "not a copy of this object.",
+        )
+        if dimensions is not None:
+            _verify_dimensions(read_back, stored, copied_dimensions, prefix="copy.dimension")
+        if label:
+            read_back.check(
+                stored.Label == str(label),
+                "copy.label",
+                str(label),
+                stored.Label,
+                "The copy label was not persisted.",
+            )
+        if hasattr(stored, "Placement"):
+            read_back.placement("copy", App, placement, stored.Placement)
+        copied_mesh = getattr(stored, "Mesh", None)
+        if copied_mesh is not None and getattr(copied_mesh, "CountPoints", 0):
+            read_back.check(
+                copied_mesh.CountPoints == mesh.CountPoints,
+                "copy.mesh_points",
+                mesh.CountPoints,
+                copied_mesh.CountPoints,
+                "The copied mesh does not carry the source geometry.",
+            )
+            _verify_box(read_back, "copy", getattr(copied_mesh, "BoundBox", None))
+        else:
+            shape = read_back.shape("copy", stored)
+            _verify_box(read_back, "copy", getattr(shape, "BoundBox", None))
+        # A copy leaves the source alone; a tool that quietly consumed it would
+        # make "duplicate to a second mounting position" destructive.
+        read_back.check(
+            doc.getObject(object_name) is not None,
+            "copy.source_preserved",
+            object_name,
+            None,
+            "The source object is gone after the copy, so this was a move.",
+        )
+        _assert_document_recomputed(read_back, doc, tool)
+        return {
+            "object": _object_payload(stored),
+            "source_object": object_name,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def model_mirror_object(params):
+    """Mirror an object's shape about a plane into ``result_name``.
+
+    ``keep_source`` decides the shape of the result, not just whether the source
+    survives: a parametric ``Part::Mirroring`` holds a link to its source, so it
+    cannot outlive it. Keeping the source therefore yields a live
+    ``Part::Mirroring`` that follows later edits; dropping it bakes the mirrored
+    geometry into a plain ``Part::Feature`` and removes the source.
+    """
+    import FreeCAD as App
+
+    tool = "model.mirror_object"
+    version = _host_version()
+    object_name = _required(params, "object_name", tool)
+    result_name = _required(params, "result_name", tool)
+    normal, origin = _mirror_plane(params, tool)
+    keep_source = bool(params.get("keep_source", True))
+    result_label = params.get("result_label")
+    doc = _open_document(App, params["document_path"])
+    try:
+        source = doc.getObject(object_name)
+        if source is None:
+            raise ValueError("Object does not exist: %s" % object_name)
+        source_shape = _shape_or_error(source, object_name, tool)
+        source_extent = _bbox_extent(source_shape.BoundBox)
+        source_volume = source_shape.Volume
+        source_centre = _bbox_centre(source_shape.BoundBox)
+        _new_object_name(doc, result_name, tool)
+        point = App.Vector(*origin)
+        axis = App.Vector(*normal)
+        if not keep_source:
+            dependents = {}
+            _dependents_recursive(source, dependents)
+            if dependents:
+                raise ValueError(
+                    "Object has dependents; keep_source=false cannot remove it: %s"
+                    % ", ".join(sorted(dependents))
+                )
+        # Part::Mirroring is the only mirror the two supported release lines
+        # agree on. Measured with a box of length 10 placed at x=100 and the
+        # plane through (100, 0, 0) with normal +X: 1.1.4 reflects it to
+        # x 90..100 (correct) while 1.0.2 returns x 190..200, so the same
+        # Shape.mirror() call mirrors about two different planes depending on
+        # the host and both answers look like a success. Building the feature,
+        # and baking its shape only when the source is not kept, keeps both
+        # branches on one verified code path.
+        staging_name = result_name if keep_source else "DccMcpMirrorStage"
+        mirror = doc.addObject("Part::Mirroring", staging_name)
+        # Internal names are unique per document, so a staging name that is
+        # taken makes addObject rename the feature it just created. Reading the
+        # name back off the object keeps the removal below pointed at the
+        # feature this call made; removing the requested string instead would
+        # delete the caller's object of that name and leave this one behind.
+        staging_name = mirror.Name
+        try:
+            mirror.Source = source
+            mirror.Normal = axis
+            mirror.Base = point
+            doc.recompute()
+            if not keep_source:
+                baked = mirror.Shape.copy()
+        finally:
+            if not keep_source:
+                doc.removeObject(staging_name)
+        if keep_source:
+            result = mirror
+            if result_label:
+                result.Label = str(result_label)
+        else:
+            result = doc.addObject("Part::Feature", result_name)
+            if result_label:
+                result.Label = str(result_label)
+            result.Shape = baked
+            # The baked shape is a copy, so the source can go as soon as the
+            # result holds its geometry. Removing it before the result exists
+            # would leave the document without either if the assignment failed.
+            doc.removeObject(object_name)
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(result_name)
+        read_back.exists("result", result_name, stored)
+        expected_type = "Part::Mirroring" if keep_source else "Part::Feature"
+        read_back.check(
+            stored.TypeId == expected_type,
+            "result.type_id",
+            expected_type,
+            stored.TypeId,
+            "The mirror is not the kind of object this request produces.",
+        )
+        if keep_source:
+            linked = getattr(stored, "Source", None)
+            read_back.check(
+                linked is not None and linked.Name == object_name,
+                "result.source",
+                object_name,
+                getattr(linked, "Name", None),
+                "The mirror is not wired to the object that was mirrored.",
+            )
+        if result_label:
+            read_back.check(
+                stored.Label == str(result_label),
+                "result.label",
+                str(result_label),
+                stored.Label,
+                "The result label was not persisted.",
+            )
+        shape = read_back.shape("result", stored)
+        _verify_box(read_back, "result", getattr(shape, "BoundBox", None))
+        # A mirror is an isometry: same volume, and a bounding box that is the
+        # reflection of the source's. Either one alone would pass a mirror that
+        # only translated; together they pin the plane.
+        read_back.sequences(
+            "result.bounding_box.size",
+            source_extent,
+            _bbox_extent(shape.BoundBox),
+            "A mirror preserves the extent of the source geometry.",
+        )
+        if abs(source_volume) > 1e-9:
+            read_back.numbers(
+                "result.volume",
+                source_volume,
+                shape.Volume,
+                "A mirror preserves volume; a different volume means the wrong "
+                "geometry (or none) was produced.",
+                rel_tolerance=1e-6,
+            )
+        expected_centre = _reflected_point(source_centre, point, axis)
+        read_back.sequences(
+            "result.bounding_box.center",
+            expected_centre,
+            _bbox_centre(shape.BoundBox),
+            "The mirrored geometry is not the reflection of the source about the requested plane.",
+        )
+        if not keep_source:
+            read_back.check(
+                doc.getObject(object_name) is None,
+                "result.source_removed",
+                "removed: %s" % object_name,
+                "still present",
+                "keep_source=false was requested but the source survived.",
+            )
+        # Acceptance: a mirrored Part solid must recompute and validate.
+        validation = _assert_document_recomputed(read_back, doc, tool)
+        return {
+            "object": _object_payload(stored),
+            "source_object": object_name,
+            "keep_source": keep_source,
+            "document_validation": validation,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def _reflected_point(centre, point, axis):
+    """Reflect ``centre`` through the plane through ``point`` with normal ``axis``.
+
+    ``p' = p - 2 * ((p - point) . n_hat) * n_hat``
+    """
+    length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]) ** 0.5
+    unit = [axis[0] / length, axis[1] / length, axis[2] / length]
+    offset = sum((centre[i] - point[i]) * unit[i] for i in range(3))
+    return [centre[i] - 2.0 * offset * unit[i] for i in range(3)]
+
+
 _VOLUME_RELATIONS = {
     # A union can never be smaller than its largest operand, a cut can never be
     # larger than the base, and an intersection can never be larger than its
@@ -1358,7 +2011,7 @@ def model_import_geometry(params):
     object_name = _required(params, "object_name", tool)
     label = params.get("label")
     suffix = input_path.lower().rsplit(".", 1)[-1]
-    is_mesh = suffix in ("stl", "obj")
+    is_mesh = suffix in _MESH_SUFFIXES
     doc = _open_document(App, params["document_path"])
     try:
         read_back = _ReadBack(tool, version, params)
@@ -1576,6 +2229,26 @@ def _is_unbounded(mesh):
     return False
 
 
+def _declared_3mf_unit(path):
+    """Read the unit the 3MF model part declares, or None if it declares none.
+
+    3MF is a zip container, so the declaration lives in the model part rather
+    than at a fixed byte offset. ``None`` is returned instead of raising so the
+    caller reports it as an expected/actual mismatch: "declared nothing" is the
+    fact the caller needs, not a parse failure.
+    """
+    import re
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            model = archive.read(_3MF_MODEL_PART).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - any container problem is "declared nothing"
+        return None
+    match = re.search(r"<model[^>]*\bunit=\"([^\"]+)\"", model)
+    return match.group(1) if match else None
+
+
 def model_export_geometry(params):
     import FreeCAD as App
 
@@ -1583,7 +2256,7 @@ def model_export_geometry(params):
     version = _host_version()
     output_path = _required(params, "output_path", tool)
     suffix = output_path.lower().rsplit(".", 1)[-1]
-    is_mesh = suffix in ("stl", "obj")
+    is_mesh = suffix in _MESH_SUFFIXES
     doc = _open_document(App, params["document_path"])
     temp_meshes = []
     try:
@@ -1691,6 +2364,17 @@ def model_export_geometry(params):
                     "The exported mesh lies outside the exported objects, which "
                     "means the wrong geometry (or none) was written.",
                 )
+            if suffix == "3mf":
+                unit = _declared_3mf_unit(output_path)
+                read_back.check(
+                    unit == _3MF_REQUIRED_UNIT,
+                    "artifact.unit",
+                    _3MF_REQUIRED_UNIT,
+                    unit,
+                    "A 3MF consumer scales the model by the declared unit, so an "
+                    "export without the millimetre declaration prints at the "
+                    "wrong size.",
+                )
         else:
             import Part
 
@@ -1727,11 +2411,14 @@ def model_export_geometry(params):
                 "geometry that was selected.",
                 rel_tolerance=1e-3,
             )
-        return {
+        result = {
             "object_names": [obj.Name for obj in objects],
             "format": suffix,
             "verified": _verified_checks(read_back),
         }
+        if suffix == "3mf":
+            result["unit"] = _3MF_REQUIRED_UNIT
+        return result
     finally:
         for obj in temp_meshes:
             doc.removeObject(obj.Name)
@@ -3288,6 +3975,9 @@ _METHODS = {
     "model.add_primitive": model_add_primitive,
     "model.update_primitive": model_update_primitive,
     "model.transform_object": model_transform_object,
+    "model.scale_object": model_scale_object,
+    "model.copy_object": model_copy_object,
+    "model.mirror_object": model_mirror_object,
     "model.boolean_operation": model_boolean_operation,
     "model.import_geometry": model_import_geometry,
     "model.export_geometry": model_export_geometry,

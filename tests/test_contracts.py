@@ -34,8 +34,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 30
-    assert len({tool["name"] for tool in tools}) == 30
+    assert len(tools) == 33
+    assert len({tool["name"] for tool in tools}) == 33
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -79,6 +79,35 @@ def test_geometry_bounds_in_the_skill_match_the_driver():
 
     # A polar pattern must be given an angle, but only one way of expressing it.
     assert len(tools["polar_pattern"]["input_schema"]["oneOf"]) == 2
+
+
+def test_declared_primitives_match_the_driver_table():
+    from dcc_mcp_freecad import freecad_driver
+
+    payload = yaml.safe_load(
+        (SKILLS / "freecad-modeling" / "tools.yaml").read_text(encoding="utf-8")
+    )
+    add_primitive = next(tool for tool in payload["tools"] if tool["name"] == "add_primitive")
+
+    assert sorted(add_primitive["input_schema"]["properties"]["primitive"]["enum"]) == sorted(
+        freecad_driver._PRIMITIVE_TYPES
+    )
+
+
+def test_declared_dimensions_cover_every_primitive_property():
+    """A primitive property with no schema entry is a dimension nobody can pass."""
+    from dcc_mcp_freecad import freecad_driver
+
+    payload = yaml.safe_load(
+        (SKILLS / "freecad-modeling" / "tools.yaml").read_text(encoding="utf-8")
+    )
+    needed = set()
+    for mapping in freecad_driver._DIMENSION_PROPERTIES.values():
+        needed.update(mapping)
+    for name in ("add_primitive", "update_primitive"):
+        tool = next(item for item in payload["tools"] if item["name"] == name)
+        declared = set(tool["input_schema"]["properties"]["dimensions"]["properties"])
+        assert needed <= declared, "%s is missing %s" % (name, sorted(needed - declared))
 
 
 def test_modeling_declares_document_dependency():
@@ -204,7 +233,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 30
+    assert len(payload["tools"]) == len(catalog) == 33
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -277,7 +306,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 30
+    assert len(catalog) == 33
 
 
 def _replace(path: Path, old: str, new: str) -> None:
@@ -292,8 +321,8 @@ _DRIFT_CASES = [
         "capability",
         lambda skills: _replace(
             skills / "freecad-modeling" / "tools.yaml",
-            "enum: [box, cone, cylinder, sphere, torus]",
-            "enum: [box, cone, cylinder, sphere]",
+            "enum: [box, cone, cylinder, sphere, torus, wedge, helix]",
+            "enum: [box, cone, cylinder, sphere, wedge, helix]",
         ),
     ),
     (
