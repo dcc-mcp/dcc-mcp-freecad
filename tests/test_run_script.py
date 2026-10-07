@@ -498,26 +498,40 @@ def test_the_runner_honours_a_pep_263_encoding_declaration(tmp_path):
     observable to anyone who tries the same script both ways.
     """
     runner = Path(bridge_module.__file__).with_name("script_runner.py")
+    # The script writes its literal to a file as UTF-8 bytes rather than printing
+    # it. Printing would make this test depend on the *child's console encoding*,
+    # which is cp1252 on Windows CI and cannot represent these characters - the
+    # script would fail with an encode error even though its source decoded
+    # perfectly, so the test would be failing for the wrong reason. Writing to a
+    # file pins the one thing under test: did the source decode at all?
     latin1 = tmp_path / "legacy.py"
-    latin1.write_bytes("# -*- coding: latin-1 -*-\nprint('caf\xe9')\n".encode("latin-1"))
+    latin1.write_bytes(
+        (
+            "# -*- coding: latin-1 -*-\n"
+            "open(%r, 'wb').write('caf\xe9'.encode('utf-8'))\n" % str(tmp_path / "l1.out")
+        ).encode("latin-1")
+    )
     gbk = tmp_path / "legacy_gbk.py"
-    gbk.write_bytes("# -*- coding: gbk -*-\nprint('\u4e2d\u6587')\n".encode("gbk"))
+    gbk.write_bytes(
+        (
+            "# -*- coding: gbk -*-\n"
+            "open(%r, 'wb').write('\u4e2d\u6587'.encode('utf-8'))\n" % str(tmp_path / "gbk.out")
+        ).encode("gbk")
+    )
 
     latin1_run = subprocess.run(
         [sys.executable, str(runner), "--script", str(latin1)],
         capture_output=True,
-        text=True,
     )
-    assert latin1_run.returncode == 0, latin1_run.stderr
-    assert latin1_run.stdout.strip() == "caf\u00e9"
+    assert latin1_run.returncode == 0, latin1_run.stderr.decode("utf-8", "replace")
+    assert (tmp_path / "l1.out").read_bytes().decode("utf-8") == "caf\u00e9"
 
     gbk_run = subprocess.run(
         [sys.executable, str(runner), "--script", str(gbk)],
         capture_output=True,
-        text=True,
     )
-    assert gbk_run.returncode == 0, gbk_run.stderr
-    assert gbk_run.stdout.strip() == "\u4e2d\u6587"
+    assert gbk_run.returncode == 0, gbk_run.stderr.decode("utf-8", "replace")
+    assert (tmp_path / "gbk.out").read_bytes().decode("utf-8") == "\u4e2d\u6587"
 
 
 def test_script_sha256_is_the_content_that_ran_not_the_file_afterwards(tmp_path, monkeypatch):
