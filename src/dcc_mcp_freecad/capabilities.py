@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from dcc_mcp_core import yaml_loads
 
-from . import compat
+from . import compat, sketch_rules
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
@@ -42,7 +42,13 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 # depends on both, and freecad-parts is self-contained. ``load_tool_catalog``
 # refuses to run when the directory disagrees with this tuple, so a new skill
 # can never be silently dropped from the capability list.
-SKILL_NAMES = ("freecad-session", "freecad-modeling", "freecad-modify", "freecad-parts")
+SKILL_NAMES = (
+    "freecad-session",
+    "freecad-modeling",
+    "freecad-modify",
+    "freecad-parts",
+    "freecad-sketch",
+)
 
 # The entry points an agent is already holding when it asks what this adapter
 # can do. They are real tools with real schemas and are still declared under
@@ -55,6 +61,11 @@ INTROSPECTION_TOOLS = ("get_status", "get_capabilities")
 ATOMIC_DOCUMENT_MUTATIONS = True  # FreecadBridge._mutate_document stages, then os.replace.
 ARBITRARY_PYTHON = False  # freecad_driver._METHODS whitelist; the driver never eval/exec.
 DOCUMENT_SNAPSHOTS = True  # FreecadBridge create/list/restore/delete_snapshot via SnapshotStore.
+# The typed surface is the whole contract: an under-constrained sketch is refused
+# rather than reported as usable, because there is no script escape hatch to
+# repair a silently under-constrained profile afterwards. Enforced by
+# sketch_rules.assert_feature_ready, which the profile-based feature tools call.
+SKETCH_UNDERCONSTRAINED_REJECTED = True
 
 # Where the driver's enforced limits are declared. Each entry names the tools
 # that take the property and the schema keyword that carries the bound, so the
@@ -267,6 +278,13 @@ def build_capabilities(
         "document_snapshots": DOCUMENT_SNAPSHOTS,
         "host_limited": limits,
     }
+    payload["sketch_planes"] = _enum_for(catalog, "create_sketch", "plane")
+    # The geometry and constraint vocabularies are rule-level: a type is what
+    # sketch_rules accepts, and every declared type is reachable, so the two
+    # lists are read from the module that enforces them rather than restated.
+    payload["sketch_geometry_types"] = list(sketch_rules.GEOMETRY_TYPES)
+    payload["sketch_constraint_types"] = list(sketch_rules.CONSTRAINT_TYPES)
+    payload["sketch_underconstrained_rejected"] = SKETCH_UNDERCONSTRAINED_REJECTED
     tool_name, property_name = MIRROR_PLANES_TOOL
     payload["mirror_planes"] = _enum_for(catalog, tool_name, property_name)
     for key, tool_names, property_name, keyword in DERIVED_BOUNDS:

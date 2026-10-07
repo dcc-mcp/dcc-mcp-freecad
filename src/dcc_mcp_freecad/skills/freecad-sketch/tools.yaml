@@ -1,0 +1,177 @@
+tools:
+  - name: create_sketch
+    description: Create a PartDesign body with a datum plane and an attached, empty constrained sketch on a named plane.
+    source_file: scripts/create_sketch.py
+    input_schema:
+      type: object
+      required: [document_path, name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        name: {type: string, minLength: 1, maxLength: 64}
+        plane: {type: string, enum: [xy, xz, yz], default: xy}
+        body: {type: string, minLength: 1, maxLength: 64, description: PartDesign body to attach the sketch to. Defaults to the body named Body, which is created when absent and reused when it is already a PartDesign body.}
+        label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", name: FlangeSketch, plane: xy}
+    next-tools: {on-success: [add_sketch_geometry, inspect_document], on-failure: [inspect_document, get_status]}
+
+  - name: add_sketch_geometry
+    description: Add typed point, line, circle, arc, or rectangle geometry to a sketch and return the element indices a constraint may reference.
+    source_file: scripts/add_sketch_geometry.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, geometry]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64}
+        geometry:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [type]
+            additionalProperties: false
+            properties:
+              type: {type: string, enum: [arc, circle, line, point, rectangle]}
+              x: {type: number}
+              y: {type: number}
+              x1: {type: number}
+              y1: {type: number}
+              x2: {type: number}
+              y2: {type: number}
+              cx: {type: number}
+              cy: {type: number}
+              radius: {type: number, exclusiveMinimum: 0}
+              start_angle_degrees: {type: number}
+              end_angle_degrees: {type: number}
+              width: {type: number, exclusiveMinimum: 0}
+              height: {type: number, exclusiveMinimum: 0}
+            anyOf:
+              - properties: {type: {enum: [point]}}
+                required: [type, x, y]
+              - properties: {type: {enum: [line]}}
+                required: [type, x1, y1, x2, y2]
+              - properties: {type: {enum: [circle]}}
+                required: [type, cx, cy, radius]
+              - properties: {type: {enum: [arc]}}
+                required: [type, cx, cy, radius, start_angle_degrees, end_angle_degrees]
+              - properties: {type: {enum: [rectangle]}}
+                required: [type, x, y, width, height]
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: FlangeSketch, geometry: [{type: rectangle, x: 0, y: 0, width: 40, height: 10}]}
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: FlangeSketch, geometry: [{type: circle, cx: 20, cy: 5, radius: 4}]}
+    next-tools: {on-success: [add_sketch_constraint, get_sketch_info], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: add_sketch_constraint
+    description: Add geometric and dimensional constraints to a sketch and report the resulting degrees of freedom.
+    source_file: scripts/add_sketch_constraint.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, constraints]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64}
+        constraints:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            type: object
+            required: [type]
+            additionalProperties: false
+            properties:
+              type:
+                type: string
+                enum: [angle, coincident, concentric, distance, distance_x, distance_y, equal, horizontal, length, parallel, perpendicular, point_on_object, radius, tangent, vertical]
+              first:
+                type: object
+                required: [element]
+                additionalProperties: false
+                properties:
+                  element: {type: integer, minimum: -1, description: Geometry index returned by add_sketch_geometry or get_sketch_info; -1 is the sketch root point.}
+                  vertex: {type: integer, enum: [1, 2, 3], description: 1 start, 2 end, 3 centre of a circle or arc.}
+              second:
+                type: object
+                required: [element]
+                additionalProperties: false
+                properties:
+                  element: {type: integer, minimum: -1}
+                  vertex: {type: integer, enum: [1, 2, 3]}
+              value: {type: number, minimum: 0}
+              value_degrees: {type: number}
+            anyOf:
+              - properties: {type: {enum: [coincident, concentric, point_on_object, parallel, perpendicular, tangent, equal]}}
+                required: [type, first, second]
+              - properties: {type: {enum: [horizontal, vertical]}}
+                required: [type, first]
+              - properties: {type: {enum: [length, radius]}}
+                required: [type, first, value]
+              - properties: {type: {enum: [distance, distance_x, distance_y]}}
+                required: [type, first, second, value]
+              - properties: {type: {enum: [angle]}}
+                required: [type, first, second, value_degrees]
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments:
+          document_path: "projects/flange.FCStd"
+          sketch_name: FlangeSketch
+          constraints:
+            - {type: horizontal, first: {element: 0}}
+            - {type: length, first: {element: 0}, value: 40}
+            - {type: coincident, first: {element: 0, vertex: 2}, second: {element: 1, vertex: 1}}
+            - {type: distance_x, first: {element: -1, vertex: 1}, second: {element: 0, vertex: 1}, value: 0}
+    next-tools: {on-success: [get_sketch_info, validate_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: get_sketch_info
+    description: Inspect a sketch's geometry, constraints, topology, and degrees of freedom; optionally refuse an under-constrained sketch.
+    source_file: scripts/get_sketch_info.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64}
+        require_fully_constrained:
+          type: boolean
+          default: false
+          description: Fail with an explicit error code instead of returning when the sketch is not fully constrained. Use before handing a sketch to a feature tool.
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 120}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: true, destructive_hint: false, idempotent_hint: true, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: FlangeSketch}
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: FlangeSketch, require_fully_constrained: true}
+    next-tools: {on-success: [validate_document], on-failure: [inspect_document]}

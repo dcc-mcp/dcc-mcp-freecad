@@ -56,7 +56,14 @@ class FakeFreecad(FreecadBridge):
         if method == "model.export_geometry":
             Path(params["output_path"]).write_bytes(b"geometry")
             return {"format": Path(params["output_path"]).suffix[1:]}
-        if method.startswith("model.") or method == "document.remove_object":
+        if method == "sketch.info":
+            # Read-only: a sketch inspection must not touch the document it read.
+            return {"object_count": 0, "dof": 0}
+        if (
+            method.startswith("model.")
+            or method.startswith("sketch.")
+            or method == "document.remove_object"
+        ):
             document = Path(params["document_path"])
             document.write_bytes(document.read_bytes() + b"-mutated")
             document.with_name("%s.20260811-020000.FCBak" % document.stem).write_bytes(b"backup")

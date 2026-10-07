@@ -66,6 +66,11 @@ def _contract_module():
     return _load_sibling_module(_CONTRACT_FILENAME, "dcc_mcp_freecad_write_contract")
 
 
+def _sketch_module():
+    """Load the typed sketch rules that ship next to this driver."""
+    return _load_sibling_module("sketch_rules.py", "dcc_mcp_freecad_sketch_rules")
+
+
 def _host_version():
     import FreeCAD as App
 
@@ -2365,6 +2370,793 @@ def model_mirror_feature(params):
         _close_document(App, doc)
 
 
+# ---------------------------------------------------------------------------
+# Sketcher
+#
+# A sketch is the only way a typed caller can build a parametric profile, and
+# the adapter has no script escape hatch to repair one afterwards. So every
+# sketch call is stricter than the Part tools above it: a constraint that names
+# a missing element is refused rather than ignored, and a sketch whose degrees
+# of freedom the host will not report is never handed out as feature-ready.
+# ---------------------------------------------------------------------------
+
+_SKETCH_TYPE_ID = "Sketcher::SketchObject"
+_BODY_TYPE_ID = "PartDesign::Body"
+_DATUM_PLANE_TYPE_ID = "PartDesign::Plane"
+
+# FreeCAD identifies geometry by TypeId, and the id decides which vertex
+# positions exist. An unrecognised id is refused: guessing which of its
+# positions a constraint may use is how a constraint silently binds to the
+# wrong point.
+_GEOMETRY_TYPE_IDS = {
+    "Part::GeomPoint": "point",
+    "Part::GeomLineSegment": "line",
+    "Part::GeomCircle": "circle",
+    "Part::GeomArcOfCircle": "arc",
+}
+
+# Ordered capability probe for a PartDesign feature's reversal property.
+# Newest spelling first, oldest last: a host that moved the property is handled
+# without the adapter committing to one generation's name, and a future
+# generation can be prepended without touching a single call site.
+_REVERSAL_PROPERTIES = ("SideType", "Midplane", "Symmetric")
+
+# The same idea for the property that carries a sketch's attachment.
+# ``Part::AttachableObject`` renamed ``Support`` to ``AttachmentSupport``, and
+# neither spelling is guaranteed across the supported range, so the adapter
+# probes for the one the host actually exposes instead of asserting a name. A
+# sketch that is never attached is the silent failure this guards: the object
+# exists, the call returns, and the geometry is drawn in the wrong plane.
+_ATTACHMENT_PROPERTIES = ("AttachmentSupport", "Support")
+
+# The attachment mode that puts the sketch flat on its support plane, and the
+# property that selects it. Probed rather than assumed for the same reason.
+_ATTACHMENT_MODE_PROPERTY = "MapMode"
+_FLAT_FACE_MODE = "FlatFace"
+
+
+def _attachment_property(sketch):
+    for name in _ATTACHMENT_PROPERTIES:
+        if _has_property(sketch, name):
+            return name
+    raise IncompatibleHostError(
+        "The sketch exposes none of %s, so it cannot be attached to a plane. The host API "
+        "moved outside the verified compatibility matrix, and an unattached sketch would "
+        "draw in an arbitrary plane while reporting success." % "/".join(_ATTACHMENT_PROPERTIES)
+    )
+
+
+def _set_attachment(sketch, plane_object):
+    """Attach a sketch to ``plane_object`` and return the property that took."""
+    if not _has_property(sketch, _ATTACHMENT_MODE_PROPERTY):
+        raise IncompatibleHostError(
+            "The sketch exposes no %s property, so it cannot be told to lie flat on its "
+            "support plane; refusing rather than leaving the attachment unspecified."
+            % _ATTACHMENT_MODE_PROPERTY
+        )
+    name = _attachment_property(sketch)
+    setattr(sketch, name, [(plane_object, "")])
+    setattr(sketch, _ATTACHMENT_MODE_PROPERTY, _FLAT_FACE_MODE)
+    return name
+
+
+def _attachment_support(sketch):
+    for name in _ATTACHMENT_PROPERTIES:
+        if _has_property(sketch, name):
+            return list(getattr(sketch, name) or ())
+    return []
+
+
+def _has_property(obj, name):
+    try:
+        return bool(hasattr(obj, name))
+    except Exception:
+        return False
+
+
+def _resolve_reversal_property(obj, version):
+    """Resolve a PartDesign feature's reversal property by capability probe."""
+    for name in _REVERSAL_PROPERTIES:
+        if _has_property(obj, name):
+            return name
+    raise IncompatibleHostError(
+        "FreeCAD %s exposes none of %s on %s; the reversal property moved outside the "
+        "verified compatibility matrix, so the write was refused instead of silently "
+        "doing nothing"
+        % (
+            version,
+            "/".join(_REVERSAL_PROPERTIES),
+            getattr(obj, "TypeId", type(obj).__name__),
+        )
+    )
+
+
+def _open_sketch(doc, sketch_name, tool):
+    sketch = doc.getObject(sketch_name)
+    if sketch is None:
+        raise ValueError("%s: sketch does not exist: %s" % (tool, sketch_name))
+    if getattr(sketch, "TypeId", None) != _SKETCH_TYPE_ID:
+        raise ValueError(
+            "%s: object is not a sketch (%s): %s"
+            % (tool, getattr(sketch, "TypeId", "unknown"), sketch_name)
+        )
+    return sketch
+
+
+def _geometry_kind(geo):
+    type_id = getattr(geo, "TypeId", None)
+    kind = _GEOMETRY_TYPE_IDS.get(type_id)
+    if kind is None:
+        raise IncompatibleHostError(
+            "The sketch contains geometry the adapter does not recognise (%s); refusing to "
+            "guess which of its vertices a constraint may reference" % (type_id,)
+        )
+    return kind
+
+
+def _point_pair(value):
+    return [float(value.x), float(value.y)]
+
+
+def _arc_midpoint(geo):
+    """A point on the stored arc's swept side, in ``key_points`` order.
+
+    The midpoint is what distinguishes an arc from its complement: both share
+    their endpoints, centre and radius, so those four agree even when the host
+    swept the other way round. FreeCAD exposes the midpoint of the *parameter*
+    range, which is exactly the arc it actually stored.
+    """
+    try:
+        middle = (float(geo.FirstParameter) + float(geo.LastParameter)) / 2.0
+        return _point_pair(geo.value(middle))
+    except Exception:
+        # Without a midpoint the read-back loses the only value that can catch
+        # a reversed sweep, so an unreadable one is a failure rather than a
+        # value silently dropped from the comparison.
+        raise _sketch_module().SketchSpecError(
+            "the stored arc does not expose a midpoint, so its sweep direction "
+            "cannot be verified against the request"
+        ) from None
+
+
+def _geometry_read_back(geo, kind):
+    """The coordinates of a stored geometry element, in ``key_points`` order."""
+    if kind == "point":
+        return [float(geo.X), float(geo.Y)]
+    if kind == "line":
+        return _point_pair(geo.StartPoint) + _point_pair(geo.EndPoint)
+    values = _point_pair(geo.Center) + [float(geo.Radius)]
+    if kind == "arc":
+        return _point_pair(geo.StartPoint) + _arc_midpoint(geo) + _point_pair(geo.EndPoint) + values
+    return values
+
+
+# Ordered capability probe for the host's degrees-of-freedom count. ``DoF`` is
+# the spelling FreeCAD 1.0.2 and 1.1.4 both expose, measured on each supported
+# host rather than assumed; the others are kept so a host that renames it again
+# is recognised instead of silently reported as fully constrained.
+_DOF_PROPERTIES = ("DoF", "DOF", "dof")
+
+# What a negative ``Sketch.solve()`` return means, in the host's own terms. Read
+# as error codes, never as a degree-of-freedom count.
+_SOLVER_STATUS = {
+    -1: "the solver did not converge",
+    -2: "redundant constraints",
+    -3: "conflicting constraints",
+    -4: "over-constrained",
+    -5: "malformed constraints",
+}
+
+
+def _solver_status_text(code):
+    return _SOLVER_STATUS.get(code, "solver reported failure")
+
+
+def _sketch_dof(sketch, version, tool):
+    """Read a sketch's degrees of freedom, or ``None`` when the host hides them.
+
+    An unsolvable sketch is a real failure and is reported as one. A count the
+    host will not report is returned as ``None`` so the caller is told the
+    sketch is not provably constrained, instead of being handed a number that
+    merely looks plausible -- a silently under-constrained sketch is worse than
+    a refused one, because the wrong geometry only shows up downstream.
+
+    ``solve()`` is called so a sketch the solver rejects is reported, but its
+    return value is deliberately never read as a count: on FreeCAD 1.0.2 and
+    1.1.4 it returns ``0`` for any sketch that solves, including one measured at
+    four degrees of freedom. Reading it as a count is precisely the trap this
+    function exists to avoid -- the number is plausible, and it is wrong.
+
+    It is still read as an *error code*, because that is what it also is. A
+    negative return means the host did not commit a solution: it leaves
+    ``FullyConstrained`` unset and the geometry un-updated, while the DOF it
+    reports can still be zero. The codes that a DOF sign already catches
+    (conflicting, over-constrained) are named for the caller's benefit; the
+    three it does not catch -- redundant, malformed, not converged -- are the
+    reason this check exists at all.
+    """
+    rules = _sketch_module()
+    try:
+        solver_status = sketch.solve()
+    except Exception as exc:
+        raise rules.SketchStateError(
+            rules.ERROR_SOLVER_FAILED,
+            "%s: the solver rejected the sketch (%s). Correct the conflicting constraints "
+            "instead of building on a profile that cannot be solved." % (tool, exc),
+            tool=tool,
+            sketch_name=getattr(sketch, "Name", None),
+            host_version=version,
+            solver_error=str(exc),
+        ) from None
+    if isinstance(solver_status, int) and not isinstance(solver_status, bool):
+        if solver_status < 0:
+            raise rules.SketchStateError(
+                rules.ERROR_SOLVER_FAILED,
+                "%s: the solver did not converge (status %d: %s). The host left the "
+                "sketch unsolved and did not update its geometry, so its degrees of "
+                "freedom cannot be trusted. Correct the %s and retry."
+                % (
+                    tool,
+                    solver_status,
+                    _solver_status_text(solver_status),
+                    _solver_status_text(solver_status),
+                ),
+                tool=tool,
+                sketch_name=getattr(sketch, "Name", None),
+                host_version=version,
+                solver_error=str(solver_status),
+            )
+    for attribute in _DOF_PROPERTIES:
+        value = getattr(sketch, attribute, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, "property.%s" % attribute
+    method = getattr(sketch, "getDoF", None)
+    if callable(method):
+        value = method()
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, "method.getDoF"
+    return None, None
+
+
+def _build_geometry(app, part, primitive):
+    kind = primitive["kind"]
+    if kind == "point":
+        x, y = primitive["points"][0]
+        return part.Point(app.Vector(x, y, 0.0))
+    if kind == "line":
+        start, end = primitive["points"][0], primitive["points"][1]
+        return part.LineSegment(app.Vector(start[0], start[1], 0.0), app.Vector(end[0], end[1], 0))
+    center = app.Vector(primitive["center"][0], primitive["center"][1], 0.0)
+    circle = part.Circle(center, app.Vector(0.0, 0.0, 1.0), primitive["radius"])
+    if kind == "arc":
+        start, end = primitive["angles_degrees"]
+        # Angles are passed in ascending order and ``sense`` is always True.
+        #
+        # Measured on FreeCAD 1.0.2 and 1.1.4, Part::GeomArcOfCircle keeps its
+        # parameter range ascending, so it cannot record which end the caller
+        # called the start: a request for 90 -> 0 stores the 270 degree
+        # complement, with the start point where it was asked for and the sweep
+        # continuing the other way round to 360. Neither sense value avoids that
+        # -- True and False produce the same curve on such a pair, because the
+        # periodic branch of Geom_TrimmedCurve::SetTrim takes ``sameSense = Sense``
+        # without swapping, and the range is raised to ascending afterwards.
+        #
+        # So sketch_rules refuses a negative sweep outright rather than let this
+        # reinterpret one, and every arc reaching here is ascending.
+        return part.ArcOfCircle(circle, math.radians(start), math.radians(end), True)
+    return circle
+
+
+def _build_constraint(sketcher, constraint, tool):
+    name = constraint["free_cad_type"]
+    first = constraint["first"]
+    second = constraint["second"]
+    if name == "Coincident":
+        return sketcher.Constraint(
+            name, first["element"], first["vertex"], second["element"], second["vertex"]
+        )
+    if name == "PointOnObject":
+        return sketcher.Constraint(name, first["element"], first["vertex"], second["element"])
+    if name in ("Horizontal", "Vertical"):
+        return sketcher.Constraint(name, first["element"])
+    if name in ("Parallel", "Perpendicular", "Tangent", "Equal"):
+        return sketcher.Constraint(name, first["element"], second["element"])
+    if name in ("DistanceX", "DistanceY"):
+        return sketcher.Constraint(
+            name,
+            first["element"],
+            first["vertex"],
+            second["element"],
+            second["vertex"],
+            constraint["value"],
+        )
+    if name == "Distance":
+        # A Distance on an element alone is the element's length; with two point
+        # references it is the distance between them. The adapter keeps those as
+        # two constraint types, so neither can be misread as the other.
+        if second is None:
+            return sketcher.Constraint(name, first["element"], constraint["value"])
+        return sketcher.Constraint(
+            name,
+            first["element"],
+            first["vertex"],
+            second["element"],
+            second["vertex"],
+            constraint["value"],
+        )
+    if name == "Radius":
+        return sketcher.Constraint(name, first["element"], constraint["value"])
+    if name == "Angle":
+        # FreeCAD stores a sketch angle in radians; the tool takes degrees so a
+        # caller never has to guess, and the read-back asserts the stored value.
+        return sketcher.Constraint(
+            name, first["element"], second["element"], math.radians(constraint["value_degrees"])
+        )
+    raise ValueError("%s: unsupported constraint: %s" % (tool, name))
+
+
+def _expected_constraint_value(constraint):
+    if constraint["value"] is not None:
+        return constraint["value"]
+    if constraint["value_degrees"] is not None:
+        return math.radians(constraint["value_degrees"])
+    return None
+
+
+def _constraint_payload(index, constraint):
+    value = getattr(constraint, "Value", None)
+    return {
+        "index": index,
+        "type": str(getattr(constraint, "Type", "") or ""),
+        "first": int(getattr(constraint, "First", 0) or 0),
+        "first_pos": int(getattr(constraint, "FirstPos", 0) or 0),
+        "second": int(getattr(constraint, "Second", 0) or 0),
+        "second_pos": int(getattr(constraint, "SecondPos", 0) or 0),
+        "third": int(getattr(constraint, "Third", 0) or 0),
+        "value": float(value) if value is not None else None,
+    }
+
+
+def _check_constraint_references(sketch, constraint, tool):
+    """Resolve every reference against live geometry before writing anything.
+
+    A constraint on a missing element is the sketching equivalent of a dropped
+    write: FreeCAD adds it, the call returns, and the sketch solves as if the
+    constraint were never asked for. Refusing before ``addConstraint`` is what
+    makes the difference visible at the call that caused it.
+    """
+    rules = _sketch_module()
+    count = len(sketch.Geometry)
+    kinds = {}
+    for role in ("first", "second"):
+        reference = constraint[role]
+        if reference is None:
+            kinds[role] = None
+            continue
+        element = reference["element"]
+        if element == rules.ROOT_ELEMENT:
+            kinds[role] = "point"
+            continue
+        if element < 0 or element >= count:
+            raise rules.SketchStateError(
+                rules.ERROR_ELEMENT_NOT_FOUND,
+                "%s: %s.%s.element %d does not exist; the sketch has %d geometry element(s). "
+                "Reference an element index returned by add_sketch_geometry or "
+                "get_sketch_info." % (tool, constraint["type"], role, element, count),
+                tool=tool,
+                constraint_type=constraint["type"],
+                role=role,
+                element=element,
+                geometry_count=count,
+            )
+        kinds[role] = _geometry_kind(sketch.Geometry[element])
+    rules.check_kinds(constraint, kinds["first"], kinds["second"])
+
+
+def _sketch_plane(sketch):
+    """The named plane whose normal the sketch is attached to, or None."""
+    rules = _sketch_module()
+    rotation = getattr(getattr(sketch, "Placement", None), "Rotation", None)
+    if rotation is None or not hasattr(rotation, "multVec"):
+        return None
+    normal = rotation.multVec(_sketch_vector(0.0, 0.0, 1.0))
+    observed = (normal.x, normal.y, normal.z)
+    for name in rules.PLANES:
+        expected = rules.plane_normal(name)
+        if _contract_module().sequences_match(expected, observed, 1e-6):
+            return name
+    return None
+
+
+def _sketch_vector(x, y, z):
+    import FreeCAD as App
+
+    return App.Vector(x, y, z)
+
+
+def _sketch_body_name(sketch):
+    for item in getattr(sketch, "InList", ()) or ():
+        if getattr(item, "TypeId", None) == _BODY_TYPE_ID:
+            return item.Name
+    return None
+
+
+def _construction_flag(sketch, index):
+    reader = getattr(sketch, "getConstruction", None)
+    if not callable(reader):
+        return False
+    return bool(reader(index))
+
+
+def sketch_create(params):
+    """Create a PartDesign body, a datum plane and an attached sketch."""
+    import FreeCAD as App
+
+    tool = "sketch.create"
+    version = _host_version()
+    rules = _sketch_module()
+    name = _required(params, "name", tool)
+    plane = params.get("plane") or "xy"
+    if plane not in rules.PLANES:
+        raise ValueError(
+            "%s: unsupported plane: %s (supported: %s)" % (tool, plane, ", ".join(rules.PLANES))
+        )
+    body_name = params.get("body") or "Body"
+    plane_name = "%sPlane" % name
+    label = params.get("label")
+    doc = _open_document(App, params["document_path"])
+    try:
+        for candidate in (name, plane_name):
+            if doc.getObject(candidate) is not None:
+                raise ValueError("Object already exists: %s" % candidate)
+        existing = doc.getObject(body_name)
+        created_body = False
+        if existing is None:
+            body = doc.addObject(_BODY_TYPE_ID, body_name)
+            created_body = True
+        elif getattr(existing, "TypeId", None) == _BODY_TYPE_ID:
+            # Reusing the body is the normal PartDesign flow: several sketches
+            # live under one body. A non-body with the same name is refused,
+            # because attaching a sketch to it would be a silent reinterpretation.
+            body = existing
+        else:
+            raise ValueError(
+                "Existing object is not a PartDesign body (%s): %s"
+                % (getattr(existing, "TypeId", "unknown"), body_name)
+            )
+        try:
+            plane_object = body.newObject(_DATUM_PLANE_TYPE_ID, plane_name)
+        except Exception as exc:
+            raise IncompatibleHostError(
+                "FreeCAD %s could not create a %s datum plane for sketch %s (%s)"
+                % (version, _DATUM_PLANE_TYPE_ID, name, exc)
+            ) from None
+        axis, degrees = rules.PLANE_ROTATIONS[plane]
+        plane_object.Placement = App.Placement(
+            App.Vector(0.0, 0.0, 0.0), App.Rotation(App.Vector(*axis), degrees)
+        )
+        sketch = body.newObject(_SKETCH_TYPE_ID, name)
+        if label:
+            sketch.Label = str(label)
+        attachment_property = _set_attachment(sketch, plane_object)
+        doc.recompute()
+        _save_document(doc)
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(name)
+        read_back.exists("sketch", name, stored)
+        read_back.check(
+            stored.TypeId == _SKETCH_TYPE_ID,
+            "sketch.type_id",
+            _SKETCH_TYPE_ID,
+            stored.TypeId,
+            "The object was created as a different type than requested.",
+        )
+        support = _attachment_support(stored)
+        read_back.check(
+            bool(support),
+            "sketch.support",
+            "one attached support reference",
+            len(support),
+            "The sketch has no support, so it is not attached to a plane: its placement "
+            "would be arbitrary and the sketch would not follow the requested plane.",
+        )
+        attached = support[0][0] if support else None
+        read_back.check(
+            getattr(attached, "Name", None) == plane_name,
+            "sketch.support_plane",
+            plane_name,
+            getattr(attached, "Name", None),
+            "The sketch is attached to a different object than the datum plane this call created.",
+        )
+        read_back.check(
+            getattr(stored, _ATTACHMENT_MODE_PROPERTY, None) == _FLAT_FACE_MODE,
+            "sketch.map_mode",
+            _FLAT_FACE_MODE,
+            getattr(stored, _ATTACHMENT_MODE_PROPERTY, None),
+            "The attachment mode was not stored, so the sketch is not lying flat on its "
+            "support plane.",
+        )
+        normal = stored.Placement.Rotation.multVec(App.Vector(0.0, 0.0, 1.0))
+        read_back.sequences(
+            "sketch.plane_normal",
+            list(rules.plane_normal(plane)),
+            [normal.x, normal.y, normal.z],
+            "The sketch normal is not the requested plane, so the geometry would be drawn "
+            "in a different plane than asked for.",
+        )
+        read_back.check(
+            body.Name in [item.Name for item in getattr(stored, "InList", ()) or ()],
+            "sketch.in_body",
+            body.Name,
+            [item.Name for item in getattr(stored, "InList", ()) or ()],
+            "The sketch is not inside the body, so a feature built on it would not belong "
+            "to that body.",
+        )
+        dof, dof_source = _sketch_dof(stored, version, tool)
+        state = rules.feature_state(dof, len(stored.Geometry))
+        return {
+            "sketch": {
+                "name": stored.Name,
+                "label": stored.Label,
+                "type_id": stored.TypeId,
+                "plane": plane,
+                "normal": [normal.x, normal.y, normal.z],
+                "geometry_count": len(stored.Geometry),
+                "constraint_count": len(stored.Constraints),
+            },
+            "body": {"name": body.Name, "type_id": body.TypeId, "created": created_body},
+            "attachment": {
+                "mode": "datum_plane",
+                # Which property took the attachment is evidence, not trivia:
+                # it is how a host that renamed the property is recognised.
+                "property": attachment_property,
+                "plane_object": plane_name,
+                "plane": plane,
+                "normal": list(rules.plane_normal(plane)),
+            },
+            "dof": dof,
+            "dof_source": dof_source,
+            "feature_state": state,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def sketch_add_geometry(params):
+    """Add typed geometry to a sketch and prove every element landed."""
+    import FreeCAD as App
+    import Part
+
+    tool = "sketch.add_geometry"
+    version = _host_version()
+    rules = _sketch_module()
+    sketch_name = _required(params, "sketch_name", tool)
+    specs = _required(params, "geometry", tool)
+    if not isinstance(specs, list) or not specs:
+        raise ValueError("%s: geometry must be a non-empty list of geometry items" % tool)
+    if len(specs) > 100:
+        raise ValueError("%s: geometry may contain at most 100 items" % tool)
+    primitives = []
+    for spec in specs:
+        primitives.extend(rules.expand_geometry(spec, tool))
+    doc = _open_document(App, params["document_path"])
+    try:
+        sketch = _open_sketch(doc, sketch_name, tool)
+        before = len(sketch.Geometry)
+        dof_before, _source = _sketch_dof(sketch, version, tool)
+        sketch.addGeometry([_build_geometry(App, Part, item) for item in primitives], False)
+        doc.recompute()
+        _save_document(doc)
+        after = len(sketch.Geometry)
+        read_back = _ReadBack(tool, version, params)
+        read_back.check(
+            after == before + len(primitives),
+            "geometry.count",
+            before + len(primitives),
+            after,
+            "FreeCAD accepted the call but the geometry count did not grow by the number "
+            "of requested elements, so part of the profile is missing.",
+        )
+        elements = []
+        for offset, primitive in enumerate(primitives):
+            index = before + offset
+            geo = sketch.Geometry[index]
+            kind = _geometry_kind(geo)
+            read_back.check(
+                kind == primitive["kind"],
+                "geometry[%d].kind" % index,
+                primitive["kind"],
+                kind,
+                "The stored element is a different kind than requested, so the profile is "
+                "not the profile that was asked for.",
+            )
+            actual = _geometry_read_back(geo, kind)
+            read_back.sequences(
+                "geometry[%d].points" % index,
+                rules.key_points(primitive),
+                actual,
+                "FreeCAD stored the element but with different coordinates, so the "
+                "geometry is not the geometry that was asked for.",
+            )
+            elements.append(
+                {
+                    "index": index,
+                    "kind": kind,
+                    "type": primitive["type"],
+                    "role": primitive["role"],
+                    "construction": _construction_flag(sketch, index),
+                    "key_points": actual,
+                }
+            )
+        dof_after, dof_source = _sketch_dof(sketch, version, tool)
+        state = rules.feature_state(dof_after, after)
+        return {
+            "sketch": {
+                "name": sketch.Name,
+                "label": sketch.Label,
+                "geometry_count": after,
+                "constraint_count": len(sketch.Constraints),
+            },
+            "elements": elements,
+            "dof": {"before": dof_before, "after": dof_after, "source": dof_source},
+            "feature_state": state,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def sketch_add_constraint(params):
+    """Add typed constraints to a sketch and prove every one of them landed."""
+    import FreeCAD as App
+    import Sketcher
+
+    tool = "sketch.add_constraint"
+    version = _host_version()
+    rules = _sketch_module()
+    sketch_name = _required(params, "sketch_name", tool)
+    specs = _required(params, "constraints", tool)
+    if not isinstance(specs, list) or not specs:
+        raise ValueError("%s: constraints must be a non-empty list of constraints" % tool)
+    if len(specs) > 200:
+        raise ValueError("%s: constraints may contain at most 200 items" % tool)
+    normalized = [rules.validate_constraint(spec, tool) for spec in specs]
+    doc = _open_document(App, params["document_path"])
+    try:
+        sketch = _open_sketch(doc, sketch_name, tool)
+        before = len(sketch.Constraints)
+        dof_before, _source = _sketch_dof(sketch, version, tool)
+        # Validate every reference before the first write: a half-applied
+        # constraint batch is a sketch that looks finished and is not.
+        for constraint in normalized:
+            _check_constraint_references(sketch, constraint, tool)
+        for constraint in normalized:
+            sketch.addConstraint(_build_constraint(Sketcher, constraint, tool))
+        doc.recompute()
+        _save_document(doc)
+        after = len(sketch.Constraints)
+        read_back = _ReadBack(tool, version, params)
+        read_back.check(
+            after == before + len(normalized),
+            "constraint.count",
+            before + len(normalized),
+            after,
+            "FreeCAD accepted the call but stored fewer constraints than requested, so "
+            "the sketch is less constrained than the caller believes.",
+        )
+        added = []
+        for offset, constraint in enumerate(normalized):
+            index = before + offset
+            host_constraint = sketch.Constraints[index]
+            read_back.check(
+                str(host_constraint.Type) == constraint["free_cad_type"],
+                "constraint[%d].type" % index,
+                constraint["free_cad_type"],
+                str(host_constraint.Type),
+                "The stored constraint is a different kind than requested.",
+            )
+            expected_value = _expected_constraint_value(constraint)
+            if expected_value is not None:
+                read_back.numbers(
+                    "constraint[%d].value" % index,
+                    expected_value,
+                    getattr(host_constraint, "Value", None),
+                    "The constraint was stored with a different magnitude; a silently "
+                    "rescaled dimension is how a profile ends up the wrong size.",
+                )
+            added.append(_constraint_payload(index, host_constraint))
+        dof_after, dof_source = _sketch_dof(sketch, version, tool)
+        state = rules.feature_state(dof_after, len(sketch.Geometry))
+        return {
+            "sketch": {
+                "name": sketch.Name,
+                "label": sketch.Label,
+                "geometry_count": len(sketch.Geometry),
+                "constraint_count": after,
+            },
+            "constraints": added,
+            "dof": {"before": dof_before, "after": dof_after, "source": dof_source},
+            "feature_state": state,
+            "verified": _verified_checks(read_back),
+        }
+    finally:
+        _close_document(App, doc)
+
+
+def sketch_info(params):
+    """Report a sketch's geometry, constraints and degrees of freedom."""
+    import FreeCAD as App
+
+    tool = "sketch.info"
+    version = _host_version()
+    rules = _sketch_module()
+    name = _required(params, "sketch_name", tool)
+    require_ready = bool(params.get("require_fully_constrained"))
+    doc = _open_document(App, params["document_path"])
+    try:
+        doc.recompute()
+        sketch = _open_sketch(doc, name, tool)
+        geometry = []
+        for index, geo in enumerate(sketch.Geometry):
+            kind = _geometry_kind(geo)
+            geometry.append(
+                {
+                    "index": index,
+                    "kind": kind,
+                    "construction": _construction_flag(sketch, index),
+                    "key_points": _geometry_read_back(geo, kind),
+                }
+            )
+        constraints = [
+            _constraint_payload(index, item) for index, item in enumerate(sketch.Constraints)
+        ]
+        dof, dof_source = _sketch_dof(sketch, version, tool)
+        state = rules.feature_state(dof, len(sketch.Geometry))
+        # The matrix records ExternalGeometryCount as removed on 1.1+; the list
+        # is the spelling that survives, so the list is what gets counted. A
+        # plausible-looking count read off a removed property is precisely the
+        # failure the sketch rules exist to prevent.
+        external = getattr(sketch, "ExternalGeometry", None)
+        external_count = len(external) if external is not None else None
+        shape = getattr(sketch, "Shape", None)
+        topology = None
+        if shape is not None and not shape.isNull():
+            topology = {
+                "valid": bool(shape.isValid()),
+                "vertices": len(shape.Vertexes),
+                "edges": len(shape.Edges),
+                "wires": len(shape.Wires),
+                "faces": len(shape.Faces),
+            }
+        if require_ready:
+            rules.assert_feature_ready(state, name, tool)
+        return {
+            "sketch": {
+                "name": sketch.Name,
+                "label": sketch.Label,
+                "type_id": sketch.TypeId,
+                "body": _sketch_body_name(sketch),
+                "plane": _sketch_plane(sketch),
+                "support": [
+                    [getattr(item, "Name", None), sub] for item, sub in _attachment_support(sketch)
+                ],
+                "geometry_count": len(geometry),
+                "constraint_count": len(constraints),
+            },
+            "geometry": geometry,
+            "constraints": constraints,
+            "external_geometry_count": external_count,
+            "topology": topology,
+            "dof": dof,
+            "dof_source": dof_source,
+            "feature_state": state,
+            "require_fully_constrained": require_ready,
+        }
+    finally:
+        _close_document(App, doc)
+
+
 _METHODS = {
     "system.status": system_status,
     "document.create": document_create,
@@ -2384,6 +3176,10 @@ _METHODS = {
     "model.polar_pattern": model_polar_pattern,
     "model.mirror_feature": model_mirror_feature,
     "model.insert_part": model_insert_part,
+    "sketch.create": sketch_create,
+    "sketch.add_geometry": sketch_add_geometry,
+    "sketch.add_constraint": sketch_add_constraint,
+    "sketch.info": sketch_info,
 }
 
 
@@ -2417,6 +3213,12 @@ def main():
         verification = getattr(exc, "payload", None)
         if isinstance(verification, dict):
             payload["error"]["write_verification"] = verification
+        # A sketch that must not be consumed carries the measured state that
+        # explains the refusal, so the caller can act on the numbers instead
+        # of re-reading a sentence that differs between host versions.
+        state = getattr(exc, "state_payload", None)
+        if isinstance(state, dict):
+            payload["error"]["sketch_state"] = state
     with open(result_path, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False)
 

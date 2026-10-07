@@ -14,7 +14,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from dcc_mcp_core.skills_helper import check_dcc_cancelled
 
-from . import parts_library
+from . import parts_library, sketch_rules
 from .capabilities import build_capabilities
 from .snapshots import (
     DEFAULT_MAX_SNAPSHOT_BYTES,
@@ -89,6 +89,28 @@ class WriteVerificationError(BridgeError):
     @property
     def host_version(self) -> Any:
         return self.payload.get("host_version")
+
+
+class SketchStateError(BridgeError):
+    """A sketch is in a state that must stop the caller.
+
+    Carries the machine-readable ``error_code`` from ``sketch_rules`` (for
+    example ``sketch_underconstrained``) and the full state payload, so a caller
+    can branch on the code instead of matching prose that differs between hosts.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        state: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, code)
+        # Set explicitly as well: the base class only gained the ``code``
+        # parameter with the typed geometry tools, and a refusal that loses
+        # its code is a refusal the caller cannot branch on.
+        self.code = code
+        self.state = dict(state or {})
 
 
 def _within(path: Path, roots: Sequence[Path]) -> bool:
@@ -594,6 +616,9 @@ class FreecadBridge:
                 verification = error.get("write_verification")
                 if isinstance(verification, dict):
                     raise WriteVerificationError(verification, message)
+                state = error.get("sketch_state")
+                if isinstance(state, dict):
+                    raise SketchStateError(message, error.get("code"), state)
                 code = error.get("code")
                 raise BridgeError(message, str(code) if code else None)
             result = payload.get("result")
@@ -1553,6 +1578,72 @@ class FreecadBridge:
             "max_snapshots": store.max_snapshots,
             "max_snapshot_bytes": store.max_snapshot_bytes,
         }
+
+    def create_sketch(
+        self,
+        document_path: str,
+        name: str,
+        plane: str = "xy",
+        body: Optional[str] = None,
+        label: Optional[str] = None,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        if plane not in sketch_rules.PLANES:
+            raise BridgeError("plane must be one of %s" % ", ".join(sketch_rules.PLANES))
+        request = {
+            "name": self._object_name(name),
+            "plane": plane,
+            "label": label,
+        }
+        if body is not None:
+            request["body"] = self._object_name(body)
+        return self._mutate_document("sketch.create", document_path, request, timeout_secs)
+
+    def add_sketch_geometry(
+        self,
+        document_path: str,
+        sketch_name: str,
+        geometry: Sequence[Mapping[str, Any]],
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "sketch.add_geometry",
+            document_path,
+            {"sketch_name": self._object_name(sketch_name), "geometry": list(geometry)},
+            timeout_secs,
+        )
+
+    def add_sketch_constraint(
+        self,
+        document_path: str,
+        sketch_name: str,
+        constraints: Sequence[Mapping[str, Any]],
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        return self._mutate_document(
+            "sketch.add_constraint",
+            document_path,
+            {"sketch_name": self._object_name(sketch_name), "constraints": list(constraints)},
+            timeout_secs,
+        )
+
+    def get_sketch_info(
+        self,
+        document_path: str,
+        sketch_name: str,
+        require_fully_constrained: bool = False,
+        timeout_secs: float = 120,
+    ) -> dict[str, Any]:
+        document = self._document_path(document_path)
+        return self._invoke(
+            "sketch.info",
+            {
+                "document_path": str(document),
+                "sketch_name": self._object_name(sketch_name),
+                "require_fully_constrained": bool(require_fully_constrained),
+            },
+            timeout_secs,
+        )
 
 
 def get_bridge() -> FreecadBridge:

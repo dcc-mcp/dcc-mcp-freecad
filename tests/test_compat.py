@@ -569,6 +569,7 @@ def test_the_api_probe_instantiates_a_live_object_for_dynamic_properties(monkeyp
     """Many FreeCAD properties exist only on instances, so a live probe is used."""
     monkeypatch.setitem(sys.modules, "MeshPart", type(sys)("MeshPart"))
     monkeypatch.setitem(sys.modules, "Sketcher", type(sys)("Sketcher"))
+    monkeypatch.setitem(sys.modules, "PartDesign", type(sys)("PartDesign"))
     calls = []
 
     def fake_probe(type_id, attribute):
@@ -592,6 +593,7 @@ def test_the_api_probe_instantiates_a_live_object_for_dynamic_properties(monkeyp
 def test_the_api_probe_is_unavailable_but_never_crashes_on_a_partial_host(monkeypatch):
     monkeypatch.setitem(sys.modules, "MeshPart", None)
     monkeypatch.setitem(sys.modules, "Sketcher", None)
+    monkeypatch.setitem(sys.modules, "PartDesign", None)
 
     probes = freecad_driver._probe_breaking_changes("1.1.4")
 
@@ -607,6 +609,7 @@ def test_the_api_probe_covers_every_declared_break_on_a_pre_change_host(monkeypa
     fake_meshpart.meshFromShape = lambda **kwargs: None
     monkeypatch.setitem(sys.modules, "MeshPart", fake_meshpart)
     monkeypatch.setitem(sys.modules, "Sketcher", type(sys)("Sketcher"))
+    monkeypatch.setitem(sys.modules, "PartDesign", type(sys)("PartDesign"))
     monkeypatch.setattr(
         freecad_driver, "_probe_instance_property", lambda type_id, attribute: "present"
     )
@@ -623,6 +626,7 @@ def test_the_api_probe_covers_every_declared_break_on_a_pre_change_host(monkeypa
 def test_the_api_probe_flags_evidence_drift_instead_of_hiding_it(monkeypatch):
     monkeypatch.setitem(sys.modules, "MeshPart", type(sys)("MeshPart"))
     monkeypatch.setitem(sys.modules, "Sketcher", type(sys)("Sketcher"))
+    monkeypatch.setitem(sys.modules, "PartDesign", type(sys)("PartDesign"))
     monkeypatch.setattr(
         freecad_driver,
         "_probe_instance_property",
@@ -643,6 +647,7 @@ def test_an_unverified_expectation_records_evidence_without_claiming_a_match(mon
     fake_meshpart.meshFromShape = lambda **kwargs: None
     monkeypatch.setitem(sys.modules, "MeshPart", fake_meshpart)
     monkeypatch.setitem(sys.modules, "Sketcher", type(sys)("Sketcher"))
+    monkeypatch.setitem(sys.modules, "PartDesign", type(sys)("PartDesign"))
     monkeypatch.setattr(
         freecad_driver, "_probe_instance_property", lambda type_id, attribute: "absent"
     )
