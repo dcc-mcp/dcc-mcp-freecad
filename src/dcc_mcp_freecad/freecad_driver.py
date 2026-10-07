@@ -348,7 +348,7 @@ def _shape_or_error(obj, name, tool):
 
 
 def _move_to_local(geometry, source):
-    """Rebase copied geometry out of the source's placement, in place.
+    """Rebase copied geometry out of the source's placement and return it.
 
     ``obj.Shape`` and ``obj.Mesh`` are reported in document coordinates, so a
     copy taken straight from the source already carries the source's placement
@@ -358,8 +358,10 @@ def _move_to_local(geometry, source):
     is moved back by the inverse placement so that every source type then takes
     the same absolute ``Placement``.
 
-    A mesh is transformed by ``transformGeometry``'s mesh equivalent rather than
-    by a Part shape call, because ``Mesh.Mesh`` has no ``transformGeometry``.
+    The two kinds of geometry transform differently and neither is in place:
+    ``Part.Shape.transformGeometry`` returns a new shape and leaves the original
+    alone, while ``Mesh.Mesh.transform`` mutates the mesh it is called on. So
+    the shape result must be taken from the call and the mesh must not be.
     """
     placement = getattr(source, "Placement", None)
     if placement is None:
@@ -1604,14 +1606,17 @@ def model_copy_object(params):
                 setattr(result, property_name, value)
         elif mesh is not None and getattr(mesh, "CountPoints", 0):
             result = doc.addObject("Mesh::Feature", new_name)
+            # The mesh is transformed in place, so it is assigned after the
+            # call rather than from its return value.
             copied = mesh.copy()
             _move_to_local(copied, source)
             result.Mesh = copied
         else:
             result = doc.addObject("Part::Feature", new_name)
-            copied = _shape_or_error(source, object_name, tool).copy()
-            _move_to_local(copied, source)
-            result.Shape = copied
+            # transformGeometry returns a new shape, so the rebound copy is
+            # what has to be stored - assigning the original would undo the
+            # rebase and leave translation relative to the source again.
+            result.Shape = _move_to_local(_shape_or_error(source, object_name, tool).copy(), source)
         if label:
             result.Label = str(label)
         if hasattr(result, "Placement"):
