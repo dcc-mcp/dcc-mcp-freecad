@@ -87,7 +87,9 @@ What it does constrain:
 `stdout` is the script's output **plus the host's**: FreeCADCmd writes its own
 banner - version, licence, and a safe-mode notice - to the same stream. Match
 substrings rather than comparing the whole stream, and prefer a script that
-writes its results somewhere you control.
+writes its results somewhere you control. `stderr` is less reliable still: the
+host may swallow it entirely when a script exits via `SystemExit`, so treat
+`exit_code` as the authoritative outcome and stderr as best-effort detail.
 
 The script is responsible for its own persistence. A script that changes a
 durable document should be followed by `inspect_document` or
