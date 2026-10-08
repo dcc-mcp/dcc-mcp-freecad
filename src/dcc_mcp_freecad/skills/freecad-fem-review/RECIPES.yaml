@@ -32,6 +32,18 @@ recipes:
             {value, unit} objects; read value and convert deliberately.
           required: [max_von_mises, max_displacement]
           properties:
+            # Injected by the bridge after the solve, so every step can address
+            # the document the result came from.
+            document_path: {type: string, minLength: 1}
+            # Present only when the analysis was built from target_object;
+            # absent when an existing analysis_name was reused. Steps must
+            # therefore treat it as optional and keep a fallback.
+            target_object:
+              type: string
+              minLength: 1
+              maxLength: 64
+              pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'
+            analysis_name: {type: string, minLength: 1, maxLength: 64}
             max_von_mises:
               type: object
               required: [value, unit]
@@ -186,22 +198,29 @@ recipes:
           host reports as resolvable may appear in a hot spot.
         inputs:
           document_path: ${fem_result.document_path}
-          object_name: ${geometry_context.object_name}
+          object_name: ${fem_result.target_object}
+        # target_object is absent when an existing analysis was reused rather
+        # than built, so it cannot be required. Fall back to the object named by
+        # the restraint references, and if those are missing too the location
+        # degrades to object-level -- which the contract then forces into the
+        # assumption block rather than letting it pass as an anchored hot spot.
+        fallback_inputs:
+          object_name: ${fem_result.fixed_faces[0]}
         scripting_fallback: >-
-          If list_faces is unavailable, report the hot spot by the object name
-          plus the load/restraint faces carried in fem_result, and declare the
-          location as object-level only in the assumptions.
+          If list_faces is unavailable, or no object name can be resolved,
+          report the hot spot by the load/restraint faces carried in fem_result
+          and declare the location as object-level only in the assumptions.
 
       - id: inspect
         verb: read
-        tool: freecad-modeling.inspect_document
+        tool: freecad-session.inspect_document
         tool_routing:
-          freecad: freecad-modeling.inspect_document
+          freecad: freecad-session.inspect_document
         description: >-
           Optional. Supplies the real dimensions a thickening or stiffener
           recommendation has to be expressed against.
         inputs:
-          document_path: ${fem_result.document_path}
+          path: ${fem_result.document_path}
         optional: true
 
       - id: review
@@ -223,12 +242,15 @@ recipes:
       type: object
       required:
         - verdict
-        - safety_factor
         - allowable_stress
         - critical_locations
         - next_actions
         - assumptions
         - evidence
+        # safety_factor and yield_strength are deliberately NOT in this list:
+        # they only exist for the yield basis. Which of safety_factor or
+        # utilisation is required is decided by the if/then/else below, so the
+        # two bases cannot be mixed and neither can be half-reported.
       properties:
         verdict:
           type: string
@@ -237,7 +259,35 @@ recipes:
         safety_factor:
           type: number
           exclusiveMinimum: 0
-          description: allowable_stress / max_von_mises. Never the reciprocal.
+          description: >-
+            yield_strength / max_von_mises -- the margin against yield, which is
+            what the term means. NOT allowable_stress / max_von_mises: the
+            allowable already has the target divided into it, so dividing again
+            demands SF >= target^2 and understates the margin by exactly the
+            target. See verdict_basis for the allowable_stress-only case.
+
+        # Which quantity the verdict was computed from, so a reader can tell a
+        # yield-based safety factor from a code-allowable utilisation check.
+        # They are not interchangeable and mixing them is how a part at 4x
+        # margin gets reported as failing.
+        verdict_basis:
+          type: string
+          enum: [yield_safety_factor, allowable_utilisation]
+          default: yield_safety_factor
+          description: >-
+            yield_safety_factor when a yield strength is known: safety_factor is
+            yield/max_stress and is compared against target_safety_factor.
+            allowable_utilisation when the caller supplied allowable_stress
+            only: there is no yield to divide by, so judge max_von_mises /
+            allowable_stress against 1.0 and report utilisation below.
+
+        utilisation:
+          type: number
+          minimum: 0
+          description: >-
+            max_von_mises / allowable_stress. Required when verdict_basis is
+            allowable_utilisation; the inverse of neither the safety factor nor
+            the target, and never to be reported as a safety factor.
 
         allowable_stress:
           type: object
@@ -246,6 +296,18 @@ recipes:
             value: {type: number, exclusiveMinimum: 0}
             unit: {type: string}
             source: {type: string, minLength: 1}
+
+        yield_strength:
+          type: object
+          required: [value, unit, source]
+          properties:
+            value: {type: number, exclusiveMinimum: 0}
+            unit: {type: string}
+            source: {type: string, minLength: 1}
+          description: >-
+            The yield strength the verdict was computed from. Echoed so the
+            safety factor can be re-derived by hand; a safety factor with no
+            visible dividend is not auditable.
 
         # A global maximum is not a location. minItems 1 is the acceptance
         # criterion the issue states, and each entry must carry a sub-element
@@ -371,4 +433,16 @@ recipes:
             node_count: {type: integer, minimum: 0}
             unit_schema: {type: object}
             mesh_size: {type: object}
+
+      # A review judged against a code allowable has no yield strength, so it
+      # cannot report a safety factor. Requiring utilisation in that case stops
+      # an allowable-only review from inventing one.
+      if:
+        properties:
+          verdict_basis: {const: allowable_utilisation}
+        required: [verdict_basis]
+      then:
+        required: [utilisation]
+      else:
+        required: [safety_factor, yield_strength]
       additionalProperties: false

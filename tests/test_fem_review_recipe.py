@@ -16,6 +16,7 @@ contract that has only ever been satisfied has not been tested.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 
 import pytest
@@ -83,11 +84,26 @@ ASSUMPTIONS = [
     },
 ]
 
+# The cantilever: 60 MPa peak against a 250 MPa yield. The safety factor is
+# 250/60 = 4.167 -- the margin against yield, not 125/60 = 2.083. The latter
+# divides by the target twice and is the error test_arithmetic_* exists to kill.
+YIELD_MPA = 250.0
+TARGET_SF = 2.0
+PEAK_MPA = 60.0
+SAFETY_FACTOR = YIELD_MPA / PEAK_MPA
+ALLOWABLE_MPA = YIELD_MPA / TARGET_SF
+
 GOOD = {
     "verdict": "satisfied",
-    "safety_factor": 2.0833333333333335,
+    "safety_factor": SAFETY_FACTOR,
+    "verdict_basis": "yield_safety_factor",
+    "yield_strength": {
+        "value": YIELD_MPA,
+        "unit": "MPa",
+        "source": "built-in generic table for DccMcpStructuralSteel",
+    },
     "allowable_stress": {
-        "value": 125.0,
+        "value": ALLOWABLE_MPA,
         "unit": "MPa",
         "source": "yield 250 MPa / target safety factor 2.0",
     },
@@ -99,11 +115,26 @@ GOOD = {
         "verdict": "no_limit_given",
     },
     "evidence": {
-        "max_von_mises": {"value": 60.0, "unit": "MPa"},
+        "max_von_mises": {"value": PEAK_MPA, "unit": "MPa"},
         "source_analysis": "Analysis",
         "node_count": 4000,
     },
 }
+
+
+def _utilisation_review():
+    """A review judged against a code allowable, with no yield strength."""
+    review = copy.deepcopy(GOOD)
+    review.pop("safety_factor")
+    review.pop("yield_strength")
+    review["verdict_basis"] = "allowable_utilisation"
+    review["utilisation"] = PEAK_MPA / ALLOWABLE_MPA
+    review["allowable_stress"] = {
+        "value": ALLOWABLE_MPA,
+        "unit": "MPa",
+        "source": "ASME VIII Div.1 allowable for the design temperature",
+    }
+    return review
 
 
 # ── The skill itself ───────────────────────────────────────────────────────
@@ -277,9 +308,11 @@ def test_the_worked_example_is_the_verified_cantilever():
 def test_a_violated_verdict_validates_when_the_stress_exceeds_allowable():
     review = copy.deepcopy(GOOD)
     review["verdict"] = "violated"
-    review["safety_factor"] = 0.8
+    review["safety_factor"] = YIELD_MPA / 156.25
     review["critical_locations"] = [_location(von_mises={"value": 156.25, "unit": "MPa"})]
+    review["evidence"]["max_von_mises"] = {"value": 156.25, "unit": "MPa"}
     assert _validate(review) == []
+    assert review["safety_factor"] < TARGET_SF
 
 
 # ── Acceptance 1: assumptions are a hard gate ─────────────────────────────
@@ -490,10 +523,137 @@ def test_a_non_positive_safety_factor_is_rejected():
     assert _validate(review)
 
 
-def test_a_review_with_no_safety_factor_is_rejected():
+def test_a_yield_basis_review_with_no_safety_factor_is_rejected():
     review = copy.deepcopy(GOOD)
     review.pop("safety_factor")
     assert _validate(review)
+
+
+def test_a_yield_basis_review_must_echo_the_yield_it_used():
+    """A safety factor with no visible dividend is not auditable.
+
+    If the yield is not in the output, the reader cannot re-derive 4.167 from
+    250 and 60, and has to take the verdict on trust -- which is the exact
+    failure mode the assumption block is meant to prevent.
+    """
+    review = copy.deepcopy(GOOD)
+    review.pop("yield_strength")
+    assert _validate(review)
+
+
+def test_an_allowable_basis_review_must_report_utilisation():
+    """No yield means no safety factor, so one must not be invented."""
+    review = _utilisation_review()
+    review.pop("utilisation")
+    assert _validate(review)
+
+
+def test_an_allowable_basis_review_validates():
+    assert _validate(_utilisation_review()) == []
+
+
+def test_a_yield_basis_review_may_not_report_utilisation_as_its_basis():
+    review = copy.deepcopy(GOOD)
+    review["verdict_basis"] = "allowable_utilisation"
+    assert _validate(review), "switching basis without supplying utilisation must fail"
+
+
+@pytest.mark.parametrize("basis", ["yield_safety_factor", "yield-over-target", ""])
+def test_an_off_menu_verdict_basis_is_rejected(basis):
+    review = copy.deepcopy(GOOD)
+    review["verdict_basis"] = basis
+    if basis == "yield_safety_factor":
+        assert _validate(review) == []
+    else:
+        assert _validate(review)
+
+
+# ── Arithmetic consistency ────────────────────────────────────────────────
+#
+# The bug that produced this section: the safety factor was defined as
+# allowable/max_stress, but the allowable already had the target divided into
+# it. That demands SF >= target^2, so a part with 4.17x margin was reported at
+# 2.08 and, at a target of 3, as failing outright. Every test in this section
+# is a mutation arm the original suite survived.
+
+
+def test_the_safety_factor_is_the_yield_divided_by_the_peak_stress():
+    """The headline arithmetic check.
+
+    The fixture is the verified cantilever: 60 MPa peak, 250 MPa yield. The
+    safety factor must be 4.167, not 2.083 -- and this asserts the relationship
+    rather than the literal, so it cannot be satisfied by hard-coding.
+    """
+    peak = GOOD["evidence"]["max_von_mises"]["value"]
+    yield_mpa = GOOD["yield_strength"]["value"]
+    assert GOOD["safety_factor"] == pytest.approx(yield_mpa / peak)
+    assert GOOD["safety_factor"] == pytest.approx(4.166666666666667)
+
+
+def test_the_safety_factor_is_not_the_allowable_divided_by_the_peak():
+    """The wrong formula, asserted against explicitly.
+
+    If the contract ever drifts back to allowable/max_stress, this fails on the
+    number itself instead of waiting for a reader to notice the verdict moved.
+    """
+    peak = GOOD["evidence"]["max_von_mises"]["value"]
+    assert GOOD["safety_factor"] != pytest.approx(GOOD["allowable_stress"]["value"] / peak)
+
+
+def test_the_allowable_is_the_yield_divided_by_the_target():
+    assert GOOD["allowable_stress"]["value"] == pytest.approx(YIELD_MPA / TARGET_SF)
+
+
+@pytest.mark.parametrize("target", [1.5, 2.0, 3.0, 5.0])
+def test_the_verdict_does_not_flip_as_the_target_changes(target):
+    """The symptom that made the P1 a P1.
+
+    Under the buggy formula the verdict flipped from satisfied to violated as
+    the target rose, because the reported factor collapsed toward zero while
+    the real margin stayed at 4.167. The verdict must be a function of the
+    margin and the target, never of the target twice.
+    """
+    peak = GOOD["evidence"]["max_von_mises"]["value"]
+    safety_factor = YIELD_MPA / peak
+    allowable = YIELD_MPA / target
+    # The stress check and the safety-factor check must always agree.
+    stress_ok = peak <= allowable
+    factor_ok = safety_factor >= target
+    assert stress_ok == factor_ok, "target=%s: stress check and factor check disagree" % target
+
+
+def test_a_violated_review_is_arithmetically_consistent():
+    """A violated verdict must actually be below the target, not merely labelled."""
+    review = copy.deepcopy(GOOD)
+    review["verdict"] = "violated"
+    stressed = 208.0
+    review["safety_factor"] = YIELD_MPA / stressed  # 1.202, below the 2.0 target
+    review["critical_locations"] = [_location(von_mises={"value": stressed, "unit": "MPa"})]
+    review["evidence"]["max_von_mises"] = {"value": stressed, "unit": "MPa"}
+    assert _validate(review) == []
+    assert review["safety_factor"] < TARGET_SF
+    assert review["safety_factor"] == pytest.approx(YIELD_MPA / stressed)
+
+
+def test_the_bands_are_defined_in_the_skill_body():
+    """'Never rounded into a different band' is unenforceable without numbers.
+
+    The original contract had an enum and no thresholds, so the rule was prose.
+    Each band's defining comparison is asserted individually -- checking only
+    that the text mentions 1.1 would survive deleting any single band's rule.
+    """
+    body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    # The band table: one row per verdict, each naming its own comparison.
+    rows = re.findall(r"^\|\s*`(\w+)`\s*\|\s*`([^`]+)`\s*\|", body, re.MULTILINE)
+    bands = dict(rows)
+    assert set(bands) >= {"satisfied", "marginal", "violated"}, (
+        "every verdict needs a band rule, found %s" % sorted(bands)
+    )
+    assert bands["violated"] == "safety_factor < target"
+    assert bands["marginal"] == "target <= safety_factor < target * 1.1"
+    assert bands["satisfied"] == "safety_factor >= target * 1.1"
+    # The marginal band must have real width, or it is a rounding artefact.
+    assert "10%" in body, "the marginal width is not stated"
 
 
 def test_next_actions_cannot_be_empty():
@@ -555,32 +715,126 @@ def test_a_deflection_check_with_no_verdict_is_rejected():
 # ── The contract itself ───────────────────────────────────────────────────
 
 
-def test_every_step_tool_is_routed():
-    """An unrouted step is a step nobody can execute.
+def _declared_tools():
+    """Every tool the adapter actually ships, as {skill.tool: schema}.
 
-    Same lock as the tool catalog: a declaration that advertises something the
-    runtime cannot reach fails silently at the worst possible moment.
+    Built from the same tree the server loads, so a routing entry that names a
+    skill or tool which does not exist is caught here rather than at runtime.
     """
+    tools = {}
+    for skill_dir in sorted(SKILLS.iterdir()):
+        manifest = skill_dir / "tools.yaml"
+        if not manifest.is_file():
+            continue
+        payload = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        for tool in payload.get("tools") or ():
+            tools["%s.%s" % (skill_dir.name, tool["name"])] = tool
+    assert tools, "no tools were collected; the routing lock ran vacuously"
+    return tools
+
+
+def test_every_step_tool_exists_in_the_adapter():
+    """A step pointing at a tool that does not exist is a step nobody can run.
+
+    The previous form only checked that tool_routing agreed with tool, which a
+    typo satisfies perfectly -- `freecad-modeling.inspect_document` passed while
+    the tool actually lives in freecad-session. This resolves the address.
+    """
+    tools = _declared_tools()
     for step in RECIPE["steps"]:
+        address = step.get("tool")
+        if step.get("verb") == "report":
+            # The report step is this recipe's own output, not a host tool.
+            continue
+        assert address in tools, "step %r names %r, which the adapter does not ship" % (
+            step.get("id"),
+            address,
+        )
         routing = step.get("tool_routing") or {}
         assert routing, "step %r has no tool_routing" % step.get("id")
-        assert routing.get("freecad") == step["tool"], step.get("id")
+        assert routing.get("freecad") == address, step.get("id")
 
 
-def test_every_placeholder_is_a_declared_input():
-    """A placeholder with no input to fill it materialises as a literal."""
-    import re
+def test_step_inputs_match_the_schema_of_the_tool_they_call():
+    """The right tool with the wrong argument names is just as unexecutable.
 
-    declared = set((RECIPE["inputs_schema"].get("properties") or {}).keys())
+    `inspect_document` takes `path` and sets additionalProperties: false, so
+    passing `document_path` is rejected outright. Names have to be checked
+    against the tool's own schema, not against whatever the step author typed.
+    """
+    tools = _declared_tools()
+    problems = []
     for step in RECIPE["steps"]:
-        for value in (step.get("inputs") or {}).values():
-            if not isinstance(value, str):
-                continue
-            for name in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value):
-                assert name in declared, "step %r references undeclared %r" % (
-                    step.get("id"),
-                    name,
+        address = step.get("tool")
+        tool = tools.get(address)
+        if tool is None:
+            continue
+        properties = (tool.get("input_schema") or {}).get("properties") or {}
+        for name in step.get("inputs") or ():
+            if name not in properties:
+                problems.append(
+                    "step %r passes %r to %s, which declares %s"
+                    % (step.get("id"), name, address, sorted(properties))
                 )
+    assert problems == []
+
+
+def test_every_placeholder_resolves_to_a_declared_path():
+    """A placeholder with no input to fill it materialises as a literal.
+
+    The pattern must accept dotted paths: every placeholder in this recipe is
+    one, and a pattern without the dot matched nothing at all, so the previous
+    form of this test validated zero placeholders.
+    """
+    schemas = {"fem_result": RECIPE["inputs_schema"]["properties"]["fem_result"]}
+    schemas.update(
+        {name: schema for name, schema in (RECIPE["inputs_schema"]["properties"] or {}).items()}
+    )
+    problems = []
+    for step in RECIPE["steps"]:
+        for key in ("inputs", "fallback_inputs"):
+            for value in (step.get(key) or {}).values():
+                if not isinstance(value, str):
+                    continue
+                for path in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_.]*)\}", value):
+                    if not _path_exists(path, schemas):
+                        problems.append(
+                            "step %r (%.16s) references undeclared %r" % (step.get("id"), key, path)
+                        )
+    assert problems == []
+
+
+def _path_exists(path, schemas):
+    """True when every segment of a dotted placeholder path is declared.
+
+    A bare-leaf reference such as `${fem_result.fixed_faces[0]}` is accepted
+    when its root array is declared: indexing a declared list is a resolution
+    concern, not a declaration one.
+    """
+    segments = re.sub(r"\[\d+\]", "", path).split(".")
+    node = schemas.get(segments[0])
+    if node is None:
+        return False
+    for segment in segments[1:]:
+        if not isinstance(node, dict):
+            return False
+        properties = node.get("properties") or {}
+        node = properties.get(segment)
+        if node is None:
+            return False
+    return True
+
+
+def test_a_location_with_an_off_menu_kind_is_rejected():
+    """`kind` is what separates a real hot spot from a restraint artefact.
+
+    It carries the acceptance criterion, so it needs the same off-enum guard
+    `verdict` has -- otherwise swapping the enum for a free-text field is a
+    silent regression.
+    """
+    review = copy.deepcopy(GOOD)
+    review["critical_locations"] = [_location(kind="looks_stressed")]
+    assert _validate(review)
 
 
 def test_the_output_contract_can_fail():

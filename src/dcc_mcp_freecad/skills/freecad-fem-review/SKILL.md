@@ -65,14 +65,42 @@ review.
 
 ### 1. Verdict and safety factor
 
-Compare `max_von_mises` against the allowable stress and report one of
-`satisfied` / `marginal` / `violated`. The safety factor is
-`allowable / max_von_mises` — never the reciprocal, and never rounded into a
-different verdict band than the number supports.
+The safety factor is **`yield_strength / max_von_mises`** — how far the peak
+stress sits below yield. This is the quantity the term means in every
+structural hand calculation, and it is the one the verdict is judged against.
 
-The allowable stress comes from the target safety factor and a yield strength.
+The allowable stress is `yield_strength / target_safety_factor`: the stress the
+part is permitted to reach. It is a *result* of the safety factor, not an input
+to it. Dividing by the target twice — once to get the allowable, then again to
+get a "safety factor" from it — is the error this section exists to prevent: it
+silently demands `SF >= target²`, and at a target of 3 it reports a part at
+4.17x yield margin as `violated`.
+
 Yield strength is **user-supplied first**; when it is not supplied it comes from
 the built-in table below, and the source is then part of the output.
+
+### Verdict bands
+
+Bands are defined against the **safety factor**, so they are independent of how
+the target was expressed:
+
+| Band | Rule | Meaning |
+| --- | --- | --- |
+| `violated` | `safety_factor < target` | Below the required margin. |
+| `marginal` | `target <= safety_factor < target * 1.1` | Meets the target with under 10% headroom. |
+| `satisfied` | `safety_factor >= target * 1.1` | Meets the target with real headroom. |
+
+The 10% marginal width is deliberately narrow, and deliberately not zero: a
+result exactly on the target has no margin for the model error the assumption
+block already admits to, so it must not read as a clean pass. `marginal` is
+never a rounding artefact — it is a real band with real width, and the number
+never gets rounded across it.
+
+When the caller supplies `allowable_stress` directly instead of a yield
+strength, there is no yield to divide by, so the safety factor is not
+computable. In that case report against `utilisation = max_von_mises /
+allowable_stress`, judge `satisfied` at `<= 1/1.1`, `marginal` at
+`<= 1.0`, and `violated` above it, and say in the output which basis was used.
 
 ### 2. Where, named
 
@@ -165,9 +193,14 @@ already refused upstream.
 `max_displacement` 0.190 mm. Against a target safety factor of 2 on a 250 MPa
 yield:
 
-- allowable 125 MPa, safety factor 2.08, verdict **`satisfied`** — but only just
-  above the target, so `satisfied` with the margin stated rather than a bare
-  pass;
+- allowable 125 MPa, safety factor **4.17** against the 250 MPa yield, verdict
+  **`satisfied`** — 4.17 is more than `2.0 * 1.1`, so this is a comfortable pass
+  and not a marginal one. The part is carrying 60 MPa of a 250 MPa yield;
+- the margin is not uniform, though: at a target of 3 the allowable drops to
+  83.3 MPa and the safety factor is still 4.17, so the verdict stays
+  `satisfied`. A review that instead divided the allowable by the stress again
+  would report 1.39 and call this `violated` — the failure mode the previous
+  section warns about;
 - the hot spot is the **root face at the fixed end** (`Beam:Face3`), which is
   also a fully restrained face, so the peak is reported as **part artefact** —
   the true bending peak sits just outboard of the restraint and the element
