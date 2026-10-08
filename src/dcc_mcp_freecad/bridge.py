@@ -14,6 +14,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ElementTree
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
@@ -697,6 +698,9 @@ class FreecadBridge:
         if backend not in {"freecadcmd", "python-module"}:
             raise ValueError("FreeCAD backend must be freecadcmd or python-module")
         self.backend = backend
+        # Set while a mutation is in flight, so a nonzero native exit is refused
+        # instead of publishing a staged but unverified change.
+        self._reject_nonzero_exit = False
         self.module_directory = None
         if backend == "python-module":
             if not executable or not module_directory:
@@ -1037,10 +1041,15 @@ class FreecadBridge:
                     stderr_file.seek(0)
                     stdout = stdout_file.read(65_537)
                     stderr = stderr_file.read(65_537)
-            if process.returncode != 0:
+            if process.returncode != 0 and self._reject_nonzero_exit:
+                # A child that wrote a result file and *then* exited non-zero
+                # must not be published as a mutation: the staged change is
+                # unverified, so the caller has to see the failure instead of a
+                # success. Read-only calls instead report the exit code through
+                # ``_transport_fields`` and let the caller decide.
                 raise BridgeError(
-                    "FreeCAD %s backend exited unsuccessfully (exit %s)"
-                    % (self.backend, process.returncode)
+                    "FreeCAD %s backend exited unsuccessfully (exit %s): %s"
+                    % (self.backend, process.returncode, (stderr or stdout).strip()[:1_000])
                 )
             if not result_path.is_file():
                 raise BridgeError(
@@ -1267,6 +1276,22 @@ class FreecadBridge:
             **_transport_fields(started, process.returncode, stdout, stderr),
         }
 
+    @contextmanager
+    def _rejecting_nonzero_exit(self) -> Iterator[None]:
+        """Refuse a nonzero native exit for calls made inside this block.
+
+        A mutation stages its change before the result is verified, so a child
+        that exits non-zero after writing ``ok: True`` must not have that change
+        published. Read-only calls stay outside this block and report the exit
+        code to the caller as a transport field instead.
+        """
+        previous = self._reject_nonzero_exit
+        self._reject_nonzero_exit = True
+        try:
+            yield
+        finally:
+            self._reject_nonzero_exit = previous
+
     def _mutate_document(
         self,
         method: str,
@@ -1287,7 +1312,8 @@ class FreecadBridge:
             request = dict(params)
             request["document_path"] = str(staged)
             try:
-                result = self._invoke(method, request, timeout_secs)
+                with self._rejecting_nonzero_exit():
+                    result = self._invoke(method, request, timeout_secs)
             except BaseException as exc:
                 raise _unstage_failure(exc, staged, document) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
@@ -1812,11 +1838,16 @@ class FreecadBridge:
         staged.unlink()
         try:
             try:
-                result = self._invoke(
-                    "document.save_copy",
-                    {"document_path": str(source), "output_path": str(staged), **presentation},
-                    timeout_secs,
-                )
+                with self._rejecting_nonzero_exit():
+                    result = self._invoke(
+                        "document.save_copy",
+                        {
+                            "document_path": str(source),
+                            "output_path": str(staged),
+                            **presentation,
+                        },
+                        timeout_secs,
+                    )
             except BaseException as exc:
                 raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
