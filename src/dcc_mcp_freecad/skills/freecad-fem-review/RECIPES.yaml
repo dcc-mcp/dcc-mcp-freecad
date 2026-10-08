@@ -200,12 +200,12 @@ recipes:
           document_path: ${fem_result.document_path}
           object_name: ${fem_result.target_object}
         # target_object is absent when an existing analysis was reused rather
-        # than built, so it cannot be required. Fall back to the object named by
-        # the restraint references, and if those are missing too the location
-        # degrades to object-level -- which the contract then forces into the
-        # assumption block rather than letting it pass as an anchored hot spot.
-        fallback_inputs:
-          object_name: ${fem_result.fixed_faces[0]}
+        # than built, so it cannot be required. When no object name can be
+        # resolved, the location degrades to object-level -- which the contract
+        # then forces into the assumption block rather than letting it pass as
+        # an anchored hot spot. The restraint references in fixed_faces are
+        # face references (e.g. "Beam:Face3"), not object names, so they cannot
+        # be resolved through this step's object_name input.
         scripting_fallback: >-
           If list_faces is unavailable, or no object name can be resolved,
           report the hot spot by the load/restraint faces carried in fem_result
