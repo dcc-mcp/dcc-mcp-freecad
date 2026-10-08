@@ -1694,16 +1694,26 @@ class FreecadBridge:
         and ``next_offset`` for paging, and the budget counters that explain why
         a listing stopped where it did.
 
-        The serialized byte budget bounds the ``entries`` array alone. The
-        response envelope -- ``roots``, ``pattern``, the paging and budget
-        counters -- is not counted against it.
+        Entries are sorted by path. When the scan budget runs out the walk
+        stops early, so the sorted set is whatever the scan reached; the files
+        beyond the stopping point were never visited and no ``offset`` reaches
+        them. That partial set is still paged normally: a non-``None``
+        ``next_offset`` means more already-scanned entries remain, so paging
+        on is the right move. Only when ``next_offset`` is ``None`` and
+        ``scan_budget_exhausted`` is true has the scanned portion been
+        exhausted -- then narrow ``root`` or ``pattern``.
 
-        ``entries`` is a page of the scan sorted by path, not a prefix of the
-        full result order. When the scan budget runs out the walk stops early,
-        so the sorted set it produces is a subset of the real matches: the
-        files beyond the stopping point were never visited, and no ``offset``
-        reaches them. ``truncated`` is true and ``next_offset`` is ``None`` in
-        that case -- narrow ``root`` or ``pattern`` instead of paging on.
+        The per-call read budget is not a stopping condition: exhausting it
+        only turns later digests into ``"unavailable"`` while the enumeration
+        continues, and ``truncated`` reflects the scan alone. A listing can
+        therefore report ``read_budget_exhausted`` true with ``truncated``
+        false.
+
+        The serialized byte budget bounds the ``entries`` array alone, counted
+        as the per-entry JSON character length summed over the emitted entries
+        (no ``,``/``[``/``]`` separators). The response envelope -- ``roots``,
+        ``pattern``, the paging and budget counters -- is not counted against
+        it.
         """
         matcher = _compile_list_pattern(pattern)
         bounded_limit = _bounded_int(limit, "limit", 1, _MAX_LIST_LIMIT)
