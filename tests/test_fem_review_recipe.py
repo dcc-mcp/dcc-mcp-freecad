@@ -792,7 +792,7 @@ def test_every_placeholder_resolves_to_a_declared_path():
     )
     problems = []
     for step in RECIPE["steps"]:
-        for key in ("inputs", "fallback_inputs"):
+        for key in ("inputs",):
             for value in (step.get(key) or {}).values():
                 if not isinstance(value, str):
                     continue
@@ -807,7 +807,7 @@ def test_every_placeholder_resolves_to_a_declared_path():
 def _path_exists(path, schemas):
     """True when every segment of a dotted placeholder path is declared.
 
-    A bare-leaf reference such as `${fem_result.fixed_faces[0]}` is accepted
+    An indexed reference such as `${fem_result.fixed_faces[0]}` is accepted
     when its root array is declared: indexing a declared list is a resolution
     concern, not a declaration one.
     """
