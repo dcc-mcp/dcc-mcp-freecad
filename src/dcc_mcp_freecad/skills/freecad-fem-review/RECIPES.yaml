@@ -1,0 +1,448 @@
+# The fem-review recipe pack.
+#
+# This skill deliberately ships no tools.yaml: the interpretation layer adds no
+# typed tool, it orchestrates the ones freecad-analysis already exposes. What it
+# owns is the *output contract*, and the contract is the deliverable -- the four
+# required sections below are the difference between a verdict and a plausible
+# story about a stress number.
+#
+# output_contract is a schema that can fail. A review missing a named location,
+# or missing its assumption block, does not validate -- which is the point: a
+# contract that cannot fail is documentation, not a contract. The negative tests
+# in tests/test_fem_review_recipe.py prove each of those omissions is rejected.
+
+recipes:
+  - name: fem-review
+    dcc: freecad
+    description: >-
+      Read a completed run_fem_analysis solve and return an engineering verdict:
+      safety factor against the allowable stress, the critical location named as
+      an object plus a face or edge, executable next actions, and every
+      assumption the verdict rests on. Read-only with respect to the document.
+    toolset_profiles: [freecad-analysis]
+
+    inputs_schema:
+      type: object
+      required: [fem_result]
+      properties:
+        fem_result:
+          type: object
+          description: >-
+            The payload run_fem_analysis returned. Quantities are
+            {value, unit} objects; read value and convert deliberately.
+          required: [max_von_mises, max_displacement]
+          properties:
+            # Injected by the bridge after the solve, so every step can address
+            # the document the result came from.
+            document_path: {type: string, minLength: 1}
+            # Present only when the analysis was built from target_object;
+            # absent when an existing analysis_name was reused. Steps must
+            # therefore treat it as optional and keep a fallback.
+            target_object:
+              type: string
+              minLength: 1
+              maxLength: 64
+              pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$'
+            analysis_name: {type: string, minLength: 1, maxLength: 64}
+            max_von_mises:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number, minimum: 0}
+                unit: {type: string}
+            max_displacement:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number}
+                unit: {type: string}
+            axis_displacement:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number}
+                unit: {type: string}
+            min_von_mises:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number, minimum: 0}
+                unit: {type: string}
+            material:
+              type: object
+              properties:
+                name: {type: string}
+                youngs_modulus:
+                  type: object
+                  required: [value, unit]
+                  properties:
+                    value: {type: number, exclusiveMinimum: 0}
+                    unit: {type: string}
+                poisson_ratio:
+                  type: number
+                  minimum: -0.999999
+                  maximum: 0.499999
+            fixed_faces:
+              type: array
+              items:
+                type: string
+                pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$'
+            load:
+              type: object
+              properties:
+                faces:
+                  type: array
+                  items:
+                    type: string
+                    pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$'
+            mesh:
+              type: object
+              properties:
+                size:
+                  type: object
+                  required: [value, unit]
+                  properties:
+                    value: {type: number, exclusiveMinimum: 0}
+                    unit: {type: string}
+                element_order: {type: string}
+            node_count: {type: integer, minimum: 0}
+            unit_schema: {type: object}
+            solver_workdir: {type: string}
+            verified:
+              type: array
+              items: {type: string}
+
+        target_safety_factor:
+          type: number
+          exclusiveMinimum: 0
+          default: 2.0
+          description: >-
+            Required safety factor on yield. Lower it and the verdict moves; the
+            review states which target it judged against rather than implying a
+            universal pass mark.
+
+        yield_strength:
+          type: object
+          description: >-
+            Allowable-stress basis supplied by the user. Wins over the built-in
+            table, and the provenance line then says user-supplied.
+          required: [value, unit]
+          properties:
+            value: {type: number, exclusiveMinimum: 0}
+            unit: {type: string}
+            source:
+              type: string
+              minLength: 1
+              description: Datasheet, mill certificate or standard this value came from.
+
+        allowable_stress:
+          type: object
+          description: >-
+            Allowable stress given directly, bypassing the yield/safety-factor
+            division. Use when the governing limit is a code allowable, a fatigue
+            limit or a vendor rating rather than yield/target.
+          required: [value, unit]
+          properties:
+            value: {type: number, exclusiveMinimum: 0}
+            unit: {type: string}
+            source: {type: string, minLength: 1}
+
+        geometry_context:
+          type: object
+          description: Key dimensions from inspect_document, used to size a concrete recommendation.
+          properties:
+            object_name: {type: string}
+            length: {type: object}
+            width: {type: object}
+            height: {type: object}
+
+        convergence:
+          type: object
+          description: >-
+            Mesh convergence evidence. Omit and the review must declare the mesh
+            as unchecked rather than implying it converged.
+          properties:
+            checked: {type: boolean, default: false}
+            mesh_sizes:
+              type: array
+              items: {type: number, exclusiveMinimum: 0}
+            relative_change:
+              type: number
+              minimum: 0
+            tolerance:
+              type: number
+              minimum: 0
+              default: 0.05
+
+        max_deflection:
+          type: object
+          description: Serviceability limit on deflection, judged separately from strength.
+          required: [value, unit]
+          properties:
+            value: {type: number, exclusiveMinimum: 0}
+            unit: {type: string}
+      additionalProperties: false
+
+    # Steps name the tools this recipe orchestrates. fem-review is an
+    # interpretation over an existing solve, so the tool routing is read-only
+    # discovery plus the report -- it never re-solves and never writes.
+    steps:
+      - id: anchor
+        verb: read
+        tool: freecad-analysis.list_faces
+        tool_routing:
+          freecad: freecad-analysis.list_faces
+        description: >-
+          Resolve the object's faces before naming a location. Sub-element
+          naming moved between FreeCAD release lines, so only references the
+          host reports as resolvable may appear in a hot spot.
+        inputs:
+          document_path: ${fem_result.document_path}
+          object_name: ${fem_result.target_object}
+        # target_object is absent when an existing analysis was reused rather
+        # than built, so it cannot be required. Fall back to the object named by
+        # the restraint references, and if those are missing too the location
+        # degrades to object-level -- which the contract then forces into the
+        # assumption block rather than letting it pass as an anchored hot spot.
+        fallback_inputs:
+          object_name: ${fem_result.fixed_faces[0]}
+        scripting_fallback: >-
+          If list_faces is unavailable, or no object name can be resolved,
+          report the hot spot by the load/restraint faces carried in fem_result
+          and declare the location as object-level only in the assumptions.
+
+      - id: inspect
+        verb: read
+        tool: freecad-session.inspect_document
+        tool_routing:
+          freecad: freecad-session.inspect_document
+        description: >-
+          Optional. Supplies the real dimensions a thickening or stiffener
+          recommendation has to be expressed against.
+        inputs:
+          path: ${fem_result.document_path}
+        optional: true
+
+      - id: review
+        verb: report
+        tool: freecad-fem-review.fem-review
+        tool_routing:
+          freecad: freecad-fem-review.fem-review
+        description: >-
+          Compute the safety factor, name the critical location, choose next
+          actions and write the assumption block. Produces the output_contract
+          payload below.
+
+    # The contract that can fail. `required` is enforced by
+    # validate_recipe_inputs' Draft-2020-12 validator, and the assertions below
+    # it are the review's own hard rules: a location with no face/edge, an empty
+    # assumption list, or an assumption block that never mentions mesh
+    # convergence is rejected rather than returned.
+    output_contract:
+      type: object
+      required:
+        - verdict
+        - allowable_stress
+        - critical_locations
+        - next_actions
+        - assumptions
+        - evidence
+        # safety_factor and yield_strength are deliberately NOT in this list:
+        # they only exist for the yield basis. Which of safety_factor or
+        # utilisation is required is decided by the if/then/else below, so the
+        # two bases cannot be mixed and neither can be half-reported.
+      properties:
+        verdict:
+          type: string
+          enum: [satisfied, marginal, violated]
+
+        safety_factor:
+          type: number
+          exclusiveMinimum: 0
+          description: >-
+            yield_strength / max_von_mises -- the margin against yield, which is
+            what the term means. NOT allowable_stress / max_von_mises: the
+            allowable already has the target divided into it, so dividing again
+            demands SF >= target^2 and understates the margin by exactly the
+            target. See verdict_basis for the allowable_stress-only case.
+
+        # Which quantity the verdict was computed from, so a reader can tell a
+        # yield-based safety factor from a code-allowable utilisation check.
+        # They are not interchangeable and mixing them is how a part at 4x
+        # margin gets reported as failing.
+        verdict_basis:
+          type: string
+          enum: [yield_safety_factor, allowable_utilisation]
+          default: yield_safety_factor
+          description: >-
+            yield_safety_factor when a yield strength is known: safety_factor is
+            yield/max_stress and is compared against target_safety_factor.
+            allowable_utilisation when the caller supplied allowable_stress
+            only: there is no yield to divide by, so judge max_von_mises /
+            allowable_stress against 1.0 and report utilisation below.
+
+        utilisation:
+          type: number
+          minimum: 0
+          description: >-
+            max_von_mises / allowable_stress. Required when verdict_basis is
+            allowable_utilisation; the inverse of neither the safety factor nor
+            the target, and never to be reported as a safety factor.
+
+        allowable_stress:
+          type: object
+          required: [value, unit, source]
+          properties:
+            value: {type: number, exclusiveMinimum: 0}
+            unit: {type: string}
+            source: {type: string, minLength: 1}
+
+        yield_strength:
+          type: object
+          required: [value, unit, source]
+          properties:
+            value: {type: number, exclusiveMinimum: 0}
+            unit: {type: string}
+            source: {type: string, minLength: 1}
+          description: >-
+            The yield strength the verdict was computed from. Echoed so the
+            safety factor can be re-derived by hand; a safety factor with no
+            visible dividend is not auditable.
+
+        # A global maximum is not a location. minItems 1 is the acceptance
+        # criterion the issue states, and each entry must carry a sub-element
+        # reference so the user can find the place in the model.
+        critical_locations:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [object_name, reference, kind, von_mises]
+            properties:
+              object_name: {type: string, minLength: 1}
+              reference:
+                type: string
+                pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$'
+              kind:
+                type: string
+                enum: [geometric_hot_spot, boundary_condition_artefact]
+              von_mises:
+                type: object
+                required: [value, unit]
+                properties:
+                  value: {type: number, minimum: 0}
+                  unit: {type: string}
+              note: {type: string, minLength: 1}
+          description: >-
+            Named hot spots. A fully restrained face or a point load is
+            kind=boundary_condition_artefact: nodal stress there is extrapolated
+            and must not be reported as a design finding.
+
+        next_actions:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [action, rationale]
+            properties:
+              action: {type: string, minLength: 1}
+              rationale: {type: string, minLength: 1}
+              target:
+                type: string
+                pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$'
+
+        # The hard gate. A review that does not declare its assumptions is not a
+        # short review, it is a failed one.
+        assumptions:
+          type: array
+          minItems: 3
+          items:
+            type: object
+            required: [topic, statement]
+            properties:
+              topic:
+                type: string
+                enum:
+                  - constraint_idealisation
+                  - mesh_convergence
+                  - material_provenance
+                  - model_class
+                  - units
+                  - other
+              statement: {type: string, minLength: 1}
+          allOf:
+            - contains:
+                type: object
+                properties:
+                  topic: {const: constraint_idealisation}
+                required: [topic]
+              description: >-
+                A "fixed" face is perfectly rigid; real mountings flex. Always
+                declare.
+            - contains:
+                type: object
+                properties:
+                  topic: {const: material_provenance}
+                required: [topic]
+              description: >-
+                Where the yield strength came from -- user-supplied or the
+                built-in generic table. Always declare.
+            - contains:
+                type: object
+                properties:
+                  topic: {const: mesh_convergence}
+                required: [topic]
+              description: >-
+                Whether the extrema were checked at more than one mesh size.
+                Unchecked is a valid state and must be declared as unchecked.
+
+        deflection_check:
+          type: object
+          required: [max_displacement, verdict]
+          properties:
+            max_displacement:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number}
+                unit: {type: string}
+            limit:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number, exclusiveMinimum: 0}
+                unit: {type: string}
+            verdict:
+              type: string
+              enum: [within_limit, exceeds_limit, no_limit_given]
+
+        # The evidence chain, so a verdict can be audited back to the solve it
+        # came from instead of being taken on trust.
+        evidence:
+          type: object
+          required: [max_von_mises, source_analysis]
+          properties:
+            max_von_mises:
+              type: object
+              required: [value, unit]
+              properties:
+                value: {type: number, minimum: 0}
+                unit: {type: string}
+            source_analysis: {type: string, minLength: 1}
+            solver_workdir: {type: string}
+            node_count: {type: integer, minimum: 0}
+            unit_schema: {type: object}
+            mesh_size: {type: object}
+
+      # A review judged against a code allowable has no yield strength, so it
+      # cannot report a safety factor. Requiring utilisation in that case stops
+      # an allowable-only review from inventing one.
+      if:
+        properties:
+          verdict_basis: {const: allowable_utilisation}
+        required: [verdict_basis]
+      then:
+        required: [utilisation]
+      else:
+        required: [safety_factor, yield_strength]
+      additionalProperties: false
