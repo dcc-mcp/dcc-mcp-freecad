@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.7.0...v0.8.0) (2026-10-08)
+
+
+### Features
+
+* add bounded list_documents discovery under allowed roots ([3181bfc](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/3181bfceedb650494d162e9e2de61538de8a8fb4))
+* **analysis:** add fem-review recipe turning a solve into an engineering verdict ([#60](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/60)) ([e9a1209](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/e9a1209a9e75bb11ae34feb327b35a36029cb52c))
+* **analysis:** add typed FEM structural analysis with verified units ([#45](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/45)) ([c9837c4](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/c9837c4c2165da1e387f5612219fc27bbc236376))
+* **modeling:** add scale, copy and mirror plus wedge, helix and 3MF ([#55](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/55)) ([ddc93a5](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/ddc93a5b14ee89942b09be9d50674aca7289e418))
+
+
+### Bug Fixes
+
+* **listing:** page over sorted results instead of walk order ([334b038](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/334b0389a1c4ffcf044880ed27eea3a3babf6bf5))
+* **sketch:** export the sketch error types and document the sketch read-back contract ([#59](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/59)) ([fee865d](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/fee865d8b7a094850aa43eba1a6e98eba44310a0))
+
 ## [0.7.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.6.0...v0.7.0) (2026-10-07)
 
 
