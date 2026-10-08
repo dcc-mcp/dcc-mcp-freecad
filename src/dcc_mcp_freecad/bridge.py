@@ -1693,6 +1693,17 @@ class FreecadBridge:
         ``size_bytes``, ``modified_at``, and a bounded ``sha256``), ``truncated``
         and ``next_offset`` for paging, and the budget counters that explain why
         a listing stopped where it did.
+
+        The serialized byte budget bounds the ``entries`` array alone. The
+        response envelope -- ``roots``, ``pattern``, the paging and budget
+        counters -- is not counted against it.
+
+        ``entries`` is a page of the scan sorted by path, not a prefix of the
+        full result order. When the scan budget runs out the walk stops early,
+        so the sorted set it produces is a subset of the real matches: the
+        files beyond the stopping point were never visited, and no ``offset``
+        reaches them. ``truncated`` is true and ``next_offset`` is ``None`` in
+        that case -- narrow ``root`` or ``pattern`` instead of paging on.
         """
         matcher = _compile_list_pattern(pattern)
         bounded_limit = _bounded_int(limit, "limit", 1, _MAX_LIST_LIMIT)

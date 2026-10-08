@@ -31,6 +31,24 @@ before a FreeCAD host is configured, and it never opens, recomputes, or rewrites
 a document. Paging is bounded: follow `next_offset` while `truncated` is true,
 and narrow `root` or `pattern` when `scan_budget_exhausted` is true.
 
+A page is a slice of the set the scan actually reached, sorted by path — not a
+prefix of the full sorted result. When the scan budget runs out the walk stops
+early, so the files past the stopping point were never visited and **no
+`offset` can reach them**: `truncated` is true and `next_offset` is `null`. Paging
+on walks the same ground forever; narrow `root` or `pattern` instead.
+
+Check the budget counters even when `truncated` is false. The counters explain
+why a listing stopped where it did, and they are the only account of costs that
+do not set `truncated` by themselves. In particular, `truncated: false` can
+coexist with `sha256_scope: "unavailable"` when the checksum read budget ran
+out — only `read_budget_exhausted: true` explains the missing digests, so read
+it before treating a null `sha256` as a broken document.
+
+Size caps: at most 200 entries per page, and the serialized `entries` array is
+capped at 256 KiB. The 256 KiB budget bounds the `entries` array alone; the
+response envelope (`roots`, `pattern`, and the paging and budget counters) is
+not counted against it.
+
 Every mutation runs on a sibling staging copy and replaces the original only
 after FreeCADCmd reports success and a non-empty document exists.
 

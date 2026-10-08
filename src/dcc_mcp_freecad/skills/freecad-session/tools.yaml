@@ -30,6 +30,19 @@ tools:
       enumeration: no FreeCAD process is started, no document is opened or
       recomputed, and nothing is written. A root outside the allowed roots is
       refused with an error rather than silently returning nothing.
+
+      Entries are sorted by path, and the serialized size of the entries array
+      is capped at 256 KiB; the response envelope (roots, pattern, and the
+      paging and budget counters) is not counted against that cap.
+
+      The page is a slice of the sorted set the scan actually reached, not a
+      prefix of the full sorted result. When the scan budget runs out the walk
+      stops early, so the sorted set is a subset of the real matches and the
+      files beyond the stopping point were never visited: no offset reaches
+      them. In that case truncated is true and next_offset is null -- narrow
+      root or pattern instead of paging on. A listing can also stop on the
+      per-page, entries-byte, or checksum read budget; the scan_budget_exhausted
+      and read_budget_exhausted counters say which.
     source_file: scripts/list_documents.py
     input_schema:
       type: object
