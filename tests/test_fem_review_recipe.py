@@ -838,6 +838,19 @@ def _declared_schema(path):
     return node
 
 
+def _type_fits(source_type, target_type):
+    """True when a value of ``source_type`` can satisfy ``target_type``.
+
+    Equality is too strict for JSON Schema's numeric tower, where every
+    integer is also a number: a declared ``node_count`` feed into a
+    ``number`` field is compatible, and rejecting it would be a false
+    positive on a shape the target genuinely accepts.
+    """
+    if source_type == target_type:
+        return True
+    return source_type == "integer" and target_type == "number"
+
+
 def _is_shape_compatible(source_schema, target_schema):
     """True when a value shaped like ``source_schema`` can satisfy ``target``.
 
@@ -851,7 +864,11 @@ def _is_shape_compatible(source_schema, target_schema):
 
     source_type = source_schema.get("type")
     target_type = target_schema.get("type")
-    if source_type is not None and target_type is not None and source_type != target_type:
+    if (
+        source_type is not None
+        and target_type is not None
+        and not _type_fits(source_type, target_type)
+    ):
         return False
 
     for key in ("pattern", "format", "const"):
@@ -878,6 +895,27 @@ def _is_shape_compatible(source_schema, target_schema):
         return _is_shape_compatible(source_schema["items"], target_schema["items"])
     if "items" in target_schema and source_schema.get("type") == "array":
         return False
+
+    # Objects are where most of this recipe's declared paths live -- every
+    # {value, unit} quantity is one -- so comparing them only by `type` would
+    # leave the guard blind on the majority of real inputs. A source object
+    # must declare every property the target requires, and each shared property
+    # has to be compatible on its own terms.
+    target_required = target_schema.get("required") or []
+    source_required = source_schema.get("required") or []
+    if not set(target_required) <= set(source_required):
+        return False
+
+    target_properties = target_schema.get("properties") or {}
+    source_properties = source_schema.get("properties") or {}
+    for name, target_property in target_properties.items():
+        if name not in source_properties:
+            # Unknown source properties are the caller's business; a target
+            # property the source may simply omit is not, unless required,
+            # which the check above already covers.
+            continue
+        if not _is_shape_compatible(source_properties[name], target_property):
+            return False
     return True
 
 
@@ -975,6 +1013,72 @@ def test_the_shape_guard_can_fail():
     # A looser source is not accepted either: no pattern means no guarantee.
     assert not _is_shape_compatible({"type": "string"}, object_name)
 
+    # The end-to-end guard is only as strong as its example generator, and the
+    # generator is the part that can fail quietly: it returns _NO_EXAMPLE for
+    # any pattern construct it does not model, and a caller that skips on
+    # _NO_EXAMPLE then checks nothing at all for that field. Asserted here
+    # because the two `document_path` placeholders alone satisfy the guard's
+    # "checked >= 1" counter -- they are bare strings with no pattern, so the
+    # generator is never exercised for them. Without this, killing the
+    # generator outright leaves the guard green on the very anti-pattern this
+    # whole section exists to catch.
+    candidate = _example_value(face_reference)
+    assert candidate is not _NO_EXAMPLE, (
+        "the example generator gave up on the pattern the guard exists to check"
+    )
+    assert list(Draft202012Validator(object_name).iter_errors(candidate)), (
+        "the generated face reference passed the object-name schema"
+    )
+
+    # Objects are the majority of this recipe's declared paths, so the object
+    # branch carries the same anti-vacuity lock: it must produce a value, and
+    # that value must actually satisfy the schema it was drawn from.
+    quantity = {
+        "type": "object",
+        "required": ["value", "unit"],
+        "properties": {"value": {"type": "number", "minimum": 0}, "unit": {"type": "string"}},
+    }
+    generated = _example_value(quantity)
+    assert generated is not _NO_EXAMPLE, "the generator produced nothing for an object schema"
+    assert not list(Draft202012Validator(quantity).iter_errors(generated)), (
+        "the generated object does not satisfy the schema it came from: %r" % (generated,)
+    )
+    # A target requiring a property the source does not declare is a real
+    # incompatibility, not a shape the guard may wave through.
+    assert not _is_shape_compatible(
+        {"type": "object", "properties": {"value": {"type": "number"}}}, quantity
+    )
+    # ...and a nested narrowing is caught too, not just a missing key. Both
+    # required keys are declared here, so the only difference under test is the
+    # nested type -- otherwise this would pass for the missing-key reason the
+    # case above already covers.
+    assert not _is_shape_compatible(
+        {
+            "type": "object",
+            "required": ["value", "unit"],
+            "properties": {"value": {"type": "string"}, "unit": {"type": "string"}},
+        },
+        quantity,
+    )
+    # An integer satisfies a number field per JSON Schema's numeric tower, so
+    # the comparison must not reject it out of hand. Both required keys are
+    # declared, so the only difference under test is the numeric type.
+    assert _is_shape_compatible(
+        {
+            "type": "object",
+            "required": ["value", "unit"],
+            "properties": {"value": {"type": "integer"}, "unit": {"type": "string"}},
+        },
+        quantity,
+    )
+
+    # Shorthand character classes are the generator's quietest failure mode: a
+    # wrong character is rejected by the fullmatch check and becomes a skip, so
+    # a field guarded by ``\d`` would go unchecked while looking checked.
+    digits = _example_value({"type": "string", "pattern": r"^\d+$"})
+    assert digits is not _NO_EXAMPLE, "the generator gave up on \\d"
+    assert digits.isdigit(), "expected digits for \\d, got %r" % (digits,)
+
 
 def test_a_step_input_value_is_valid_against_the_tool_schema_itself():
     """The same agreement, checked by the validator rather than by hand.
@@ -1038,15 +1142,57 @@ def _example_value(schema):
             return _string_matching(pattern, schema)
         return "x"
     if kind == "integer":
-        return int(schema.get("minimum", 0))
+        return _number_example(schema, int)
     if kind == "number":
-        return float(schema.get("minimum", 0)) or 1.0
+        return _number_example(schema, float)
     if kind == "boolean":
         return False
     if kind == "array":
         item = _example_value(schema.get("items", {}))
         return [] if item is _NO_EXAMPLE else [item]
+    if kind == "object":
+        return _object_example(schema)
     return _NO_EXAMPLE
+
+
+def _number_example(schema, cast):
+    """The lowest number the schema allows.
+
+    ``minimum`` is the natural choice, but ``or 1.0`` would turn a declared
+    ``minimum: 0`` into ``1.0`` because ``0.0`` is falsy -- and a bound of
+    zero is common for stress values. Prefer ``exclusiveMinimum``'s neighbour
+    only when no inclusive bound is declared.
+    """
+    if schema.get("minimum") is not None:
+        return cast(schema["minimum"])
+    if schema.get("exclusiveMinimum") is not None:
+        return cast(schema["exclusiveMinimum"]) + cast(1)
+    return cast(0) if cast is int else 1.0
+
+
+def _object_example(schema):
+    """An object carrying every required property, or _NO_EXAMPLE.
+
+    Required properties are the ones that matter: an example missing a
+    required key would fail validation for a reason that has nothing to do
+    with the shape being compared, which is a false positive in the making.
+    Optional properties are included when they can be built, since nested
+    incompatibilities are exactly what the object branch exists to surface.
+    """
+    properties = schema.get("properties") or {}
+    example = {}
+    for name in schema.get("required") or ():
+        value = _example_value(properties.get(name, {}))
+        if value is _NO_EXAMPLE:
+            return _NO_EXAMPLE
+        example[name] = value
+    for name, property_schema in properties.items():
+        if name in example:
+            continue
+        value = _example_value(property_schema)
+        if value is not _NO_EXAMPLE:
+            example[name] = value
+    return example
 
 
 def _string_matching(pattern, schema):
@@ -1118,15 +1264,51 @@ def _generate_match(subpattern):
             parts.append(_generate_match(argument[1][0]))
         elif name == "any":
             parts.append("a")
-        elif name in ("category", "category_digit", "category_not_digit"):
-            parts.append("a" if "not" not in name else "0")
+        elif name.startswith("category"):
+            parts.append(_category_character(name))
         else:
             raise _UnsupportedPattern(name)
     return "".join(parts)
 
 
+def _category_character(name):
+    """A character standing in for a ``\\d``/``\\w``/``\\s`` style category.
+
+    Keyed on the opcode name rather than on the presence of "not", which is
+    what inverted this before: ``category_digit`` (``\\d``) has no "not" in its
+    name and so was handed ``"a"``, while ``category_not_digit`` (``\\D``) was
+    handed ``"0"`` -- both backwards. A wrong character is caught downstream by
+    the ``re.fullmatch`` check in :func:`_string_matching`, so the failure mode
+    was a silent skip rather than a bad example, but the mapping is still
+    simply wrong and worth having right.
+    """
+    digit = "0"
+    word = "a"
+    space = " "
+    if "not_digit" in name:
+        return word
+    if "digit" in name:
+        return digit
+    if "not_word" in name:
+        return space
+    if "word" in name:
+        return word
+    if "not_space" in name:
+        return word
+    if "space" in name:
+        return space
+    raise _UnsupportedPattern(name)
+
+
 def _generate_class(argument):
-    """One character from a character-class opcode."""
+    """One character from a character-class opcode.
+
+    ``\\d`` and friends do not arrive as a bare category opcode -- they are
+    wrapped in an ``IN`` class, so the class handler is where the digit/word/
+    space mapping has to live. Returning ``"a"`` for every category is what
+    made ``\\d+`` yield ``"aa"``, fail the ``fullmatch`` check, and silently
+    skip the field.
+    """
     for item in argument:
         if isinstance(item, tuple) and len(item) == 2:
             name = str(item[0]).split(".")[-1].lower()
@@ -1136,7 +1318,11 @@ def _generate_class(argument):
             if name == "range":
                 return chr(value[0])
             if name == "category":
-                return "a"
+                # The opcode name is just "category"; which category it is
+                # lives in the value (CATEGORY_DIGIT, CATEGORY_WORD, ...).
+                # Reading the name alone makes every shorthand look identical,
+                # which is how \d and \D ended up mapped to the same thing.
+                return _category_character(str(value).split(".")[-1].lower())
             if name == "branch":
                 return _generate_match(value[0])
     raise _UnsupportedPattern("empty character class")
