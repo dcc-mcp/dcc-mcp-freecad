@@ -236,9 +236,17 @@ millimetre unit, because a consumer scales the model by that declaration.
 - `list_documents` is a read-only filesystem listing: no FreeCAD process, no
   opened document, no recompute, no write. A `root` outside the allowed roots
   is refused with `AllowedRootsError` rather than silently returning nothing.
-  Entries per page (200), serialized response bytes, directory entries visited,
-  and bytes read for checksums are each capped, and a listing stopped by a cap
-  says so through `truncated` and the budget counters.
+  Entries per page (200), the serialized size of the returned `entries` array
+  (256 KiB), and directory entries visited are each capped, and a listing
+  stopped by one of those caps says so through `truncated` plus
+  `scan_budget_exhausted`. The 256 KiB figure counts the per-entry JSON
+  character length summed over the emitted entries (no comma or bracket
+  separators) and bounds the `entries` array alone; the response envelope
+  (`roots`, `pattern`, counters, and the like) is not counted against it.
+  Bytes read for checksums are capped too, but that one is not a stopping
+  condition: exhausting it turns later digests `unavailable` while enumeration
+  continues, reported separately by `read_budget_exhausted` — so it can be
+  true while `truncated` is false.
 - Existing outputs require explicit `overwrite=true`.
 - Every `save_copy` call with `overwrite=false`, plain or presentation,
   publishes exclusively: a sibling hard link where the output filesystem

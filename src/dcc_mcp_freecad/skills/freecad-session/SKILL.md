@@ -28,8 +28,31 @@ Start with `get_status`. When the caller does not already know the path, use
 `DCC_MCP_FREECAD_ALLOWED_ROOTS` and returns each one's `absolute_path`, ready
 to hand to `inspect_document`. It is a filesystem listing, so it works even
 before a FreeCAD host is configured, and it never opens, recomputes, or rewrites
-a document. Paging is bounded: follow `next_offset` while `truncated` is true,
-and narrow `root` or `pattern` when `scan_budget_exhausted` is true.
+a document. Paging is bounded: follow `next_offset` while it is non-null, and
+narrow `root` or `pattern` only once `next_offset` is null while
+`scan_budget_exhausted` is true.
+
+Entries are sorted by path. When the scan budget runs out the walk stops early,
+so entries are drawn from whatever the scan reached — but that partial set is
+still paged normally: `scan_budget_exhausted: true` with a non-null
+`next_offset` means more already-scanned entries remain, and paging on is the
+only way to see them. Do not stop at the first `scan_budget_exhausted`. Only
+when `next_offset` is null *and* `scan_budget_exhausted` is true has the scanned
+portion been fully read; files past the stopping point were never visited and no
+`offset` reaches them, so narrow `root` or `pattern` then.
+
+Check the budget counters even when `truncated` is false. The checksum read
+budget does not stop a listing: exhausting it turns later digests `unavailable`
+while enumeration continues, and `truncated` reflects the scan alone. So
+`truncated: false` can coexist with `sha256_scope: "unavailable"` — only
+`read_budget_exhausted: true` explains the missing digests, so read it before
+treating a null `sha256` as a broken document.
+
+Size caps: at most 200 entries per page, and the serialized `entries` array is
+capped at 256 KiB, counted as the per-entry JSON character length summed over
+the emitted entries (no comma or bracket separators). The response envelope
+(`roots`, `pattern`, and the paging and budget counters) is not counted against
+it.
 
 Every mutation runs on a sibling staging copy and replaces the original only
 after FreeCADCmd reports success and a non-empty document exists.

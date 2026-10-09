@@ -30,6 +30,25 @@ tools:
       enumeration: no FreeCAD process is started, no document is opened or
       recomputed, and nothing is written. A root outside the allowed roots is
       refused with an error rather than silently returning nothing.
+
+      Entries are sorted by path. When the scan budget runs out the walk stops
+      early, so entries are drawn from whatever the scan reached; files beyond
+      the stopping point were never visited and no offset reaches them. That
+      partial set is still paged normally: a non-null next_offset means more
+      already-scanned entries remain, so paging on is the right move. Only when
+      next_offset is null and scan_budget_exhausted is true has the scanned
+      portion been exhausted - then narrow root or pattern.
+
+      The checksum read budget does not stop a listing: exhausting it turns
+      later digests unavailable while enumeration continues, and truncated
+      reflects the scan alone. So read_budget_exhausted can be true while
+      truncated is false, and a null sha256 in that case means a spent read
+      budget rather than a broken document.
+
+      The serialized size of the entries array is capped at 256 KiB, counted as
+      the per-entry JSON character length summed over the emitted entries (no
+      comma or bracket separators). The response envelope (roots, pattern, and
+      the paging and budget counters) is not counted against that cap.
     source_file: scripts/list_documents.py
     input_schema:
       type: object
