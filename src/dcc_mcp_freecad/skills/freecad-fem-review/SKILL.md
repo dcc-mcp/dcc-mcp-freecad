@@ -37,7 +37,9 @@ metadata:
         note: >-
           A hot spot that cannot be named as an object plus a face or edge is an
           unresolved sub-element reference. Re-list the faces the host actually
-          resolves and re-anchor the location before reporting it.
+          resolves and re-anchor the location; when none resolve, report the
+          entry at object level and declare why as a location_resolution
+          assumption rather than inventing a reference.
       - next: freecad-analysis.run_fem_analysis
         note: >-
           A verdict resting on an un-converged mesh is not a verdict. Re-solve at
@@ -118,6 +120,20 @@ the face or edge** the hot spot sits on, using the sub-element references
 
 A review that reports only a global maximum has failed: the user cannot act on
 a number with no address.
+
+### When the location cannot be anchored
+
+Naming a face requires the host to resolve it, and the host cannot always do
+that: `target_object` is absent when the solve reused an existing analysis
+rather than being built from an object, and sub-element naming moved between
+FreeCAD release lines. In that case the entry is **object-level** — it names the
+object and carries no `reference` — and the review must add a
+`location_resolution` assumption saying why no face or edge could be confirmed.
+
+What is not acceptable is splitting a restraint reference such as `Beam:Face3`
+into an object name in order to satisfy the contract. That is an unverified
+claim wearing an anchor, and it is worse than an honest object-level entry
+because it validates. A review that names no location at all still fails.
 
 ### 3. Next actions
 
