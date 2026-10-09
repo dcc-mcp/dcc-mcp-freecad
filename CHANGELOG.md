@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.8.0...v0.9.0) (2026-10-09)
+
+
+### Features
+
+* **import:** verify the imported object against the source file ([#64](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/64)) ([940bf3e](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/940bf3e0de3692fd564c81bc524a7e4fd1813d52))
+
+
+### Documentation
+
+* **fem-review:** drop misleading fallback_inputs aside from anchor step ([#62](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/62)) ([df35256](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/df3525687bdd5558cf35fdf23b9ba7a98dd2646c))
+* **listing:** align list_documents budget scope and paging caveats ([#61](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/61)) ([39cf7b5](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/39cf7b57e047e19db50c1f9e9d4f4c8d6f5c7c5d))
+
 ## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.7.0...v0.8.0) (2026-10-08)
 
 
