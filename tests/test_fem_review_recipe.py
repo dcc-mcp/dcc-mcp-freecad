@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import copy
 import re
+import warnings
 from pathlib import Path
 
 import pytest
 import yaml
 from dcc_mcp_core import validate_skill
 from dcc_mcp_core.recipes import load_recipe_pack, validate_recipe_inputs
+from jsonschema import Draft202012Validator
 
 SKILLS = Path(__file__).parents[1] / "src" / "dcc_mcp_freecad" / "skills"
 SKILL_DIR = SKILLS / "freecad-fem-review"
@@ -804,10 +806,350 @@ def test_every_placeholder_resolves_to_a_declared_path():
     assert problems == []
 
 
+def _placeholder_schemas():
+    """{placeholder root: schema} for every input the recipe declares."""
+    return dict(RECIPE["inputs_schema"]["properties"])
+
+
+def _declared_schema(path):
+    """The schema at a dotted placeholder path, or None when undeclared.
+
+    An indexed reference such as ``${fem_result.fixed_faces[0]}`` resolves to
+    the item schema of its root array: indexing a declared list yields an
+    element, not the array.
+    """
+    indexed = re.findall(r"\[\d+\]", path)
+    segments = re.sub(r"\[\d+\]", "", path).split(".")
+    node = _placeholder_schemas().get(segments[0])
+    if node is None:
+        return None
+    for segment in segments[1:]:
+        if not isinstance(node, dict):
+            return None
+        node = (node.get("properties") or {}).get(segment)
+        if node is None:
+            return None
+    for _index in indexed:
+        if not isinstance(node, dict):
+            return None
+        node = node.get("items")
+        if node is None:
+            return None
+    return node
+
+
+def _is_shape_compatible(source_schema, target_schema):
+    """True when a value shaped like ``source_schema`` can satisfy ``target``.
+
+    Compares the two leaf schemas field by field: a source value is compatible
+    when every constraint the target states is met by a constraint the source
+    states. A source may be stricter than the target and still be compatible;
+    it may not be looser.
+    """
+    if not isinstance(source_schema, dict) or not isinstance(target_schema, dict):
+        return True
+
+    source_type = source_schema.get("type")
+    target_type = target_schema.get("type")
+    if source_type is not None and target_type is not None and source_type != target_type:
+        return False
+
+    for key in ("pattern", "format", "const"):
+        if key in target_schema and source_schema.get(key) != target_schema[key]:
+            return False
+
+    if "enum" in target_schema:
+        source_enum = source_schema.get("enum")
+        if source_enum is None:
+            return False
+        if not set(source_enum) <= set(target_schema["enum"]):
+            return False
+
+    for key, worse in (("minLength", min), ("minimum", min), ("minItems", min)):
+        if key in target_schema and source_schema.get(key) is not None:
+            if worse(source_schema[key], target_schema[key]) != target_schema[key]:
+                return False
+    for key, worse in (("maxLength", max), ("maximum", max), ("maxItems", max)):
+        if key in target_schema and source_schema.get(key) is not None:
+            if worse(source_schema[key], target_schema[key]) != target_schema[key]:
+                return False
+
+    if "items" in target_schema and "items" in source_schema:
+        return _is_shape_compatible(source_schema["items"], target_schema["items"])
+    if "items" in target_schema and source_schema.get("type") == "array":
+        return False
+    return True
+
+
+def _placeholder_assignments(value):
+    """Every ``${...}`` reference in a step input value, with literal text kept.
+
+    A value built from literal text plus a placeholder -- ``"face ${x}"`` -- is
+    checked against the placeholder's own shape, because a literal prefix
+    cannot make an incompatible value compatible.
+    """
+    return re.findall(r"\$\{([^}]*)\}", value) if isinstance(value, str) else []
+
+
+def test_step_input_values_match_the_shape_the_tool_accepts():
+    """A declared path of the wrong shape fails inside the tool, not here.
+
+    ``test_every_placeholder_resolves_to_a_declared_path`` proves a
+    placeholder names something that exists. It does not prove the thing it
+    names is shaped the way the receiving tool demands, and that gap is not
+    hypothetical: this recipe's ``anchor`` step once passed
+    ``${fem_result.fixed_faces[0]}`` to ``list_faces.object_name``. The path
+    resolves, the name is right, and the value -- ``"Beam:Face3"``, a face
+    reference -- is rejected by that step's own tool, whose ``object_name``
+    pattern admits bare object names only. Every test in this file stayed
+    green while that was true.
+
+    The check runs each placeholder's declared schema against the tool field's
+    schema, so it is the shapes that must agree, not the names.
+    """
+    tools = _declared_tools()
+    problems = []
+    for step in RECIPE["steps"]:
+        address = step.get("tool")
+        tool = tools.get(address)
+        if tool is None:
+            continue
+        properties = (tool.get("input_schema") or {}).get("properties") or {}
+        for name, value in (step.get("inputs") or {}).items():
+            target_schema = properties.get(name)
+            if target_schema is None:
+                continue
+            for path in _placeholder_assignments(value):
+                source_schema = _declared_schema(path)
+                if source_schema is None:
+                    continue  # undeclared path; the existence check reports it
+                if not _is_shape_compatible(source_schema, target_schema):
+                    problems.append(
+                        "step %r feeds %s ${%s} (shape %s) to %s.%s, "
+                        "which accepts %s"
+                        % (
+                            step.get("id"),
+                            name,
+                            path,
+                            _describe(source_schema),
+                            address.split(".")[0],
+                            name,
+                            _describe(target_schema),
+                        )
+                    )
+    assert problems == []
+
+
+def _describe(schema):
+    """A one-line shape summary for a failure message."""
+    if not isinstance(schema, dict):
+        return repr(schema)
+    parts = []
+    for key in ("type", "pattern", "enum", "format", "items"):
+        if key in schema:
+            parts.append("%s=%r" % (key, schema[key]))
+    return "{%s}" % ", ".join(parts) if parts else repr(schema)
+
+
+def test_the_shape_guard_can_fail():
+    """The meta-lock on the shape check.
+
+    A compatibility predicate that returns True for everything is a decoration
+    that no mutation can ever trip. The anti-pattern this section was written
+    to catch -- a face reference fed to an object-name field -- is asserted to
+    be rejected here, so the guard cannot rot into a no-op.
+    """
+    face_reference = {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}:(Face|Edge|Vertex)[0-9]+$",
+    }
+    object_name = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+    }
+    assert not _is_shape_compatible(face_reference, object_name)
+    # ...and the direction the recipe actually uses still passes.
+    assert _is_shape_compatible(object_name, object_name)
+    # A looser source is not accepted either: no pattern means no guarantee.
+    assert not _is_shape_compatible({"type": "string"}, object_name)
+
+
+def test_a_step_input_value_is_valid_against_the_tool_schema_itself():
+    """The same agreement, checked by the validator rather than by hand.
+
+    ``_is_shape_compatible`` compares schemas; this validates a concrete value
+    drawn from the declared shape against the tool's own ``input_schema`` using
+    the validator the server uses. One is a comparison of two schemas, the
+    other is an end-to-end check, and a bug in the hand-written comparison does
+    not automatically hide the second.
+    """
+    tools = _declared_tools()
+    checked = 0
+    for step in RECIPE["steps"]:
+        tool = tools.get(step.get("tool"))
+        if tool is None:
+            continue
+        schema = tool.get("input_schema") or {}
+        for name, value in (step.get("inputs") or {}).items():
+            if not isinstance(value, str) or "${" not in value:
+                continue
+            for path in _placeholder_assignments(value):
+                source_schema = _declared_schema(path)
+                if not isinstance(source_schema, dict):
+                    continue
+                candidate = _example_value(source_schema)
+                if candidate is _NO_EXAMPLE:
+                    continue
+                field_schema = (schema.get("properties") or {}).get(name)
+                if not isinstance(field_schema, dict):
+                    continue
+                errors = list(Draft202012Validator(field_schema).iter_errors(candidate))
+                checked += 1
+                assert not errors, (
+                    "step %r would send %s=%r to %s; the tool schema rejects it: %s"
+                    % (
+                        step.get("id"),
+                        name,
+                        candidate,
+                        step.get("tool"),
+                        "; ".join(error.message for error in errors),
+                    )
+                )
+    assert checked >= 1, "no placeholder input was checked; the test ran vacuously"
+
+
+_NO_EXAMPLE = object()
+
+
+def _example_value(schema):
+    """A concrete value of the shape ``schema`` describes, or _NO_EXAMPLE."""
+    if not isinstance(schema, dict):
+        return _NO_EXAMPLE
+    if "const" in schema:
+        return schema["const"]
+    if "enum" in schema and schema["enum"]:
+        return schema["enum"][0]
+    kind = schema.get("type")
+    if kind == "string":
+        pattern = schema.get("pattern")
+        if pattern:
+            return _string_matching(pattern, schema)
+        return "x"
+    if kind == "integer":
+        return int(schema.get("minimum", 0))
+    if kind == "number":
+        return float(schema.get("minimum", 0)) or 1.0
+    if kind == "boolean":
+        return False
+    if kind == "array":
+        item = _example_value(schema.get("items", {}))
+        return [] if item is _NO_EXAMPLE else [item]
+    return _NO_EXAMPLE
+
+
+def _string_matching(pattern, schema):
+    """A string satisfying ``pattern`` and the length bounds, or _NO_EXAMPLE.
+
+    Generated by walking the compiled pattern tree and taking each mandatory
+    token's cheapest filler: the first character of a character class, the
+    lower bound of a repetition, the first branch of an alternation. Anchors
+    contribute nothing and are skipped.
+
+    Two earlier attempts are worth recording, because both failed on the exact
+    pattern this section exists to catch. Appending ``.*`` to the pattern
+    cannot help: the ``:`` in the face-reference pattern is mandatory and sits
+    at a fixed offset, so no wildcard absorbs a prefix that has not reached it.
+    Relaxing the tail to optional -- ``(?:...)?`` -- accepts dead ends, since
+    each relaxation is checked independently and the one that lets ``a`` repeat
+    forever is never the one that completes. A generator that silently gives up
+    is worse than none: it makes the guard pass without checking anything.
+    """
+    with warnings.catch_warnings():
+        # sre_parse is deprecated from 3.11 but remains the only stdlib way to
+        # read a compiled pattern's structure back out; re._parser is private
+        # and moves between versions.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import sre_parse
+
+        try:
+            parsed = sre_parse.parse(pattern)
+        except Exception:
+            return _NO_EXAMPLE
+
+    try:
+        value = _generate_match(parsed)
+    except _UnsupportedPattern:
+        return _NO_EXAMPLE
+
+    if not re.fullmatch(pattern, value):
+        return _NO_EXAMPLE
+
+    min_length = schema.get("minLength", 0)
+    max_length = schema.get("maxLength")
+    while len(value) < min_length:
+        value += "x"
+        if not re.fullmatch(pattern, value):
+            return _NO_EXAMPLE
+    if max_length is not None and len(value) > max_length:
+        return _NO_EXAMPLE
+    return value
+
+
+def _generate_match(subpattern):
+    """The cheapest string the parsed ``subpattern`` matches."""
+    parts = []
+    for opcode, argument in subpattern:
+        name = str(opcode).split(".")[-1].lower()
+        if name == "literal":
+            parts.append(chr(argument))
+        elif name == "at":
+            continue  # ^ and $ constrain position, not content
+        elif name == "in":
+            parts.append(_generate_class(argument))
+        elif name in ("max_repeat", "min_repeat"):
+            lower, _upper, inner = argument[0], argument[1], argument[2]
+            parts.append(_generate_match(inner) * max(lower, 0))
+        elif name == "subpattern":
+            parts.append(_generate_match(argument[3]))
+        elif name == "branch":
+            # Any branch is a valid match; the first keeps the example short.
+            parts.append(_generate_match(argument[1][0]))
+        elif name == "any":
+            parts.append("a")
+        elif name in ("category", "category_digit", "category_not_digit"):
+            parts.append("a" if "not" not in name else "0")
+        else:
+            raise _UnsupportedPattern(name)
+    return "".join(parts)
+
+
+def _generate_class(argument):
+    """One character from a character-class opcode."""
+    for item in argument:
+        if isinstance(item, tuple) and len(item) == 2:
+            name = str(item[0]).split(".")[-1].lower()
+            value = item[1]
+            if name == "literal":
+                return chr(value)
+            if name == "range":
+                return chr(value[0])
+            if name == "category":
+                return "a"
+            if name == "branch":
+                return _generate_match(value[0])
+    raise _UnsupportedPattern("empty character class")
+
+
+class _UnsupportedPattern(Exception):
+    """A pattern construct this generator does not model."""
+
+
 def _path_exists(path, schemas):
     """True when every segment of a dotted placeholder path is declared.
 
-    An indexed reference such as `${fem_result.fixed_faces[0]}` is accepted
+    An indexed reference such as ``${fem_result.fixed_faces[0]}`` is accepted
     when its root array is declared: indexing a declared list is a resolution
     concern, not a declaration one.
     """
