@@ -403,14 +403,11 @@ class FakePart(types.ModuleType):
         self.reads = []
         self.exports = []
         self.shapes = {}
-        # Override for "the shape the next read of this path produces", used to
-        # model a reader that returns less geometry than the file holds.
-        self.read_shapes = {}
 
     def read(self, path):
         self.reads.append(path)
         key = str(path)
-        shape = self.read_shapes.get(key) or self.shapes.get(key)
+        shape = self.shapes.get(key)
         if shape is None:
             shape = _Shape()
             self.shapes[key] = shape
@@ -1095,6 +1092,31 @@ def test_import_geometry_accepts_a_mesh_inside_the_source_envelope(host, tmp_pat
     )
 
     assert "source.bounding_box" in result["verified"]
+    assert "source.mesh_counts" in result["verified"]
+
+
+def test_import_geometry_refuses_when_the_mesh_lost_facets(host, tmp_path):
+    """Containment is one-directional, so the counts are what catch this.
+
+    A mesh that dropped facets still sits inside the source envelope and still
+    has points, so both the non-empty check and the bounding-box check pass.
+    Only comparing the counts against the source sees the loss.
+    """
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.stl"
+    source.write_bytes(b"solid")
+    host.mesh.Mesh = lambda path=None: _Mesh(points=8, facets=12)
+    _new_objects_land_with(doc, Mesh=_Mesh(points=8, facets=5))
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_import_geometry(
+            {"document_path": path, "input_path": str(source), "object_name": "ImportedMesh"}
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "source.mesh_counts"
+    assert error.expected == {"points": 8, "facets": 12}
+    assert error.actual == {"points": 8, "facets": 5}
 
 
 def test_import_geometry_refuses_an_empty_source(host, tmp_path):

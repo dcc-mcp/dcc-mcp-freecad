@@ -2036,6 +2036,8 @@ def model_import_geometry(params):
         )
         expected_solids = None
         expected_volume = None
+        expected_points = None
+        expected_facets = None
         source_box = None
         if is_mesh:
             import Mesh
@@ -2046,6 +2048,12 @@ def model_import_geometry(params):
             if not getattr(mesh, "CountPoints", 0):
                 raise ValueError("Imported mesh is empty")
             source_box = getattr(mesh, "BoundBox", None)
+            # A mesh format stores vertices and facets verbatim, so the counts
+            # are exact round-trip quantities rather than measurements: losing
+            # facets while staying inside the source box is a real import bug
+            # that containment alone cannot see.
+            expected_points = int(getattr(mesh, "CountPoints", 0) or 0)
+            expected_facets = int(getattr(mesh, "CountFacets", 0) or 0)
             obj = doc.addObject("Mesh::Feature", object_name)
             obj.Mesh = mesh
         else:
@@ -2060,7 +2068,6 @@ def model_import_geometry(params):
             # still returns a non-null shape, so existence alone cannot tell.
             expected_solids = len(shape.Solids)
             expected_volume = shape.Volume
-            source_box = getattr(shape, "BoundBox", None)
             obj = doc.addObject("Part::Feature", object_name)
             obj.Shape = shape
         if label:
@@ -2086,6 +2093,14 @@ def model_import_geometry(params):
                 {"points": ">0", "facets": ">0"},
                 {"points": points, "facets": facets},
                 "The mesh object was created but carries no geometry after the save.",
+            )
+            read_back.check(
+                (points, facets) == (expected_points, expected_facets),
+                "source.mesh_counts",
+                {"points": expected_points, "facets": expected_facets},
+                {"points": points, "facets": facets},
+                "The imported mesh holds a different point or facet count than "
+                "the source file, so part of the import was dropped.",
             )
             landed_box = getattr(mesh, "BoundBox", None)
             if source_box is not None:
