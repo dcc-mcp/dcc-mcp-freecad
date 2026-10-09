@@ -779,28 +779,59 @@ def test_step_inputs_match_the_schema_of_the_tool_they_call():
     assert problems == []
 
 
+# A path is a dotted chain where any segment may carry a trailing `[n]` index,
+# e.g. `fem_result.fixed_faces[0]`. The index has to be part of the pattern, not
+# left for the caller to strip: a pattern that stops at `[` matches nothing at
+# all, so an indexed placeholder is skipped rather than checked -- the guard
+# reports clean while having looked at no placeholders.
+_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+_INDEX = r"\[\d+\]"
+_SEGMENT_PATTERN = _IDENT + "(?:" + _INDEX + ")?"
+PLACEHOLDER = r"\$\{(" + _SEGMENT_PATTERN + r"(?:\." + _SEGMENT_PATTERN + r")*)\}"
+
+_SEGMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?$")
+
+
+def test_the_placeholder_pattern_extracts_indexed_references():
+    """The extractor is the guard's only pair of eyes; it must not skip any.
+
+    A pattern that cannot reach past `[` returns [] for `${x.y[0]}`, and an
+    empty list of problems reads as success. So the pattern is pinned directly,
+    before any of the resolver's behaviour is trusted.
+    """
+    assert re.findall(PLACEHOLDER, "${fem_result.fixed_faces[0]}") == ["fem_result.fixed_faces[0]"]
+    assert re.findall(PLACEHOLDER, "${fem_result.load.faces[2]}") == ["fem_result.load.faces[2]"]
+    assert re.findall(PLACEHOLDER, "${fem_result.document_path}") == ["fem_result.document_path"]
+    assert re.findall(PLACEHOLDER, "no placeholder") == []
+
+
 def test_every_placeholder_resolves_to_a_declared_path():
     """A placeholder with no input to fill it materialises as a literal.
 
     The pattern must accept dotted paths: every placeholder in this recipe is
     one, and a pattern without the dot matched nothing at all, so the previous
-    form of this test validated zero placeholders.
+    form of this test validated zero placeholders. Indexed segments are the
+    same failure one layer down, hence the dedicated pattern test above.
     """
     schemas = {"fem_result": RECIPE["inputs_schema"]["properties"]["fem_result"]}
     schemas.update(
         {name: schema for name, schema in (RECIPE["inputs_schema"]["properties"] or {}).items()}
     )
     problems = []
+    seen = []
     for step in RECIPE["steps"]:
         for key in ("inputs",):
             for value in (step.get(key) or {}).values():
                 if not isinstance(value, str):
                     continue
-                for path in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_.]*)\}", value):
+                for path in re.findall(PLACEHOLDER, value):
+                    seen.append(path)
                     if not _path_exists(path, schemas):
                         problems.append(
                             "step %r (%.16s) references undeclared %r" % (step.get("id"), key, path)
                         )
+    # A guard that inspected nothing is indistinguishable from a clean guard.
+    assert seen, "no placeholders extracted -- the pattern has stopped matching"
     assert problems == []
 
 
@@ -808,21 +839,47 @@ def _path_exists(path, schemas):
     """True when every segment of a dotted placeholder path is declared.
 
     An indexed reference such as `${fem_result.fixed_faces[0]}` is accepted
-    when its root array is declared: indexing a declared list is a resolution
-    concern, not a declaration one.
+    when the segment carrying the index is declared **and is an array**:
+    indexing a declared list is a resolution concern, not a declaration one.
+    Indexing a declared scalar is not -- `fixed_faces` is a list, `node_count`
+    is an integer, and `${fem_result.node_count[0]}` names nothing.
     """
-    segments = re.sub(r"\[\d+\]", "", path).split(".")
+    segments = path.split(".")
     node = schemas.get(segments[0])
     if node is None:
         return False
     for segment in segments[1:]:
         if not isinstance(node, dict):
             return False
-        properties = node.get("properties") or {}
-        node = properties.get(segment)
+        match = _SEGMENT.match(segment)
+        if match is None:
+            return False
+        name, index = match.groups()
+        node = (node.get("properties") or {}).get(name)
         if node is None:
             return False
+        if index is not None and node.get("type") != "array":
+            return False
     return True
+
+
+def test_an_indexed_placeholder_must_still_name_a_declared_path():
+    """An index relaxes nothing about the path; only about the leaf's arity.
+
+    `${fem_result.fixed_faces[0]}` resolves because `fixed_faces` is declared
+    as an array. `${fem_result.made_up[0]}` and `${fem_result.node_count[0]}`
+    must still fail: one names no such property, the other indexes a scalar.
+    Without this, widening the pattern to admit `[0]` would have turned the
+    guard into a rubber stamp for every indexed placeholder anyone writes.
+    """
+    fem_result = RECIPE["inputs_schema"]["properties"]["fem_result"]
+    schemas = {"fem_result": fem_result}
+    assert _path_exists("fem_result.fixed_faces[0]", schemas)
+    assert _path_exists("fem_result.load.faces[2]", schemas)
+    assert _path_exists("fem_result.document_path", schemas)
+    assert not _path_exists("fem_result.made_up[0]", schemas)
+    assert not _path_exists("fem_result.node_count[0]", schemas)
+    assert not _path_exists("fem_result.fixed_faces[0].nope", schemas)
 
 
 def test_a_location_with_an_off_menu_kind_is_rejected():
