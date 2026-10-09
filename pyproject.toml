@@ -36,14 +36,14 @@ test=[
   "pytest>=8; python_version>='3.8'",
   "ruff>=0.8",
   "PyYAML>=6",
-  "jsonschema>=3.2",
+  "jsonschema>=4.0",
 ]
 dev=[
   "pytest>=7.4,<8; python_version<'3.8'",
   "pytest>=8; python_version>='3.8'",
   "ruff>=0.8",
   "PyYAML>=6",
-  "jsonschema>=3.2",
+  "jsonschema>=4.0",
   "build>=1.2",
   "twine>=6",
 ]
