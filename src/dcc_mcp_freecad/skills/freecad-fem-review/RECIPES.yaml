@@ -201,15 +201,22 @@ recipes:
           object_name: ${fem_result.target_object}
         # target_object is absent when an existing analysis was reused rather
         # than built, so it cannot be required. When no object name can be
-        # resolved, the location degrades to object-level -- which the contract
-        # then forces into the assumption block rather than letting it pass as
-        # an anchored hot spot. The restraint references in fixed_faces are
-        # face references (e.g. "Beam:Face3"), not object names, so they cannot
-        # be resolved through this step's object_name input.
+        # resolved, the location degrades to object-level: an entry carrying no
+        # `reference` is legal, but only alongside a
+        # topic=location_resolution assumption saying why nothing resolved --
+        # see the conditional at the foot of output_contract. The restraint
+        # references in fixed_faces are face references (e.g. "Beam:Face3"),
+        # not object names, so they cannot be resolved through this step's
+        # object_name input either. Splitting one to manufacture an object_name
+        # would produce a reference the host never confirmed, which is exactly
+        # what the reference-less arm exists to make unnecessary.
         scripting_fallback: >-
           If list_faces is unavailable, or no object name can be resolved,
           report the hot spot by the load/restraint faces carried in fem_result
-          and declare the location as object-level only in the assumptions.
+          as an object-level entry with no `reference`, and declare
+          topic=location_resolution in the assumptions stating why no
+          sub-element could be anchored. Do not split a face reference into an
+          object name to satisfy the contract.
 
       - id: inspect
         verb: read
@@ -235,9 +242,10 @@ recipes:
 
     # The contract that can fail. `required` is enforced by
     # validate_recipe_inputs' Draft-2020-12 validator, and the assertions below
-    # it are the review's own hard rules: a location with no face/edge, an empty
-    # assumption list, or an assumption block that never mentions mesh
-    # convergence is rejected rather than returned.
+    # it are the review's own hard rules: a location with no face/edge and no
+    # stated reason for the omission, an empty assumption list, or an
+    # assumption block that never mentions mesh convergence is rejected rather
+    # than returned.
     output_contract:
       type: object
       required:
@@ -310,14 +318,25 @@ recipes:
             visible dividend is not auditable.
 
         # A global maximum is not a location. minItems 1 is the acceptance
-        # criterion the issue states, and each entry must carry a sub-element
-        # reference so the user can find the place in the model.
+        # criterion the issue states, and it is unconditional: a review always
+        # names at least one place.
+        #
+        # What it does not demand is that the place be resolvable to a
+        # sub-element. An entry either carries a host-confirmed `reference` --
+        # the anchor step resolved it, so the reader can select the face in the
+        # model -- or it is object-level: no reference, and a `note` saying what
+        # the object-level claim covers. The second arm is open only to a review
+        # that also declares a location_resolution assumption; see the
+        # conditional at the foot of this contract. Without that pairing the
+        # contract would be forcing the invention it forbids in the anchor
+        # step: no reference may be fabricated, so a review that cannot anchor
+        # one has to be able to say so rather than guess one.
         critical_locations:
           type: array
           minItems: 1
           items:
             type: object
-            required: [object_name, reference, kind, von_mises]
+            required: [object_name, kind, von_mises]
             properties:
               object_name: {type: string, minLength: 1}
               reference:
@@ -333,6 +352,16 @@ recipes:
                   value: {type: number, minimum: 0}
                   unit: {type: string}
               note: {type: string, minLength: 1}
+            oneOf:
+              # Anchored: the host resolved this sub-element.
+              - required: [reference]
+              # Object-level: nothing resolved. Omitting the reference is the
+              # honest answer; the note is what stops it being a silent
+              # degradation, and the review-level conditional is what makes it
+              # an answer at all.
+              - allOf:
+                  - not: {required: [reference]}
+                  - required: [note]
           description: >-
             Named hot spots. A fully restrained face or a point load is
             kind=boundary_condition_artefact: nodal stress there is extrapolated
@@ -368,6 +397,11 @@ recipes:
                   - material_provenance
                   - model_class
                   - units
+                  # Mandatory only when a critical location carries no
+                  # reference: names why nothing could be anchored. Optional
+                  # otherwise, so an anchored review is not padded with a
+                  # statement it has no use for.
+                  - location_resolution
                   - other
               statement: {type: string, minLength: 1}
           allOf:
@@ -434,15 +468,43 @@ recipes:
             unit_schema: {type: object}
             mesh_size: {type: object}
 
-      # A review judged against a code allowable has no yield strength, so it
-      # cannot report a safety factor. Requiring utilisation in that case stops
-      # an allowable-only review from inventing one.
-      if:
-        properties:
-          verdict_basis: {const: allowable_utilisation}
-        required: [verdict_basis]
-      then:
-        required: [utilisation]
-      else:
-        required: [safety_factor, yield_strength]
+      # Rules about how two parts of a review relate, which no single
+      # property's schema can express. Both are conditionals on the document
+      # rather than on a field, which is why they live here and not above.
+      allOf:
+        # A review judged against a code allowable has no yield strength, so it
+        # cannot report a safety factor. Requiring utilisation in that case
+        # stops an allowable-only review from inventing one.
+        - if:
+            properties:
+              verdict_basis: {const: allowable_utilisation}
+            required: [verdict_basis]
+          then:
+            required: [utilisation]
+          else:
+            required: [safety_factor, yield_strength]
+
+        # The rule that makes the reference-less arm of critical_locations
+        # honest. "I could not anchor this" is a legitimate finding; quietly
+        # omitting a reference is not, because the reader cannot tell an
+        # unresolved location from an anchored one that lost its reference on
+        # the way through. So the object-level path is open only to a review
+        # that declares why it took it.
+        - if:
+            required: [critical_locations]
+            properties:
+              critical_locations:
+                type: array
+                contains:
+                  type: object
+                  not: {required: [reference]}
+          then:
+            properties:
+              assumptions:
+                type: array
+                contains:
+                  type: object
+                  required: [topic]
+                  properties:
+                    topic: {const: location_resolution}
       additionalProperties: false

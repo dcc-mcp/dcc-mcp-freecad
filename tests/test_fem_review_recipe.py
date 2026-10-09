@@ -392,6 +392,14 @@ def test_a_global_maximum_with_no_location_list_is_rejected():
 
 
 def test_a_location_with_no_sub_element_reference_is_rejected():
+    """An object-level entry with no stated reason is a degradation, not a finding.
+
+    Before the contract grew a legal way to say "nothing resolved", this case
+    could only be answered by inventing a reference. It is still rejected now,
+    but for the reason that matters: the review dropped the anchor without
+    saying why. ``test_an_object_level_location_is_accepted_when_the_review_says
+    _why`` is the same entry with the reason supplied.
+    """
     review = copy.deepcopy(GOOD)
     review["critical_locations"] = [_location(reference=None)]
     review["critical_locations"][0].pop("reference")
@@ -431,6 +439,148 @@ def test_a_location_that_names_no_object_is_rejected():
     review = copy.deepcopy(GOOD)
     review["critical_locations"] = [_location(object_name="")]
     assert _validate(review)
+
+
+# ── Acceptance 2b: "I could not locate it" is a legal answer ───────────────
+#
+# The contract once demanded a sub-element reference on every hot spot. When the
+# host can resolve none -- an existing analysis was reused, so there is no
+# target_object, and sub-element naming moved between FreeCAD release lines --
+# that demand had only two satisfactions: invent a reference, or fail. A
+# fabricated hot spot validates and is worse than an absent one, so the
+# reference-less path below is the arm that must exist and must be gated.
+
+LOCATION_RESOLUTION = {
+    "topic": "location_resolution",
+    "statement": (
+        "The solve reused an existing analysis, so no target object was carried "
+        "and list_faces resolved no face for Beam. The hot spot is reported at "
+        "object level only."
+    ),
+}
+
+
+def _object_level(**overrides):
+    """A hot spot the host could not anchor: object-level, no reference."""
+    location = _location()
+    location.pop("reference")
+    location["note"] = (
+        "Peak reported at object level: no face on Beam could be confirmed "
+        "resolvable, so no sub-element is claimed."
+    )
+    location.update(overrides)
+    return location
+
+
+def _unresolved_review(**overrides):
+    """An object-level review that declares why the location is unresolved."""
+    review = copy.deepcopy(GOOD)
+    review["critical_locations"] = [_object_level(**overrides)]
+    review["assumptions"] = copy.deepcopy(ASSUMPTIONS) + [copy.deepcopy(LOCATION_RESOLUTION)]
+    return review
+
+
+def test_an_object_level_location_is_accepted_when_the_review_says_why():
+    """The case the contract previously made unrepresentable.
+
+    This is the acceptance criterion: a review that cannot anchor a sub-element
+    must be able to say so and still validate, because the alternative is a
+    reference invented to satisfy a schema.
+    """
+    assert _validate(_unresolved_review()) == []
+
+
+def test_an_object_level_location_with_no_note_is_rejected():
+    """No reference and no note is a location with nothing in it.
+
+    The note is the only place an object-level entry says what the claim
+    covers, so the oneOf has to fail when both arms are empty -- otherwise
+    dropping the reference would be free and every hot spot could degrade
+    silently.
+    """
+    review = _unresolved_review()
+    review["critical_locations"][0].pop("note")
+    assert _validate(review)
+
+
+def test_an_unrelated_assumption_does_not_licence_an_object_level_location():
+    """Only location_resolution opens the path, not merely a fourth assumption.
+
+    The gate has to be the topic and not the count: a contract that accepted
+    any extra assumption in place of the reason would have re-created the
+    degradation it was meant to gate, one field away.
+    """
+    review = copy.deepcopy(GOOD)
+    review["critical_locations"] = [_object_level()]
+    review["assumptions"] = copy.deepcopy(ASSUMPTIONS) + [
+        {"topic": "model_class", "statement": "Linear static, small displacement."}
+    ]
+    assert _validate(review)
+
+
+def test_a_mix_of_anchored_and_object_level_locations_needs_the_assumption():
+    """One unresolved entry is enough; the anchored ones do not cover it."""
+    review = copy.deepcopy(GOOD)
+    review["critical_locations"] = [_location(), _object_level()]
+    assert _validate(review)
+    review["assumptions"] = copy.deepcopy(ASSUMPTIONS) + [copy.deepcopy(LOCATION_RESOLUTION)]
+    assert _validate(review) == []
+
+
+def test_an_empty_reference_is_not_an_object_level_location():
+    """`reference: ""` is a broken anchor, not a declared absence.
+
+    With `reference` out of `required`, its pattern is the only thing keeping a
+    malformed value out -- so assert the empty string as well as free text, or
+    the relaxed contract ships with a dead pattern.
+    """
+    assert _validate(_unresolved_review(reference=""))
+
+
+def test_the_reference_pattern_still_binds_an_anchored_location():
+    """A review may carry the assumption and still anchor, if it can."""
+    review = _unresolved_review(reference="Beam:Face3")
+    assert _validate(review) == []
+    review["critical_locations"][0]["reference"] = "Beam:Face"
+    assert _validate(review)
+
+
+def test_an_object_level_location_still_names_its_object():
+    """object_name is the only address an object-level entry has."""
+    assert _validate(_unresolved_review(object_name=""))
+
+
+def test_relaxing_the_reference_did_not_relax_min_items():
+    """The mutation arm on the whole change.
+
+    The point of the original criterion was that a review must name a place.
+    Opening a way to report an *unanchored* place must not have opened a way to
+    report none -- a contract that accepts `[]` has stopped being a location
+    contract.
+    """
+    review = _unresolved_review()
+    review["critical_locations"] = []
+    errors = _validate(review)
+    assert errors
+    assert any("critical_locations" in error for error in errors)
+
+
+def test_location_resolution_is_a_declared_topic():
+    """A topic the enum does not list is a value no review can set."""
+    topics = OUTPUT_CONTRACT["properties"]["assumptions"]["items"]["properties"]["topic"]["enum"]
+    assert "location_resolution" in topics
+
+
+def test_the_object_level_path_is_described_in_the_skill_body():
+    """The contract and its prose are one deliverable.
+
+    A schema escape hatch the reader has no way to learn about is a trap: they
+    keep inventing references because the documentation still says one is
+    required.
+    """
+    body = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert "object-level" in body
+    assert "location_resolution" in body
 
 
 # ── Acceptance 3: material provenance ─────────────────────────────────────
