@@ -19,6 +19,12 @@ _SIBLING_MODULES = {}
 # the same mesh as STL/OBJ and is therefore guarded by the same assertions.
 _MESH_SUFFIXES = ("stl", "obj", "3mf")
 
+# Slack allowed when comparing an imported mesh against the envelope of the file
+# it was read from. A mesh format stores vertices, so the round-trip is exact up
+# to the reader's own floating-point noise; the slack only absorbs that, not a
+# missing or substituted body of geometry.
+_MESH_IMPORT_SLACK = 1e-6
+
 # The unit the host's 3MF writer declares, and the unit FreeCAD models in. A 3MF
 # consumer scales the model by this declaration, so a wrong or missing value
 # silently changes the printed size - it is asserted on every export.
@@ -2028,6 +2034,9 @@ def model_import_geometry(params):
             "There is nothing to import, so an imported object would be reported "
             "without having read anything.",
         )
+        expected_solids = None
+        expected_volume = None
+        source_box = None
         if is_mesh:
             import Mesh
 
@@ -2036,6 +2045,7 @@ def model_import_geometry(params):
             mesh = Mesh.Mesh(input_path)
             if not getattr(mesh, "CountPoints", 0):
                 raise ValueError("Imported mesh is empty")
+            source_box = getattr(mesh, "BoundBox", None)
             obj = doc.addObject("Mesh::Feature", object_name)
             obj.Mesh = mesh
         else:
@@ -2044,6 +2054,13 @@ def model_import_geometry(params):
             shape = Part.read(input_path)
             if shape.isNull():
                 raise ValueError("Imported Part shape is empty")
+            # Measured from the file that was actually read, before the object
+            # exists: an import only counts once the landed object carries the
+            # geometry the source held. A STEP/BREP reader that drops a solid
+            # still returns a non-null shape, so existence alone cannot tell.
+            expected_solids = len(shape.Solids)
+            expected_volume = shape.Volume
+            source_box = getattr(shape, "BoundBox", None)
             obj = doc.addObject("Part::Feature", object_name)
             obj.Shape = shape
         if label:
@@ -2070,9 +2087,38 @@ def model_import_geometry(params):
                 {"points": points, "facets": facets},
                 "The mesh object was created but carries no geometry after the save.",
             )
-            _verify_box(read_back, "mesh", getattr(mesh, "BoundBox", None))
+            landed_box = getattr(mesh, "BoundBox", None)
+            if source_box is not None:
+                read_back.check(
+                    _box_contains(source_box, landed_box, _MESH_IMPORT_SLACK),
+                    "source.bounding_box",
+                    "inside the source envelope expanded by %r" % _MESH_IMPORT_SLACK,
+                    {
+                        "source": _bound_box_payload(source_box),
+                        "imported": _bound_box_payload(landed_box),
+                    },
+                    "The imported mesh lies outside the source file's envelope, "
+                    "which means the wrong geometry (or only part of it) landed.",
+                )
+            _verify_box(read_back, "mesh", landed_box)
         else:
             shape = read_back.shape("object", stored)
+            read_back.check(
+                len(shape.Solids) == expected_solids,
+                "source.solids",
+                expected_solids,
+                len(shape.Solids),
+                "The imported object holds a different solid count than the "
+                "source file, so part of the import was dropped.",
+            )
+            read_back.numbers(
+                "source.volume",
+                expected_volume,
+                shape.Volume,
+                "The imported object holds a different volume than the source "
+                "file, so the import is not the geometry that was read.",
+                rel_tolerance=1e-3,
+            )
             _verify_box(read_back, "object", getattr(shape, "BoundBox", None))
         return {
             "object": _object_payload(stored),

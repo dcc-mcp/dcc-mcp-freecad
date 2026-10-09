@@ -13,6 +13,7 @@ geometry; this file proves they do fire when a write does not stick.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -263,9 +264,25 @@ class _Object:
     the write and returns, but nothing changes. Identity attributes stay
     writable because an object that loses its type or shape is a different
     failure, not a dropped write.
+
+    ``_landed`` models a subtler variant: the write is accepted and something is
+    stored, but not everything that was handed over. That is what a partial
+    import looks like -- the object is present and carries valid geometry, just
+    less of it than the source file held.
     """
 
-    _IDENTITY = frozenset({"TypeId", "Name", "Shape", "OutList", "InList", "_silenced", "_doc"})
+    _IDENTITY = frozenset(
+        {
+            "TypeId",
+            "Name",
+            "Shape",
+            "OutList",
+            "InList",
+            "_silenced",
+            "_doc",
+            "_landed",
+        }
+    )
 
     def __init__(self, type_id, name, doc):
         self.TypeId = type_id
@@ -277,8 +294,13 @@ class _Object:
         self.Shape = None
         self._silenced = False
         self._doc = doc
+        self._landed = {}
 
     def __setattr__(self, key, value):
+        landed = getattr(self, "_landed", None) or {}
+        if key in landed:
+            object.__setattr__(self, key, landed[key])
+            return
         if key in _Object._IDENTITY or key.startswith("__"):
             object.__setattr__(self, key, value)
             return
@@ -367,20 +389,35 @@ class _App:
 
 
 class FakePart(types.ModuleType):
-    """Stands in for FreeCAD's ``Part`` module."""
+    """Stands in for FreeCAD's ``Part`` module.
+
+    ``read`` hands out a *fresh* shape per call, and never the same object
+    twice. That is what makes the import read-back meaningful: the driver reads
+    the source file once to measure it and then inspects what landed, and a fake
+    that returned one shared shape would make those two sides equal by
+    construction -- the comparison would pass no matter what the import dropped.
+    """
 
     def __init__(self):
         super().__init__("Part")
         self.reads = []
         self.exports = []
         self.shapes = {}
+        # Override for "the shape the next read of this path produces", used to
+        # model a reader that returns less geometry than the file holds.
+        self.read_shapes = {}
 
     def read(self, path):
         self.reads.append(path)
-        shape = self.shapes.get(str(path))
+        key = str(path)
+        shape = self.read_shapes.get(key) or self.shapes.get(key)
         if shape is None:
             shape = _Shape()
-            self.shapes[str(path)] = shape
+            self.shapes[key] = shape
+        else:
+            # A real reader builds a new shape each time; copy so the caller
+            # cannot alias the stored reference and hide a difference.
+            shape = copy.copy(shape)
         return shape
 
     def export(self, objects, path):
@@ -462,6 +499,27 @@ def _new_objects_with_shape(doc, shape):
     def addObject(type_id, name):
         obj = original(type_id, name)
         obj.Shape = shape
+        return obj
+
+    doc.addObject = addObject
+    return original
+
+
+def _new_objects_land_with(doc, **landed):
+    """Make every object created from here on store ``landed`` for those props.
+
+    Models a partial import: the source file is read into full geometry, the
+    host accepts the property write, and the object ends up holding only part of
+    it. The object still exists and still carries valid geometry, so every
+    existence and finiteness check passes -- only a comparison against the
+    source can see the loss.
+    """
+
+    original = doc.addObject
+
+    def addObject(type_id, name):
+        obj = original(type_id, name)
+        obj._landed = dict(landed)
         return obj
 
     doc.addObject = addObject
@@ -911,8 +969,132 @@ def test_import_geometry_proves_the_geometry_landed(host, tmp_path):
     )
 
     assert result["object"]["name"] == "ImportedBody"
-    for check in ("input.non_empty", "object.exists", "object.shape.not_null"):
+    for check in (
+        "input.non_empty",
+        "object.exists",
+        "object.shape.not_null",
+        "source.solids",
+        "source.volume",
+    ):
         assert check in result["verified"], check
+
+
+def test_import_geometry_quotes_the_source_in_the_mismatch(host, tmp_path):
+    """The expected side of the mismatch is the file, not the landed object.
+
+    A driver that measured the object twice would report ``expected`` equal to
+    ``actual`` and so could never disagree at all. Forcing the object to land
+    with distorted geometry makes both sides visible: ``expected`` must carry
+    the source file's numbers and ``actual`` the object's.
+    """
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.step"
+    source.write_bytes(b"solid")
+    host.part.shapes[str(source)] = _Shape(volume=1000.0, solids=4)
+    _new_objects_land_with(doc, Shape=_Shape(volume=250.0, solids=1))
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_import_geometry(
+            {"document_path": path, "input_path": str(source), "object_name": "ImportedBody"}
+        )
+
+    error = _mismatch(excinfo)
+    # The source is what was asked for; the object is what was measured.
+    assert error.expected == 4
+    assert error.actual == 1
+
+
+def test_import_geometry_refuses_when_solids_were_dropped(host, tmp_path):
+    """A partial STEP/BREP import must fail instead of reporting success."""
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.step"
+    source.write_bytes(b"solid")
+    # The file holds four solids; the object lands carrying one.
+    host.part.shapes[str(source)] = _Shape(volume=400.0, solids=4)
+    _new_objects_land_with(doc, Shape=_Shape(volume=400.0, solids=1))
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_import_geometry(
+            {"document_path": path, "input_path": str(source), "object_name": "ImportedBody"}
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "source.solids"
+    assert error.expected == 4
+    assert error.actual == 1
+
+
+def test_import_geometry_refuses_when_the_volume_changed(host, tmp_path):
+    """Same solid count, different geometry: the volume check is what bites."""
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.step"
+    source.write_bytes(b"solid")
+    host.part.shapes[str(source)] = _Shape(volume=100.0, solids=1)
+    _new_objects_land_with(doc, Shape=_Shape(volume=42.0, solids=1))
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_import_geometry(
+            {"document_path": path, "input_path": str(source), "object_name": "ImportedBody"}
+        )
+
+    error = _mismatch(excinfo)
+    assert error.check == "source.volume"
+    assert error.expected == 100.0
+    assert error.actual == 42.0
+
+
+def test_import_geometry_accepts_an_undistorted_import(host, tmp_path):
+    """The refusal cases above only mean something if a clean import passes.
+
+    The landed shape is one the source file could have produced: same solid
+    count, and a volume inside the contract's 1e-3 relative tolerance.
+    """
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.step"
+    source.write_bytes(b"solid")
+    host.part.shapes[str(source)] = _Shape(volume=100.0, solids=3)
+    _new_objects_land_with(doc, Shape=_Shape(volume=100.0 + 1e-6, solids=3))
+
+    result = freecad_driver.model_import_geometry(
+        {"document_path": path, "input_path": str(source), "object_name": "ImportedBody"}
+    )
+
+    assert "source.solids" in result["verified"]
+    assert "source.volume" in result["verified"]
+
+
+def test_import_geometry_refuses_a_mesh_outside_the_source_envelope(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.stl"
+    source.write_bytes(b"solid")
+    escaped = _Mesh()
+    escaped.BoundBox = _BoundBox((0, 0, 0), (500, 500, 500))
+    host.mesh.Mesh = lambda path=None: _Mesh()  # the source reads as a unit box
+    _new_objects_land_with(doc, Mesh=escaped)
+
+    with pytest.raises(write_contract.WriteVerificationError) as excinfo:
+        freecad_driver.model_import_geometry(
+            {"document_path": path, "input_path": str(source), "object_name": "ImportedMesh"}
+        )
+
+    assert _mismatch(excinfo).check == "source.bounding_box"
+
+
+def test_import_geometry_accepts_a_mesh_inside_the_source_envelope(host, tmp_path):
+    """The negative case above only means something if a good import passes."""
+    doc, path = _document(host, tmp_path)
+    source = tmp_path / "model.stl"
+    source.write_bytes(b"solid")
+    landed = _Mesh()
+    landed.BoundBox = _BoundBox((0, 0, 0), (1, 1, 1))
+    host.mesh.Mesh = lambda path=None: _Mesh()
+    _new_objects_land_with(doc, Mesh=landed)
+
+    result = freecad_driver.model_import_geometry(
+        {"document_path": path, "input_path": str(source), "object_name": "ImportedMesh"}
+    )
+
+    assert "source.bounding_box" in result["verified"]
 
 
 def test_import_geometry_refuses_an_empty_source(host, tmp_path):
