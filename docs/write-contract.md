@@ -47,7 +47,7 @@ For **every** tool that changes a document or writes a file:
 | `transform_object` | placement is the requested transform |
 | `boolean_operation` | result exists with the right `TypeId`; `Base`/`Tool` are wired to the requested operands; shape non-null and valid; result volume relates to the operands the way the operation requires |
 | `remove_object` | every name the call claims to have removed is gone |
-| `import_geometry` | source file non-empty; object exists; mesh has points and facets, or shape is non-null, valid and finitely bounded |
+| `import_geometry` | source file non-empty; object exists; mesh has points and facets, or shape is non-null, valid and finitely bounded; **and** the landed object matches the source file it was read from (solid count and volume for CAD formats; point/facet count and bounding-box containment for meshes) |
 | `export_geometry` | artefact exists and is non-empty; **and** can be read back into the geometry it came from (solid count and volume for CAD formats; point/facet count and bounding-box containment for meshes) |
 | `save_copy` | copy exists and is non-empty; copy reopens with the same object inventory |
 | `create_document` | the document file exists and is non-empty |
@@ -70,6 +70,14 @@ on the surface it was given, so an exported mesh cannot leave its source's
 bounding box. An export of the wrong object -- or of nothing -- shows up here as
 a box that escaped. This catches "wrote a plausible-looking file" without
 recomputing the source geometry.
+
+The same containment holds the other way round: a mesh imported from a file
+cannot leave the envelope of the file it was read from, so `import_geometry`
+compares the landed mesh against the source's box in exactly the same way.
+Containment is a one-directional test, though -- a mesh that lost facets stays
+inside the box -- so `import_geometry` also compares point and facet counts,
+which are exact for a vertex format. Containment proves the import is not the
+wrong or a larger geometry; the counts prove none of it went missing.
 
 ## Refusing an under-constrained sketch
 
