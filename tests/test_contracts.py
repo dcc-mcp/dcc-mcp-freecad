@@ -21,6 +21,7 @@ SKILL_NAMES = (
     "freecad-modify",
     "freecad-parts",
     "freecad-sketch",
+    "freecad-feature",
     "freecad-analysis",
 )
 
@@ -38,8 +39,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 36
-    assert len({tool["name"] for tool in tools}) == 36
+    assert len(tools) == 43
+    assert len({tool["name"] for tool in tools}) == 43
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -237,7 +238,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 36
+    assert len(payload["tools"]) == len(catalog) == 43
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -361,7 +362,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 36
+    assert len(catalog) == 43
 
 
 def test_the_sketch_errors_are_exported_and_state_error_is_the_callers_one():

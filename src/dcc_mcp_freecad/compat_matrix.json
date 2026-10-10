@@ -92,8 +92,9 @@
       },
       "symptom": "Writing the reversal property under the wrong generation's name is dropped, so a two-sided pad is computed one-sided and the feature still reports success.",
       "adapter_usage": "guarded",
+      "affected_tools": ["partdesign.pad", "partdesign.pocket"],
       "enforcement": "guard",
-      "remediation": "The adapter resolves the property by capability, trying `SideType`, then `Midplane`, then `Symmetric`, and refuses when a host exposes none of them instead of writing to a name that silently does nothing."
+      "remediation": "The adapter resolves the property by capability, trying `SideType`, then `Midplane`, then `Symmetric`, and refuses when a host exposes none of them instead of writing to a name that silently does nothing. `Revolution` and `Groove` are excluded: they carry no reversal property at all, so the ladder is never applied to them and they accept no side_type."
     },
     {
       "id": "meshpart-tessellate-deflection",

@@ -68,6 +68,14 @@ _MAX_LIST_HASH_BYTES_PER_FILE = 64 * 1024 * 1024
 _MAX_LIST_READ_BYTES = 256 * 1024 * 1024
 _MAX_LIST_PATTERN_LENGTH = 128
 _MAX_DOCUMENT_XML_BYTES = 8 * 1024 * 1024
+
+# Which side of a profile a PartDesign feature grows towards. The driver probes
+# the host for the property that expresses it, so this is the request-side
+# vocabulary only: it is never the name of a host attribute.
+SIDE_TYPES = ("one_side", "two_sides", "symmetric")
+
+# Hole profiles.
+HOLE_TYPES = ("none", "counterbore", "countersink")
 _CANCEL_CHECK_INTERVAL = 256
 _DOCUMENT_XML = "Document.xml"
 
@@ -2879,6 +2887,194 @@ class FreecadBridge:
                 "document_path": str(document),
                 "sketch_name": self._object_name(sketch_name),
                 "require_fully_constrained": bool(require_fully_constrained),
+            },
+            timeout_secs,
+        )
+
+    def pad_feature(
+        self,
+        document_path: str,
+        sketch_name: str,
+        result_name: str,
+        length: float,
+        side_type: str = "one_side",
+        reversed: bool = False,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Extrude a fully constrained sketch into a solid."""
+        if side_type not in SIDE_TYPES:
+            raise BridgeError("side_type must be one of %s" % ", ".join(SIDE_TYPES))
+        return self._mutate_document(
+            "partdesign.pad",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "result_name": self._object_name(result_name),
+                "length": float(length),
+                "side_type": side_type,
+                "reversed": bool(reversed),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def pocket_feature(
+        self,
+        document_path: str,
+        sketch_name: str,
+        result_name: str,
+        length: float,
+        side_type: str = "one_side",
+        reversed: bool = False,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Cut a fully constrained sketch out of the body it belongs to."""
+        if side_type not in SIDE_TYPES:
+            raise BridgeError("side_type must be one of %s" % ", ".join(SIDE_TYPES))
+        return self._mutate_document(
+            "partdesign.pocket",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "result_name": self._object_name(result_name),
+                "length": float(length),
+                "side_type": side_type,
+                "reversed": bool(reversed),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def revolution_feature(
+        self,
+        document_path: str,
+        sketch_name: str,
+        result_name: str,
+        angle_degrees: float,
+        axis: str = "vertical",
+        reversed: bool = False,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Revolve a fully constrained sketch about an axis into a solid.
+
+        Revolution carries no side-type property, so none is accepted here:
+        offering one would write to a property the host does not have.
+        """
+        return self._mutate_document(
+            "partdesign.revolution",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "result_name": self._object_name(result_name),
+                "angle_degrees": float(angle_degrees),
+                "axis": axis,
+                "reversed": bool(reversed),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def groove_feature(
+        self,
+        document_path: str,
+        sketch_name: str,
+        result_name: str,
+        angle_degrees: float,
+        axis: str = "vertical",
+        reversed: bool = False,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Cut a revolved profile out of the body, as a groove."""
+        return self._mutate_document(
+            "partdesign.groove",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "result_name": self._object_name(result_name),
+                "angle_degrees": float(angle_degrees),
+                "axis": axis,
+                "reversed": bool(reversed),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def loft_feature(
+        self,
+        document_path: str,
+        sketch_name: str,
+        sketch_names: Sequence[str],
+        result_name: str,
+        length: float,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Loft through two or more fully constrained profile sketches."""
+        return self._mutate_document(
+            "partdesign.loft",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "sketch_names": [self._object_name(name) for name in sketch_names],
+                "result_name": self._object_name(result_name),
+                "length": float(length),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def sweep_feature(
+        self,
+        document_path: str,
+        sketch_name: str,
+        path_sketch_name: str,
+        result_name: str,
+        length: float,
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Sweep a profile sketch along a path sketch."""
+        return self._mutate_document(
+            "partdesign.sweep",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "path_sketch_name": self._object_name(path_sketch_name),
+                "result_name": self._object_name(result_name),
+                "length": float(length),
+                "result_label": result_label,
+            },
+            timeout_secs,
+        )
+
+    def create_hole(
+        self,
+        document_path: str,
+        sketch_name: str,
+        result_name: str,
+        diameter: float,
+        depth: float,
+        hole_type: str = "none",
+        result_label: Optional[str] = None,
+        timeout_secs: float = 300,
+    ) -> dict[str, Any]:
+        """Cut a hole at the sketch's point, removing a measurable volume."""
+        if hole_type not in HOLE_TYPES:
+            raise BridgeError("hole_type must be one of %s" % ", ".join(HOLE_TYPES))
+        return self._mutate_document(
+            "partdesign.hole",
+            document_path,
+            {
+                "sketch_name": self._object_name(sketch_name),
+                "result_name": self._object_name(result_name),
+                "diameter": float(diameter),
+                "depth": float(depth),
+                "hole_type": hole_type,
+                "result_label": result_label,
             },
             timeout_secs,
         )
