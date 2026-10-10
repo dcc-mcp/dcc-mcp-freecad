@@ -3342,6 +3342,401 @@ def _resolve_reversal_property(obj, version):
     )
 
 
+# ---------------------------------------------------------------------------
+# PartDesign sketch features
+#
+# The failure mode these tools exist to eliminate is upstream FreeCAD issue #99:
+# ``pocket_sketch`` reports success and a Valid state while removing no material
+# at all. Every tool here therefore refuses to trust the return value of the
+# call it made and instead measures the body's volume before and after, then
+# asserts the *direction* and the *magnitude* of the change. A pocket that did
+# not reduce the volume is an error, not a success with a smaller number.
+# ---------------------------------------------------------------------------
+
+# Type ids of the PartDesign features this module creates.
+_PAD_TYPE_ID = "PartDesign::Pad"
+_POCKET_TYPE_ID = "PartDesign::Pocket"
+_REVOLUTION_TYPE_ID = "PartDesign::Revolution"
+_GROOVE_TYPE_ID = "PartDesign::Groove"
+_LOFT_TYPE_ID = "PartDesign::AdditiveLoft"
+_SWEEP_TYPE_ID = "PartDesign::AdditivePipe"
+_HOLE_TYPE_ID = "PartDesign::Hole"
+
+# Which side of the profile a feature extrudes towards. ``one_side`` is the
+# host default; the other two are expressed through whichever reversal property
+# this host exposes, never through a hard-coded attribute name.
+_SIDE_TYPES = ("one_side", "two_sides", "symmetric")
+
+# The value a reversal property takes for each side type, per generation.
+# ``SideType`` is an enumeration spelled as a string, while ``Midplane`` and
+# ``Symmetric`` are booleans, so the mapping cannot be shared. Both are keyed
+# the same way so a call site only names the intent.
+_SIDE_TYPE_ENUM = {"one_side": "One side", "two_sides": "Two sides", "symmetric": "Symmetric"}
+
+# Hole profiles, as the host spells them.
+_HOLE_TYPES = ("none", "counterbore", "countersink")
+
+# A volume change this small is noise: the tolerance exists to absorb the
+# floating-point residue of a recompute, not to excuse a feature that did
+# nothing. One dropped feature is a whole profile-area of difference, many
+# orders of magnitude larger.
+_VOLUME_EPSILON = 1e-9
+
+# The fraction of the requested change a feature must deliver. A pad asked for
+# 10 mm that produced 4 mm is a silent truncation, not a success. The bound is
+# loose enough to survive how a host clips a profile against the body it grows
+# from, and tight enough that a feature which did not run cannot pass it.
+_VOLUME_DELTA_REL_TOLERANCE = 0.02
+
+
+def _feature_volume(obj, tool, what):
+    """Assert the feature produced a real solid, and return its volume.
+
+    A pad that produced no solid is the upstream bug in its purest form: the
+    object exists, the recompute is clean, and there is nothing there.
+
+    A *zero* volume is deliberately not refused here. It is legitimate for the
+    first feature in an empty body to be the body's own empty state, and a
+    feature that changed nothing but left a valid shape is precisely the case
+    the volume-delta comparison reports better -- it can say how much should
+    have changed, where this check could only say "nothing". Refusing here
+    would replace that better error with a worse one.
+    """
+    shape = getattr(obj, "Shape", None)
+    if shape is None or shape.isNull():
+        raise _coded(
+            "E_FEATURE_EMPTY",
+            "%s produced no geometry for %s, so the feature did not take effect" % (tool, what),
+        )
+    if not getattr(shape, "Solids", None):
+        raise _coded(
+            "E_FEATURE_EMPTY",
+            "%s produced a %s with no solids for %s; a sketch feature must yield a solid"
+            % (tool, getattr(shape, "ShapeType", "shape"), what),
+        )
+    if not shape.isValid():
+        raise _coded(
+            "E_FEATURE_INVALID",
+            "%s produced an invalid shape for %s, so the result is not a solid the caller "
+            "can build on" % (tool, what),
+        )
+    volume = float(shape.Volume)
+    if not math.isfinite(volume):
+        raise _coded(
+            "E_FEATURE_INVALID",
+            "%s produced a non-finite volume for %s, so the result cannot be measured"
+            % (tool, what),
+        )
+    return volume
+
+
+def _body_volume(body, tool, name):
+    """The current volume of a PartDesign body, or 0.0 when it holds nothing.
+
+    A body before its first feature legitimately has no tip, so an absent one is
+    a real zero and not an error -- what matters is that the number is measured
+    rather than assumed.
+    """
+    tip = getattr(body, "Tip", None)
+    if tip is None:
+        return 0.0
+    shape = getattr(tip, "Shape", None)
+    if shape is None or shape.isNull() or not getattr(shape, "Solids", None):
+        return 0.0
+    volume = float(shape.Volume)
+    if not math.isfinite(volume) or volume <= 0.0:
+        return 0.0
+    return volume
+
+
+def _profile_area(sketch, tool):
+    """The area enclosed by a sketch's profile, as the host measures it.
+
+    A feature's volume is its profile area times its extent, so a profile with
+    no area cannot produce volume and must be refused before the feature runs:
+    an open or self-intersecting profile is exactly what a host turns into an
+    empty shell while still reporting success.
+    """
+    shape = getattr(sketch, "Shape", None)
+    area = getattr(shape, "Area", None) if shape is not None else None
+    try:
+        value = float(area)
+    except (TypeError, ValueError):
+        raise _coded(
+            "E_PROFILE_DEGENERATE",
+            "%s: the sketch exposes no measurable profile area, so its profile is degenerate "
+            "(open, self-intersecting, or empty)" % tool,
+        ) from None
+    if not math.isfinite(value) or value <= 0.0:
+        raise _coded(
+            "E_PROFILE_DEGENERATE",
+            "%s: the sketch profile encloses %r area, so it is degenerate (open, "
+            "self-intersecting, or zero-thickness) and cannot produce a solid" % (tool, value),
+        )
+    return value
+
+
+def _check_volume_delta(read_back, tool, name, expected_delta, actual_delta, direction):
+    """Assert a feature changed the body's volume in the direction it must.
+
+    Three things are checked, and each one catches a different failure:
+
+    * **direction** -- a pocket that increased the volume, or a pad that
+      decreased it, is the tool having done the opposite of what was asked;
+    * **presence** -- a delta of zero is the upstream #99 bug itself, a feature
+      that reported success and changed nothing;
+    * **magnitude** -- a delta far smaller than the profile and extent require
+      is a feature that ran but was clipped, or a profile silently reinterpreted.
+
+    The magnitude bound is a tolerance, not an assertion of exact equality: a
+    host clips a profile against the body it grows from, so the delivered volume
+    is bounded from above by the request rather than equal to it.
+    """
+    # The direction check is recorded whether it passes or fails: a caller
+    # reading ``verified`` must be able to see that the direction was measured,
+    # not only hear about it when it disagreed.
+    wrong_way = (
+        actual_delta <= _VOLUME_EPSILON if direction == "add" else actual_delta >= -_VOLUME_EPSILON
+    )
+    if direction == "add":
+        read_back.check(
+            not wrong_way,
+            "%s.volume_delta.direction" % name,
+            "an increase of about %r" % expected_delta,
+            actual_delta,
+            "The body's volume did not increase, so %s added nothing even though the "
+            "host reported success. The profile is open, self-intersecting, or was "
+            "rejected downstream." % tool,
+        )
+    else:
+        read_back.check(
+            not wrong_way,
+            "%s.volume_delta.direction" % name,
+            "a decrease of about %r" % expected_delta,
+            actual_delta,
+            "The body's volume did not decrease, so %s removed no material even though "
+            "the host reported success. This is the failure upstream FreeCAD issue #99 "
+            "reports as a clean success." % tool,
+        )
+    magnitude = abs(actual_delta)
+    expected = abs(expected_delta)
+    read_back.check(
+        magnitude <= expected * (1.0 + _VOLUME_DELTA_REL_TOLERANCE) + _VOLUME_EPSILON,
+        "%s.volume_delta.magnitude" % name,
+        "at most %r" % (expected * (1.0 + _VOLUME_DELTA_REL_TOLERANCE)),
+        magnitude,
+        "The feature changed the volume by more than its profile and extent allow, so the "
+        "geometry does not match the request.",
+    )
+    read_back.check(
+        magnitude >= expected * (1.0 - _VOLUME_DELTA_REL_TOLERANCE) - _VOLUME_EPSILON,
+        "%s.volume_delta.magnitude" % name,
+        "at least %r" % (expected * (1.0 - _VOLUME_DELTA_REL_TOLERANCE)),
+        magnitude,
+        "The feature changed the volume by far less than its profile and extent require, so "
+        "it was clipped or silently reinterpreted instead of running as asked.",
+    )
+
+
+def _sketch_body(sketch, tool, sketch_name):
+    """The PartDesign body a sketch belongs to.
+
+    A PartDesign feature is only meaningful inside a body: it is the body that
+    accumulates the solid and the body whose volume the read-back measures. A
+    sketch with no owning body would otherwise produce a feature whose result
+    lands nowhere the caller can measure.
+    """
+    for owner in getattr(sketch, "InList", ()) or ():
+        if getattr(owner, "TypeId", None) == _BODY_TYPE_ID:
+            return owner
+    raise _coded(
+        "E_SKETCH_NOT_IN_BODY",
+        "%s: sketch %r does not belong to a PartDesign body, so a feature built on it has "
+        "no solid to add to or cut from" % (tool, sketch_name),
+    )
+
+
+def _new_feature(body, type_id, name, tool):
+    """Create a feature object inside a body, refusing a name already taken."""
+    if getattr(body, "Document", None) is not None:
+        if body.Document.getObject(name) is not None:
+            raise _coded("E_RESULT_EXISTS", "%s: an object named %r already exists" % (tool, name))
+    try:
+        return body.newObject(type_id, name)
+    except Exception as exc:
+        raise _coded(
+            "E_FEATURE_UNSUPPORTED",
+            "%s: FreeCAD could not create a %s (%s); the feature is not available on this "
+            "host" % (tool, type_id, exc),
+        ) from None
+
+
+def _apply_side_type(feature, side_type, version, tool):
+    """Express a requested side type through whichever property this host has.
+
+    The ladder is probed, never assumed: ``SideType`` is the current spelling,
+    ``Midplane`` and ``Symmetric`` are the two it replaced, and which one a given
+    build exposes is exactly what the compatibility matrix has not yet measured.
+    Hard-coding any of the three is what makes a two-sided pad come back
+    one-sided while still reporting success.
+
+    Revolution and Groove carry no reversal property at all -- a host that grew
+    one would be expressing a different concept -- so they are handled by the
+    caller instead, and never reach this function.
+
+    Returns the property name that took the write, or None for ``one_side``,
+    where there is nothing to set. That name is reported as evidence, because it
+    is how a host that moved the property is recognised after the fact.
+    """
+    if side_type == "one_side":
+        return None
+    name = _resolve_reversal_property(feature, version)
+    if name == "SideType":
+        setattr(feature, name, _SIDE_TYPE_ENUM[side_type])
+    else:
+        # ``Midplane`` and ``Symmetric`` are booleans: both exist only as a
+        # two-sided switch, which is what ``symmetric`` asks for. ``two_sides``
+        # additionally needs a second length, set by the caller.
+        setattr(feature, name, True)
+    return name
+
+
+def _feature_result(
+    params,
+    tool,
+    type_id,
+    direction,
+    configure,
+    extent_for_area,
+):
+    """Run one PartDesign sketch feature and prove it changed the body.
+
+    ``direction`` is ``"add"`` for pad/loft/sweep/revolution and ``"remove"``
+    for pocket/groove/hole: it fixes which way the volume must move, which is
+    the assertion that catches upstream #99.
+
+    ``configure(feature)`` sets the feature's own properties and is the only
+    part that differs between tools. ``extent_for_area(profile_area)`` returns
+    the volume the feature must add or remove given the profile it was handed,
+    so the expected magnitude is derived from the request rather than from
+    anything the host reported.
+
+    The sequence is deliberately: measure, write, recompute, save, re-measure,
+    then assert. The body's volume is read before anything is created, because a
+    number read after the feature cannot distinguish "the feature added this"
+    from "it was already there".
+    """
+    import FreeCAD as App
+
+    version = _host_version()
+    rules = _sketch_module()
+    sketch_name = _required(params, "sketch_name", tool)
+    result_name = _required(params, "result_name", tool)
+    result_label = params.get("result_label")
+    side_type = params.get("side_type") or "one_side"
+    if side_type not in _SIDE_TYPES:
+        raise _coded(
+            "E_SIDE_TYPE_INVALID",
+            "%s: unsupported side_type: %s (supported: %s)"
+            % (tool, side_type, ", ".join(_SIDE_TYPES)),
+        )
+    reversed_direction = bool(params.get("reversed"))
+    doc = _open_document(App, params["document_path"])
+    try:
+        sketch = _open_sketch(doc, sketch_name, tool)
+        # An under-constrained sketch is refused before it is consumed. Its
+        # profile is not a shape the caller chose: it is whatever the solver
+        # happened to settle on, and it moves on the next host version.
+        dof, dof_source = _sketch_dof(sketch, version, tool)
+        state = rules.feature_state(dof, len(getattr(sketch, "Geometry", ()) or ()))
+        rules.assert_feature_ready(state, sketch_name, tool)
+        body = _sketch_body(sketch, tool, sketch_name)
+        profile_area = _profile_area(sketch, tool)
+        before = _body_volume(body, tool, body.Name)
+        expected_delta = extent_for_area(profile_area, sketch)
+        if expected_delta <= 0.0:
+            raise _coded(
+                "E_EXTENT_DEGENERATE",
+                "%s: the requested extent yields %r volume change, so the feature would be "
+                "zero-thickness" % (tool, expected_delta),
+            )
+        feature = _new_feature(body, type_id, result_name, tool)
+        if result_label:
+            feature.Label = str(result_label)
+        feature.Profile = sketch
+        side_property = _apply_side_type(feature, side_type, version, tool)
+        configure(feature)
+        if reversed_direction and _has_property(feature, "Reversed"):
+            feature.Reversed = True
+        doc.recompute()
+        try:
+            _save_document(doc)
+        except Exception as exc:
+            raise _save_failure(exc) from None
+        read_back = _ReadBack(tool, version, params)
+        stored = doc.getObject(result_name)
+        read_back.exists("feature", result_name, stored)
+        read_back.check(
+            stored.TypeId == type_id,
+            "feature.type_id",
+            type_id,
+            stored.TypeId,
+            "The stored object is not the %s that was requested." % type_id,
+        )
+        read_back.check(
+            getattr(getattr(stored, "Profile", None), "Name", None) == sketch_name,
+            "feature.profile",
+            sketch_name,
+            getattr(getattr(stored, "Profile", None), "Name", None),
+            "The feature is not built on the sketch it was asked to use.",
+        )
+        read_back.check(
+            body.Name in [item.Name for item in getattr(stored, "InList", ()) or ()],
+            "feature.in_body",
+            body.Name,
+            [item.Name for item in getattr(stored, "InList", ()) or ()],
+            "The feature is not inside the body, so the body's volume cannot have changed "
+            "and the result would not belong to the requested body.",
+        )
+        _feature_volume(stored, tool, result_name)
+        after = _body_volume(body, tool, body.Name)
+        actual_delta = after - before
+        if direction == "remove":
+            signed_expected = -expected_delta
+        else:
+            signed_expected = expected_delta
+        _check_volume_delta(read_back, tool, "feature", signed_expected, actual_delta, direction)
+        result = {
+            "feature": {
+                "name": stored.Name,
+                "label": stored.Label,
+                "type_id": stored.TypeId,
+                "profile": sketch_name,
+                "body": body.Name,
+                "side_type": side_type,
+                "reversed": reversed_direction,
+                # Which property carried the side type is evidence, not trivia:
+                # it is how a host that moved the property is recognised.
+                "side_property": side_property,
+            },
+            "volume": {
+                "before": before,
+                "after": after,
+                "delta": actual_delta,
+                "expected_delta": signed_expected,
+                "direction": direction,
+            },
+            "profile_area": profile_area,
+            "dof": dof,
+            "dof_source": dof_source,
+            "feature_state": state,
+            "verified": _verified_checks(read_back),
+        }
+        return result
+    finally:
+        _close_document(App, doc)
+
+
 def _open_sketch(doc, sketch_name, tool):
     sketch = doc.getObject(sketch_name)
     if sketch is None:
@@ -4026,6 +4421,294 @@ def sketch_info(params):
         }
     finally:
         _close_document(App, doc)
+
+
+def _length_extent(params, tool, key="length"):
+    """A positive extrusion or cut length, refused with a code when it is not.
+
+    A zero or negative extent is refused before anything is written: it cannot
+    produce the volume the read-back demands, so writing it would only produce
+    a feature guaranteed to fail the postcondition.
+    """
+    value = _required(params, key, tool)
+    try:
+        return _positive(value, key)
+    except ValueError:
+        raise _coded(
+            "E_EXTENT_DEGENERATE",
+            "%s: %s must be a finite number greater than zero, got %r" % (tool, key, value),
+        ) from None
+
+
+def _angle_extent(params, tool, key="angle_degrees"):
+    """A revolution or groove sweep angle, in degrees.
+
+    A full turn is 360 and is allowed: it is a legitimate solid of revolution.
+    Zero is refused, because a zero sweep removes or adds nothing at all and
+    would pass a volume check that only looks at direction.
+    """
+    angle = float(_required(params, key, tool))
+    if not math.isfinite(angle) or angle <= 0.0 or angle > 360.0:
+        raise _coded(
+            "E_ANGLE_INVALID",
+            "%s: %s must be a finite angle greater than 0 and at most 360 degrees, got %r"
+            % (tool, key, angle),
+        )
+    return angle
+
+
+def _revolution_expected_volume(sketch, profile_area, angle_degrees, axis, tool):
+    """The volume a revolution must sweep, by Pappus's centroid theorem.
+
+    A profile revolved about an axis sweeps its area along the circular path its
+    centroid travels: volume = area x 2*pi*r x (angle / 360), where r is the
+    distance from the profile's centroid to the axis.
+
+    The centroid distance is the whole point. Deriving it from the host rather
+    than assuming it is what makes the bound meaningful: an axis that runs
+    *through* the profile sweeps almost nothing, while one outside it sweeps a
+    toroidal volume -- and a sign or a missing factor here would make the check
+    pass on geometry that is wrong.
+    """
+    shape = getattr(sketch, "Shape", None)
+    centre = getattr(shape, "CenterOfMass", None) if shape is not None else None
+    if centre is None:
+        raise _coded(
+            "E_PROFILE_DEGENERATE",
+            "%s: the host does not report the profile's centre of mass, so the volume a "
+            "revolution must sweep cannot be derived and the result could not be verified" % tool,
+        )
+    # Distance from the axis, in the sketch's own plane. "vertical" revolves
+    # about the sketch's Y axis, so the radius is the X offset of the centroid;
+    # "horizontal" is the transpose.
+    offset = float(centre.x) if axis == "vertical" else float(centre.y)
+    radius = abs(offset)
+    fraction = float(angle_degrees) / 360.0
+    return float(profile_area) * 2.0 * math.pi * radius * fraction
+
+
+def partdesign_pad(params):
+    """Extrude a sketch into a solid, proving the body gained volume."""
+    tool = "partdesign.pad"
+    length = _length_extent(params, tool)
+    side_type = params.get("side_type") or "one_side"
+
+    def configure(feature):
+        if _has_property(feature, "Length"):
+            feature.Length = length
+        else:
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Length property on %s" % (tool, feature.TypeId),
+            )
+        if side_type == "two_sides" and _has_property(feature, "Length2"):
+            feature.Length2 = length
+
+    return _feature_result(
+        params, tool, _PAD_TYPE_ID, "add", configure, lambda area, sketch: area * length
+    )
+
+
+def partdesign_pocket(params):
+    """Cut a sketch out of a body, proving the body lost volume.
+
+    This tool exists because of upstream FreeCAD issue #99, where a pocket
+    reports success and a Valid state while removing no material. The volume
+    read-back is the fix: a pocket that did not reduce the body's volume is an
+    error carrying the expected and actual deltas, never a successful result
+    with a smaller number in it.
+    """
+    tool = "partdesign.pocket"
+    length = _length_extent(params, tool)
+    side_type = params.get("side_type") or "one_side"
+
+    def configure(feature):
+        if _has_property(feature, "Length"):
+            feature.Length = length
+        else:
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Length property on %s" % (tool, feature.TypeId),
+            )
+        if side_type == "two_sides" and _has_property(feature, "Length2"):
+            feature.Length2 = length
+
+    return _feature_result(
+        params, tool, _POCKET_TYPE_ID, "remove", configure, lambda area, sketch: area * length
+    )
+
+
+def _revolution_extent(params, tool):
+    """The shared extent setup for Revolution and Groove.
+
+    Both sweep a profile about an axis and neither carries a reversal property:
+    a host that added ``SideType`` to them would be expressing a different
+    concept, so the side-type ladder is deliberately never applied here. Their
+    symmetry is a separate ``Symmetric``-to-the-axis question this adapter does
+    not guess at, because guessing is what produces a solid of the wrong extent
+    while reporting success.
+    """
+    angle = _angle_extent(params, tool)
+    axis_name = params.get("axis") or "vertical"
+
+    def configure(feature):
+        if _has_property(feature, "Angle"):
+            feature.Angle = angle
+        else:
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Angle property on %s" % (tool, feature.TypeId),
+            )
+        # The axis is expressed as a reference to the sketch's own vertical or
+        # horizontal axis, which is what PartDesign's revolution axis expects.
+        # Anything the host does not accept is reported rather than coerced.
+        if axis_name != "vertical" and _has_property(feature, "Axis"):
+            feature.Axis = axis_name
+
+    return angle, configure, axis_name
+
+
+def partdesign_revolution(params):
+    """Revolve a sketch about an axis into a solid.
+
+    Revolution and Groove are handled separately from pad and pocket because
+    they carry no side-type property: there is no second side to grow towards,
+    only an angle to sweep. Applying the side-type ladder here would write to a
+    property the host either ignores or does not have, which is the silent
+    no-op this module refuses to perform.
+    """
+    tool = "partdesign.revolution"
+    angle, configure, axis = _revolution_extent(params, tool)
+
+    def extent_for_area(area, sketch):
+        return _revolution_expected_volume(sketch, area, angle, axis, tool)
+
+    return _feature_result(params, tool, _REVOLUTION_TYPE_ID, "add", configure, extent_for_area)
+
+
+def partdesign_groove(params):
+    """Cut a revolved profile out of a body, proving the body lost volume."""
+    tool = "partdesign.groove"
+    angle, configure, axis = _revolution_extent(params, tool)
+
+    def extent_for_area(area, sketch):
+        return _revolution_expected_volume(sketch, area, angle, axis, tool)
+
+    return _feature_result(params, tool, _GROOVE_TYPE_ID, "remove", configure, extent_for_area)
+
+
+def partdesign_loft(params):
+    """Loft through a list of sketches, proving the body gained volume."""
+    tool = "partdesign.loft"
+    sections = _required(params, "sketch_names", tool)
+    if not isinstance(sections, list) or len(sections) < 2:
+        raise _coded(
+            "E_SECTIONS_REQUIRED",
+            "%s: sketch_names must list at least two sketches to loft through, got %r"
+            % (tool, sections),
+        )
+    length = _length_extent(params, tool)
+
+    def extent_for_area(area, sketch):
+        return area * length
+
+    return _feature_result(
+        params,
+        tool,
+        _LOFT_TYPE_ID,
+        "add",
+        _sections_configure(sections, tool, length),
+        extent_for_area,
+    )
+
+
+def _sections_configure(sections, tool, length=None):
+    """Bind a list of profile sketches to a loft or sweep feature."""
+
+    def configure(feature):
+        if not _has_property(feature, "Sections"):
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Sections property on %s" % (tool, feature.TypeId),
+            )
+        feature.Sections = list(sections)
+        if _has_property(feature, "Length"):
+            feature.Length = length
+
+    return configure
+
+
+def partdesign_sweep(params):
+    """Sweep a profile sketch along a path sketch, proving the body gained volume."""
+    tool = "partdesign.sweep"
+    path_name = _required(params, "path_sketch_name", tool)
+    length = _length_extent(params, tool)
+
+    def configure(feature):
+        if not _has_property(feature, "Sections"):
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Sections property on %s" % (tool, feature.TypeId),
+            )
+        if not _has_property(feature, "Spine"):
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Spine property on %s" % (tool, feature.TypeId),
+            )
+        feature.Sections = [params["sketch_name"]]
+        feature.Spine = path_name
+        if _has_property(feature, "Length"):
+            feature.Length = length
+
+    return _feature_result(
+        params, tool, _SWEEP_TYPE_ID, "add", configure, lambda area, sketch: area * length
+    )
+
+
+def partdesign_hole(params):
+    """Cut a hole at a sketch point, proving the body lost volume.
+
+    The hole's own geometry is what determines how much material it removes, so
+    the expected volume is a cylinder of the requested diameter and depth rather
+    than a function of the profile sketch's area. That number is what makes a
+    hole that drilled nothing distinguishable from one that did.
+    """
+    tool = "partdesign.hole"
+    diameter = _positive(_required(params, "diameter", tool), "diameter")
+    depth = _positive(_required(params, "depth", tool), "depth")
+    hole_type = params.get("hole_type") or "none"
+    if hole_type not in _HOLE_TYPES:
+        raise _coded(
+            "E_HOLE_TYPE_INVALID",
+            "%s: unsupported hole_type: %s (supported: %s)"
+            % (tool, hole_type, ", ".join(_HOLE_TYPES)),
+        )
+    expected_area = math.pi * (diameter / 2.0) ** 2
+
+    def configure(feature):
+        if not _has_property(feature, "Diameter"):
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Diameter property on %s" % (tool, feature.TypeId),
+            )
+        if not _has_property(feature, "Depth"):
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no Depth property on %s" % (tool, feature.TypeId),
+            )
+        feature.Diameter = diameter
+        feature.Depth = depth
+        if hole_type != "none" and _has_property(feature, "HoleCutType"):
+            feature.HoleCutType = hole_type
+
+    return _feature_result(
+        params,
+        tool,
+        _HOLE_TYPE_ID,
+        "remove",
+        configure,
+        lambda area, sketch: expected_area * depth,
+    )
 
 
 def main():
@@ -5913,6 +6596,13 @@ _METHODS = {
     "sketch.add_geometry": sketch_add_geometry,
     "sketch.add_constraint": sketch_add_constraint,
     "sketch.info": sketch_info,
+    "partdesign.pad": partdesign_pad,
+    "partdesign.pocket": partdesign_pocket,
+    "partdesign.revolution": partdesign_revolution,
+    "partdesign.groove": partdesign_groove,
+    "partdesign.loft": partdesign_loft,
+    "partdesign.sweep": partdesign_sweep,
+    "partdesign.hole": partdesign_hole,
     "system.fem_probe": system_fem_probe,
     "analysis.run_fem": analysis_run_fem,
     "analysis.list_faces": analysis_list_faces,

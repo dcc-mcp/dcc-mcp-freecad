@@ -1,0 +1,195 @@
+tools:
+  - name: pad_feature
+    description: Extrude a fully constrained sketch into a solid pad, reading the body's volume back to prove material was added.
+    source_file: scripts/pad_feature.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, result_name, length]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch to extrude. An under-constrained sketch is refused.}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        length: {type: number, exclusiveMinimum: 0, description: Extrusion length in millimetres.}
+        side_type: {type: string, enum: [one_side, two_sides, symmetric], default: one_side, description: Which side of the profile to grow towards. Resolved by probing the host, never by a hard-coded property name.}
+        reversed: {type: boolean, default: false, description: Extrude along the negative profile normal.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: FlangeSketch, result_name: FlangePad, length: 10}
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: FlangeSketch, result_name: FlangePad, length: 10, side_type: symmetric}
+    next-tools: {on-success: [pocket_feature, validate_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: pocket_feature
+    description: Cut a fully constrained sketch out of its body, reading the body's volume back to prove material was removed.
+    source_file: scripts/pocket_feature.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, result_name, length]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch to cut. An under-constrained sketch is refused.}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        length: {type: number, exclusiveMinimum: 0, description: Cut depth in millimetres.}
+        side_type: {type: string, enum: [one_side, two_sides, symmetric], default: one_side, description: Which side of the profile to cut towards. Resolved by probing the host.}
+        reversed: {type: boolean, default: false, description: Cut along the negative profile normal.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: HoleSketch, result_name: FlangePocket, length: 5}
+    next-tools: {on-success: [create_hole, validate_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: revolution_feature
+    description: Revolve a fully constrained sketch about an axis into a solid, reading the body's volume back to prove material was added.
+    source_file: scripts/revolution_feature.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, result_name, angle_degrees]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch to revolve. An under-constrained sketch is refused.}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        angle_degrees: {type: number, exclusiveMinimum: 0, maximum: 360, description: Sweep angle in degrees. Revolution carries no side-type property, so none is accepted.}
+        axis: {type: string, enum: [vertical, horizontal], default: vertical, description: Sketch axis to revolve about.}
+        reversed: {type: boolean, default: false, description: Sweep along the negative profile normal.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/shaft.FCStd", sketch_name: ShaftProfile, result_name: ShaftRevolve, angle_degrees: 360}
+      - arguments: {document_path: "projects/shaft.FCStd", sketch_name: ShaftProfile, result_name: ShaftHalf, angle_degrees: 180}
+    next-tools: {on-success: [groove_feature, validate_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: groove_feature
+    description: Cut a revolved profile out of its body, reading the body's volume back to prove material was removed.
+    source_file: scripts/groove_feature.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, result_name, angle_degrees]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch to revolve and cut. An under-constrained sketch is refused.}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        angle_degrees: {type: number, exclusiveMinimum: 0, maximum: 360, description: Sweep angle in degrees. Groove carries no side-type property, so none is accepted.}
+        axis: {type: string, enum: [vertical, horizontal], default: vertical, description: Sketch axis to revolve about.}
+        reversed: {type: boolean, default: false, description: Sweep along the negative profile normal.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/shaft.FCStd", sketch_name: GrooveProfile, result_name: ShaftGroove, angle_degrees: 360}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: loft_feature
+    description: Loft through two or more fully constrained sketches into a solid, reading the body's volume back to prove material was added.
+    source_file: scripts/loft_feature.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, sketch_names, result_name, length]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: First profile sketch, and the one whose degrees of freedom are checked.}
+        sketch_names:
+          type: array
+          minItems: 2
+          maxItems: 64
+          items: {type: string, minLength: 1, maxLength: 64}
+          description: Ordered profile sketches to loft through, at least two.
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        length: {type: number, exclusiveMinimum: 0, description: Span of the loft in millimetres, used to bound the expected volume change.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/duct.FCStd", sketch_name: DuctBottom, sketch_names: [DuctBottom, DuctTop], result_name: DuctLoft, length: 40}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: sweep_feature
+    description: Sweep a fully constrained profile sketch along a path sketch, reading the body's volume back to prove material was added.
+    source_file: scripts/sweep_feature.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, path_sketch_name, result_name, length]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained profile sketch to sweep.}
+        path_sketch_name: {type: string, minLength: 1, maxLength: 64, description: Sketch carrying the sweep path.}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        length: {type: number, exclusiveMinimum: 0, description: Length of the sweep path in millimetres, used to bound the expected volume change.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/rail.FCStd", sketch_name: RailProfile, path_sketch_name: RailPath, result_name: RailSweep, length: 60}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [get_sketch_info, inspect_document]}
+
+  - name: create_hole
+    description: Cut a hole at a sketch's point, reading the body's volume back to prove material was removed.
+    source_file: scripts/create_hole.py
+    input_schema:
+      type: object
+      required: [document_path, sketch_name, result_name, diameter, depth]
+      properties:
+        document_path: {type: string, minLength: 1}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Sketch whose point locates the hole. Must be fully constrained.}
+        result_name: {type: string, minLength: 1, maxLength: 64}
+        diameter: {type: number, exclusiveMinimum: 0, description: Hole diameter in millimetres.}
+        depth: {type: number, exclusiveMinimum: 0, description: Hole depth in millimetres.}
+        hole_type: {type: string, enum: [none, counterbore, countersink], default: none, description: Hole profile; none is a plain cylindrical hole.}
+        result_label: {type: string, minLength: 1, maxLength: 256}
+        timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
+      additionalProperties: false
+    output_schema: {type: object}
+    execution: async
+    job_strategy: monolithic
+    affinity: any
+    enforce_thread_affinity: true
+    timeout_hint_secs: 1800
+    annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
+    call_examples:
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: HoleSketch, result_name: BoltHole, diameter: 8, depth: 12}
+      - arguments: {document_path: "projects/flange.FCStd", sketch_name: HoleSketch, result_name: CboreHole, diameter: 8, depth: 12, hole_type: counterbore}
+    next-tools: {on-success: [validate_document, inspect_document], on-failure: [get_sketch_info, inspect_document]}

@@ -54,6 +54,7 @@ SKILL_NAMES = (
     "freecad-modify",
     "freecad-parts",
     "freecad-sketch",
+    "freecad-feature",
     "freecad-analysis",
 )
 
