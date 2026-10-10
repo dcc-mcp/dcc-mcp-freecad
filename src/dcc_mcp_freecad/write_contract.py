@@ -73,6 +73,13 @@ MUTATING_TOOLS = (
     "sketch.create",
     "sketch.add_geometry",
     "sketch.add_constraint",
+    "partdesign.pad",
+    "partdesign.pocket",
+    "partdesign.revolution",
+    "partdesign.groove",
+    "partdesign.loft",
+    "partdesign.sweep",
+    "partdesign.hole",
     # A solve writes a solver input, logs and results. It never writes the
     # caller's document, but it produces artefacts a caller is told to read, so
     # it owes the same proof that they exist and agree with the request.
