@@ -3590,9 +3590,8 @@ def _apply_side_type(feature, side_type, version, tool):
     Hard-coding any of the three is what makes a two-sided pad come back
     one-sided while still reporting success.
 
-    Revolution and Groove carry no reversal property at all -- a host that grew
-    one would be expressing a different concept -- so they are handled by the
-    caller instead, and never reach this function.
+    The adapter intentionally does not expose side_type for Revolution or
+    Groove: their angular modes are separate from these linear extent modes.
 
     Returns the property name that took the write, or None for ``one_side``,
     where there is nothing to set. That name is reported as evidence, because it
@@ -4581,14 +4580,10 @@ def partdesign_pocket(params):
 
 
 def _revolution_extent(params, tool):
-    """The shared extent setup for Revolution and Groove.
+    """Configure the supported one-direction angular sweep and sketch axis.
 
-    Both sweep a profile about an axis and neither carries a reversal property:
-    a host that added ``SideType`` to them would be expressing a different
-    concept, so the side-type ladder is deliberately never applied here. Their
-    symmetry is a separate ``Symmetric``-to-the-axis question this adapter does
-    not guess at, because guessing is what produces a solid of the wrong extent
-    while reporting success.
+    Hosts may expose angular symmetry properties, but this API intentionally
+    omits side_type rather than applying the pad/pocket linear extent mapping.
     """
     angle = _angle_extent(params, tool)
     axis_name = params.get("axis") or "vertical"
@@ -4618,14 +4613,7 @@ def _revolution_extent(params, tool):
 
 
 def partdesign_revolution(params):
-    """Revolve a sketch about an axis into a solid.
-
-    Revolution and Groove are handled separately from pad and pocket because
-    they carry no side-type property: there is no second side to grow towards,
-    only an angle to sweep. Applying the side-type ladder here would write to a
-    property the host either ignores or does not have, which is the silent
-    no-op this module refuses to perform.
-    """
+    """Revolve a sketch about an axis; angular side modes are not exposed."""
     tool = "partdesign.revolution"
     angle, configure, axis = _revolution_extent(params, tool)
 

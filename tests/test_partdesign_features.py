@@ -1042,3 +1042,26 @@ def test_secondary_profiles_must_be_fully_constrained(host, tmp_path, method, ex
                 **extra,
             )
         )
+
+
+@pytest.mark.parametrize(
+    "method,extra,name",
+    [
+        ("partdesign_loft", {"sketch_names": ["ProfileSketch", "TopSketch"]}, "TopSketch"),
+        ("partdesign_sweep", {"path_sketch_name": "PathSketch"}, "PathSketch"),
+    ],
+)
+def test_secondary_profiles_must_belong_to_same_body(host, tmp_path, method, extra, name):
+    doc, path = _document(host, tmp_path)
+    doc.addObject(BODY_ID, "OtherBody").newObject(SKETCH_ID, name)
+    with pytest.raises(ValueError) as excinfo:
+        getattr(freecad_driver, method)(
+            dict(
+                document_path=path,
+                sketch_name="ProfileSketch",
+                result_name="Feature",
+                length=20,
+                **extra,
+            )
+        )
+    assert excinfo.value.code == "E_SKETCH_NOT_IN_BODY"

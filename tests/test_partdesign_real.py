@@ -546,3 +546,18 @@ def test_real_freecad_nested_profile_subtracts_inner_wire(tmp_path):
     area = math.pi * (10**2 - 5**2)
     assert result["profile_area"] == pytest.approx(area)
     assert result["volume"]["delta"] == pytest.approx(area * 10)
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_two_sided_pocket_cuts_both_full_extents(tmp_path):
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "two_sided_pocket.FCStd"
+    bridge.create_document(str(document))
+    _constrained_sketch(bridge, document)
+    bridge.pad_feature(str(document), "ProfileSketch", "Pad", 20, side_type="symmetric")
+    _constrained_sketch(bridge, document, name="CutSketch", width=10, height=4, x=10, y=3)
+    result = bridge.pocket_feature(str(document), "CutSketch", "Pocket", 4, side_type="two_sides")
+    assert result["volume"]["expected_delta"] == pytest.approx(-320)
+    assert result["volume"]["delta"] == pytest.approx(-320)
+    assert result["volume"]["after"] == pytest.approx(7680)

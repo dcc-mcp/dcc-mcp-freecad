@@ -94,7 +94,7 @@
       "adapter_usage": "guarded",
       "affected_tools": ["pad_feature", "pocket_feature"],
       "enforcement": "guard",
-      "remediation": "The adapter resolves the property by capability, trying `SideType`, then `Midplane`, then `Symmetric`, and refuses when a host exposes none of them instead of writing to a name that silently does nothing. `Revolution` and `Groove` are excluded: they carry no reversal property at all, so the ladder is never applied to them and they accept no side_type."
+      "remediation": "The adapter resolves the property by capability, trying `SideType`, then `Midplane`, then `Symmetric`, and refuses when a host exposes none of them instead of writing to a name that silently does nothing. `Revolution` and `Groove` are excluded: the API intentionally omits angular side modes, so the linear extent ladder is not applied to them."
     },
     {
       "id": "meshpart-tessellate-deflection",
