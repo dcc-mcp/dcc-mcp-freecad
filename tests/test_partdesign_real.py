@@ -19,6 +19,7 @@ is measured here, on both release lines.
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def _real_freecad() -> str:
     return os.environ.get("FREECAD_TEST_EXECUTABLE", "")
 
 
-def _rectangle_constraints():
+def _rectangle_constraints(width=PROFILE_WIDTH, height=PROFILE_HEIGHT, x=0, y=0):
     """Corner coincidences plus dimensions and an origin fix: DOF 0."""
     return [
         {"type": "horizontal", "first": {"element": 0}},
@@ -78,32 +79,34 @@ def _rectangle_constraints():
             "first": {"element": 3, "vertex": 2},
             "second": {"element": 0, "vertex": 1},
         },
-        {"type": "length", "first": {"element": 0}, "value": PROFILE_WIDTH},
-        {"type": "length", "first": {"element": 1}, "value": PROFILE_HEIGHT},
+        {"type": "length", "first": {"element": 0}, "value": width},
+        {"type": "length", "first": {"element": 1}, "value": height},
         {
             "type": "distance_x",
             "first": {"element": -1, "vertex": 1},
             "second": {"element": 0, "vertex": 1},
-            "value": 0,
+            "value": x,
         },
         {
             "type": "distance_y",
             "first": {"element": -1, "vertex": 1},
             "second": {"element": 0, "vertex": 1},
-            "value": 0,
+            "value": y,
         },
     ]
 
 
-def _constrained_sketch(bridge, document, name="ProfileSketch"):
+def _constrained_sketch(
+    bridge, document, name="ProfileSketch", width=PROFILE_WIDTH, height=PROFILE_HEIGHT, x=0, y=0
+):
     """Create a fully constrained 40 x 10 mm rectangle and return its info."""
     bridge.create_sketch(str(document), name, plane="xy")
     bridge.add_sketch_geometry(
         str(document),
         name,
-        [{"type": "rectangle", "x": 0, "y": 0, "width": PROFILE_WIDTH, "height": PROFILE_HEIGHT}],
+        [{"type": "rectangle", "x": x, "y": y, "width": width, "height": height}],
     )
-    bridge.add_sketch_constraint(str(document), name, _rectangle_constraints())
+    bridge.add_sketch_constraint(str(document), name, _rectangle_constraints(width, height, x, y))
     info = bridge.get_sketch_info(str(document), name)
     assert info["dof"] == 0, info
     return info
@@ -208,7 +211,10 @@ def test_real_freecad_pocket_removes_the_profile_volume(tmp_path: Path):
     padded = bridge.pad_feature(str(document), "ProfileSketch", "Pad", PAD_LENGTH)
     before = padded["volume"]["after"]
 
-    result = bridge.pocket_feature(str(document), "ProfileSketch", "Pocket", POCKET_DEPTH)
+    _constrained_sketch(bridge, document, name="CutSketch")
+    result = bridge.pocket_feature(
+        str(document), "CutSketch", "Pocket", POCKET_DEPTH, reversed=True
+    )
 
     assert result["feature"]["type_id"] == "PartDesign::Pocket"
     assert result["volume"]["direction"] == "remove"
@@ -221,7 +227,10 @@ def test_real_freecad_pocket_removes_the_profile_volume(tmp_path: Path):
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
-def test_real_freecad_reports_which_side_type_property_the_host_exposes(tmp_path: Path):
+@pytest.mark.parametrize("side_type,factor", [("two_sides", 2), ("symmetric", 1)])
+def test_real_freecad_reports_which_side_type_property_the_host_exposes(
+    tmp_path: Path, side_type, factor
+):
     """The side-type ladder is measured here, not assumed.
 
     Both release lines must either expose a reversal property and report which
@@ -234,33 +243,32 @@ def test_real_freecad_reports_which_side_type_property_the_host_exposes(tmp_path
     _constrained_sketch(bridge, document)
 
     result = bridge.pad_feature(
-        str(document), "ProfileSketch", "TwoSidedPad", PAD_LENGTH, side_type="two_sides"
+        str(document), "ProfileSketch", "TwoSidedPad", PAD_LENGTH, side_type=side_type
     )
 
     # Whatever spelling this host offers, it is named in the result, so a host
     # that moved the property is identifiable after the fact.
     assert result["feature"]["side_property"] in ("SideType", "Midplane", "Symmetric", None)
     # A two-sided pad of this profile is twice a one-sided one.
-    assert result["volume"]["delta"] == pytest.approx(2.0 * PAD_VOLUME, rel=VOLUME_REL_TOLERANCE)
+    assert result["volume"]["delta"] == pytest.approx(factor * PAD_VOLUME, rel=VOLUME_REL_TOLERANCE)
 
 
 @pytest.mark.freecad
 @pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
-def test_real_freecad_revolution_sweeps_the_profile_volume(tmp_path: Path):
+@pytest.mark.parametrize("axis,radius", [("vertical", 20), ("horizontal", 5)])
+def test_real_freecad_revolution_sweeps_the_profile_volume(tmp_path: Path, axis, radius):
     """A revolution carries no side type, and still has to deliver volume."""
     bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
     document = tmp_path / "revolve.FCStd"
     bridge.create_document(str(document))
-    # A profile clear of the axis, so a full turn sweeps a measurable torus.
+    # The rectangle touches the chosen axis, so a full turn forms a cylinder.
     _constrained_sketch(bridge, document, name="RevolveSketch")
 
-    result = bridge.revolution_feature(
-        str(document), "RevolveSketch", "Revolve", 360.0, axis="vertical"
-    )
+    result = bridge.revolution_feature(str(document), "RevolveSketch", "Revolve", 360.0, axis=axis)
 
     assert result["feature"]["type_id"] == "PartDesign::Revolution"
     assert result["volume"]["direction"] == "add"
-    assert result["volume"]["delta"] > 0.0
+    assert result["volume"]["delta"] == pytest.approx(PROFILE_AREA * 2 * math.pi * radius)
     assert "feature.volume_delta.direction" in result["verified"]
 
 
@@ -276,11 +284,49 @@ def test_real_freecad_hole_removes_the_cylinder_volume(tmp_path: Path):
     padded = bridge.pad_feature(str(document), "ProfileSketch", "Pad", PAD_LENGTH)
     before = padded["volume"]["after"]
 
-    result = bridge.create_hole(str(document), "ProfileSketch", "Hole", HOLE_DIAMETER, HOLE_DEPTH)
+    bridge.create_sketch(str(document), "HoleSketch", plane="xy")
+    bridge.add_sketch_geometry(
+        str(document),
+        "HoleSketch",
+        [{"type": "circle", "cx": 20, "cy": 5, "radius": HOLE_DIAMETER / 2}],
+    )
+    bridge.add_sketch_constraint(
+        str(document),
+        "HoleSketch",
+        [
+            {"type": "radius", "first": {"element": 0}, "value": HOLE_DIAMETER / 2},
+            {
+                "type": "distance_x",
+                "first": {"element": -1, "vertex": 1},
+                "second": {"element": 0, "vertex": 3},
+                "value": 20,
+            },
+            {
+                "type": "distance_y",
+                "first": {"element": -1, "vertex": 1},
+                "second": {"element": 0, "vertex": 3},
+                "value": 5,
+            },
+        ],
+    )
+    _host_script(
+        bridge,
+        tmp_path,
+        "place_hole",
+        f"""
+import FreeCAD as App
+doc = App.openDocument({str(document)!r})
+doc.HoleSketchPlane.Placement.Base.z = {PAD_LENGTH}
+doc.recompute()
+doc.save()
+App.closeDocument(doc.Name)
+""",
+    )
+    result = bridge.create_hole(str(document), "HoleSketch", "Hole", HOLE_DIAMETER, HOLE_DEPTH)
 
     assert result["volume"]["direction"] == "remove"
-    assert result["volume"]["delta"] < 0.0
-    assert result["volume"]["after"] < before
+    assert result["volume"]["delta"] == pytest.approx(-HOLE_VOLUME, rel=VOLUME_REL_TOLERANCE)
+    assert result["volume"]["after"] == pytest.approx(before - HOLE_VOLUME)
 
 
 @pytest.mark.freecad
@@ -321,13 +367,182 @@ def test_real_freecad_features_survive_a_durable_reopen(tmp_path: Path):
     bridge.create_document(str(document))
     _constrained_sketch(bridge, document)
 
-    result = bridge.pad_feature(str(document), "ProfileSketch", "Pad", PAD_LENGTH)
-    volume = result["volume"]["after"]
+    bridge.pad_feature(str(document), "ProfileSketch", "Pad", PAD_LENGTH)
+    _constrained_sketch(bridge, document, name="CutSketch", width=10, height=4, x=10, y=3)
+    cut = bridge.pocket_feature(str(document), "CutSketch", "Pocket", 4, reversed=True)
+    assert cut["volume"]["after"] == pytest.approx(3840)
 
-    inspected = bridge.inspect_document(str(document))
+    # Exercise native dimensional editing through the existing script-file tool.
+    # No frozen replacement solid: both parametric features must recompute.
+    _host_script(
+        bridge,
+        tmp_path,
+        "edit_dimensions",
+        f"""
+import FreeCAD as App
+doc = App.openDocument({str(document)!r})
+doc.ProfileSketch.setDatum(8, App.Units.Quantity('50 mm'))
+doc.Pad.Length = 12
+doc.Pocket.Length = 5
+doc.recompute()
+assert doc.ProfileSketch.DoF == 0
+assert abs(doc.Pocket.Shape.Volume - 5800) < 1e-6
+doc.save()
+App.closeDocument(doc.Name)
+""",
+    )
+    for _ in range(2):
+        inspected = bridge.inspect_document(str(document))
+        objects = {obj["name"]: obj for obj in inspected["objects"]}
+        assert objects["Pad"]["type_id"] == "PartDesign::Pad"
+        assert objects["Pocket"]["type_id"] == "PartDesign::Pocket"
+        assert objects["Body"]["shape"]["volume"] == pytest.approx(5800)
+        assert objects["Pocket"]["shape"]["valid"]
+        assert objects["Pocket"]["shape"]["solids"] == 1
 
-    assert inspected["object_count"] >= 1
-    # Reopening and re-inspecting must not change the measured volume.
-    again = bridge.inspect_document(str(document))
-    assert again["object_count"] == inspected["object_count"]
-    assert volume > 0.0
+    step = tmp_path / "edited.step"
+    bridge.export_geometry(str(document), ["Body"], str(step))
+    imported = tmp_path / "step_readback.FCStd"
+    bridge.create_document(str(imported))
+    result = bridge.import_geometry(str(imported), str(step), "RoundTrip")
+    assert result["object"]["shape"]["volume"] == pytest.approx(5800)
+    assert result["object"]["shape"]["solids"] == 1
+    assert result["object"]["shape"]["valid"]
+
+
+def _host_script(bridge, root, name, source):
+    script = root / (name + ".py")
+    script.write_text(source, encoding="utf-8")
+    result = bridge.run_script(str(script))
+    assert result["exit_code"] == 0, result
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_loft_uses_document_section_links(tmp_path):
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "loft.FCStd"
+    bridge.create_document(str(document))
+    _constrained_sketch(bridge, document)
+    _constrained_sketch(bridge, document, name="TopSketch")
+    _host_script(
+        bridge,
+        tmp_path,
+        "move_section",
+        f"""
+import FreeCAD as App
+doc = App.openDocument({str(document)!r})
+doc.TopSketchPlane.Placement.Base.z = 20
+doc.recompute()
+doc.save()
+App.closeDocument(doc.Name)
+""",
+    )
+    result = bridge.loft_feature(
+        str(document), "ProfileSketch", ["ProfileSketch", "TopSketch"], "Loft", 20
+    )
+    assert result["volume"]["delta"] == pytest.approx(PROFILE_AREA * 20)
+    objects = {obj["name"]: obj for obj in bridge.inspect_document(str(document))["objects"]}
+    assert objects["Loft"]["shape"]["volume"] == pytest.approx(PROFILE_AREA * 20)
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_sweep_uses_document_spine_link(tmp_path):
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "sweep.FCStd"
+    bridge.create_document(str(document))
+    _constrained_sketch(bridge, document)
+    _host_script(
+        bridge,
+        tmp_path,
+        "create_spine",
+        f"""
+import FreeCAD as App
+import Part
+import Sketcher
+doc = App.openDocument({str(document)!r})
+sketch = doc.Body.newObject('Sketcher::SketchObject', 'PathSketch')
+sketch.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+sketch.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 20, 0)), False)
+sketch.addConstraint(Sketcher.Constraint('Block', 0))
+doc.recompute()
+assert sketch.DoF == 0
+doc.save()
+App.closeDocument(doc.Name)
+""",
+    )
+    result = bridge.sweep_feature(str(document), "ProfileSketch", "PathSketch", "Sweep", 20)
+    assert result["volume"]["delta"] == pytest.approx(PROFILE_AREA * 20)
+    objects = {obj["name"]: obj for obj in bridge.inspect_document(str(document))["objects"]}
+    assert objects["Sweep"]["shape"]["volume"] == pytest.approx(PROFILE_AREA * 20)
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_groove_removes_analytic_volume(tmp_path):
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "groove.FCStd"
+    bridge.create_document(str(document))
+    _constrained_sketch(bridge, document)
+    base = bridge.revolution_feature(str(document), "ProfileSketch", "Revolve", 360)
+    _constrained_sketch(bridge, document, name="CutSketch", x=10, y=2, width=10, height=5)
+    result = bridge.groove_feature(str(document), "CutSketch", "Groove", 360)
+    removed = 1500 * math.pi
+    assert result["volume"]["delta"] == pytest.approx(-removed)
+    assert result["volume"]["after"] == pytest.approx(base["volume"]["after"] - removed)
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_zero_cut_preserves_source_bytes(tmp_path):
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "zero_cut.FCStd"
+    bridge.create_document(str(document))
+    _constrained_sketch(bridge, document)
+    bridge.pad_feature(str(document), "ProfileSketch", "Pad", PAD_LENGTH)
+    _constrained_sketch(bridge, document, name="CutSketch")
+    before = document.read_bytes()
+    with pytest.raises(BridgeError, match="volume_delta.direction"):
+        bridge.pocket_feature(str(document), "CutSketch", "Pocket", POCKET_DEPTH)
+    assert document.read_bytes() == before
+    assert not list(tmp_path.glob(".zero_cut.*.FCStd"))
+
+
+@pytest.mark.freecad
+@pytest.mark.skipif(not _real_freecad(), reason="FREECAD_TEST_EXECUTABLE is not set")
+def test_real_freecad_nested_profile_subtracts_inner_wire(tmp_path):
+    bridge = FreecadBridge(_real_freecad(), allowed_roots=[tmp_path])
+    document = tmp_path / "ring.FCStd"
+    bridge.create_document(str(document))
+    bridge.create_sketch(str(document), "RingSketch")
+    bridge.add_sketch_geometry(
+        str(document),
+        "RingSketch",
+        [
+            {"type": "circle", "cx": 0, "cy": 0, "radius": 10},
+            {"type": "circle", "cx": 0, "cy": 0, "radius": 5},
+        ],
+    )
+    bridge.add_sketch_constraint(
+        str(document),
+        "RingSketch",
+        [
+            {"type": "radius", "first": {"element": 0}, "value": 10},
+            {"type": "radius", "first": {"element": 1}, "value": 5},
+            {
+                "type": "coincident",
+                "first": {"element": 0, "vertex": 3},
+                "second": {"element": -1, "vertex": 1},
+            },
+            {
+                "type": "coincident",
+                "first": {"element": 1, "vertex": 3},
+                "second": {"element": -1, "vertex": 1},
+            },
+        ],
+    )
+    result = bridge.pad_feature(str(document), "RingSketch", "Ring", 10)
+    area = math.pi * (10**2 - 5**2)
+    assert result["profile_area"] == pytest.approx(area)
+    assert result["volume"]["delta"] == pytest.approx(area * 10)

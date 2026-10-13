@@ -39,7 +39,7 @@ tools:
         result_name: {type: string, minLength: 1, maxLength: 64}
         length: {type: number, exclusiveMinimum: 0, description: Cut depth in millimetres.}
         side_type: {type: string, enum: [one_side, two_sides, symmetric], default: one_side, description: Which side of the profile to cut towards. Resolved by probing the host.}
-        reversed: {type: boolean, default: false, description: Cut along the negative profile normal.}
+        reversed: {type: boolean, default: false, description: Reverse the default cut direction (towards the positive profile normal).}
         result_label: {type: string, minLength: 1, maxLength: 256}
         timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
       additionalProperties: false
@@ -117,13 +117,13 @@ tools:
       required: [document_path, sketch_name, sketch_names, result_name, length]
       properties:
         document_path: {type: string, minLength: 1}
-        sketch_name: {type: string, minLength: 1, maxLength: 64, description: First profile sketch, and the one whose degrees of freedom are checked.}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: First profile sketch. All section sketches must be fully constrained and belong to the same body.}
         sketch_names:
           type: array
           minItems: 2
           maxItems: 64
           items: {type: string, minLength: 1, maxLength: 64}
-          description: Ordered profile sketches to loft through, at least two.
+          description: Ordered distinct profile sketches to loft through, starting with sketch_name; at least two.
         result_name: {type: string, minLength: 1, maxLength: 64}
         length: {type: number, exclusiveMinimum: 0, description: Span of the loft in millimetres, used to bound the expected volume change.}
         result_label: {type: string, minLength: 1, maxLength: 256}
@@ -149,7 +149,7 @@ tools:
       properties:
         document_path: {type: string, minLength: 1}
         sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained profile sketch to sweep.}
-        path_sketch_name: {type: string, minLength: 1, maxLength: 64, description: Sketch carrying the sweep path.}
+        path_sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch carrying the sweep path in the same body.}
         result_name: {type: string, minLength: 1, maxLength: 64}
         length: {type: number, exclusiveMinimum: 0, description: Length of the sweep path in millimetres, used to bound the expected volume change.}
         result_label: {type: string, minLength: 1, maxLength: 256}
@@ -167,18 +167,18 @@ tools:
     next-tools: {on-success: [validate_document, inspect_document], on-failure: [get_sketch_info, inspect_document]}
 
   - name: create_hole
-    description: Cut a hole at a sketch's point, reading the body's volume back to prove material was removed.
+    description: Cut a plain cylindrical hole at a sketch circle's centre, reading the body's volume back to prove material was removed.
     source_file: scripts/create_hole.py
     input_schema:
       type: object
       required: [document_path, sketch_name, result_name, diameter, depth]
       properties:
         document_path: {type: string, minLength: 1}
-        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Sketch whose point locates the hole. Must be fully constrained.}
+        sketch_name: {type: string, minLength: 1, maxLength: 64, description: Sketch containing one circle whose centre locates the hole. Must be fully constrained.}
         result_name: {type: string, minLength: 1, maxLength: 64}
         diameter: {type: number, exclusiveMinimum: 0, description: Hole diameter in millimetres.}
         depth: {type: number, exclusiveMinimum: 0, description: Hole depth in millimetres.}
-        hole_type: {type: string, enum: [none, counterbore, countersink], default: none, description: Hole profile; none is a plain cylindrical hole.}
+        hole_type: {type: string, enum: [none, counterbore, countersink], default: none, description: Only none (a flat-bottomed cylindrical hole) is currently supported. Counterbore and countersink are explicitly refused until cut dimensions can be specified.}
         result_label: {type: string, minLength: 1, maxLength: 256}
         timeout_secs: {type: number, minimum: 1, maximum: 1800, default: 300}
       additionalProperties: false
@@ -191,5 +191,4 @@ tools:
     annotations: {read_only_hint: false, destructive_hint: false, idempotent_hint: false, open_world_hint: false, deferred_hint: true}
     call_examples:
       - arguments: {document_path: "projects/flange.FCStd", sketch_name: HoleSketch, result_name: BoltHole, diameter: 8, depth: 12}
-      - arguments: {document_path: "projects/flange.FCStd", sketch_name: HoleSketch, result_name: CboreHole, diameter: 8, depth: 12, hole_type: counterbore}
     next-tools: {on-success: [validate_document, inspect_document], on-failure: [get_sketch_info, inspect_document]}

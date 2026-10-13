@@ -64,11 +64,28 @@ not a host property name. The adapter resolves it by capability, trying
 `SideType`, then `Midplane`, then `Symmetric`, and refuses a host that exposes
 none of them. Which property took the write is reported as
 `feature.side_property`, because that is how a host that moved the property is
-recognised after the fact.
+recognised after the fact. On legacy hosts, two full extents use `Type=TwoLengths`;
+`Midplane=true` means a single total length split symmetrically.
 
 **`revolution_feature` and `groove_feature` deliberately accept no `side_type`.**
 They carry no reversal property at all — there is no second side to grow
 towards, only an angle to sweep. Writing one there would be a silent no-op.
+
+## Verified scope
+
+Profile area is measured by making planar faces from closed sketch wires, including
+nested holes. A sketch wire itself has zero surface area. Revolution uses the
+face centroid in sketch coordinates and a `ReferenceAxis` link.
+
+Loft currently verifies constant-section volume (`profile area × length`); a
+varying-area loft is refused if that bound does not hold. Sweep uses the requested
+path length for its volume bound. All additional loft sections and sweep paths
+must be fully constrained and in the profile's body.
+
+`create_hole` currently supports one circular positioning profile and a plain,
+flat-bottomed cylindrical hole. Counterbore and countersink requests are refused
+because this surface does not yet expose their cut dimensions. Place the sketch
+at the top of the body so the default hole direction enters the material.
 
 ## Failure leaves the document untouched
 
@@ -89,6 +106,8 @@ write has been read back, so a feature that fails — or one that changed nothin
 | `E_FEATURE_EMPTY` | The feature produced no solid. |
 | `E_FEATURE_INVALID` | The feature produced a shape that is not valid. |
 | `E_SIDE_TYPE_INVALID` | `side_type` is not one of the three supported values. |
+| `E_HOLE_TYPE_UNSUPPORTED` | Counterbore/countersink cut dimensions are not yet exposed. |
+| `E_AXIS_INVALID` | Axis must be the sketch's vertical or horizontal axis. |
 | `E_ANGLE_INVALID` | `angle_degrees` is outside `(0, 360]`. |
 | `E_SKETCH_NOT_IN_BODY` | The sketch has no owning `PartDesign::Body`. |
 | `E_FEATURE_UNSUPPORTED` | This host build does not expose the feature's properties. |

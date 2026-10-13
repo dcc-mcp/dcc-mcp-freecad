@@ -3449,31 +3449,41 @@ def _body_volume(body, tool, name):
     return volume
 
 
-def _profile_area(sketch, tool):
-    """The area enclosed by a sketch's profile, as the host measures it.
+def _profile_face(sketch, tool):
+    """Make planar faces from closed sketch wires, including nested holes.
 
-    A feature's volume is its profile area times its extent, so a profile with
-    no area cannot produce volume and must be refused before the feature runs:
-    an open or self-intersecting profile is exactly what a host turns into an
-    empty shell while still reporting success.
+    Sketch.Shape contains wires, so its Area is zero even for a closed profile.
+    FaceMakerBullseye applies the same nested-wire semantics as PartDesign.
     """
+    import Part
+
     shape = getattr(sketch, "Shape", None)
-    area = getattr(shape, "Area", None) if shape is not None else None
     try:
-        value = float(area)
-    except (TypeError, ValueError):
+        wires = shape.Wires
+        if not wires or any(not wire.isClosed() for wire in wires):
+            raise ValueError("the profile contains no closed wires or has an open wire")
+        if sum(len(wire.Edges) for wire in wires) != len(shape.Edges):
+            raise ValueError("the profile contains edges outside its closed wires")
+        face = Part.makeFace(wires, "Part::FaceMakerBullseye")
+        area = float(face.Area)
+        if face.isNull() or not face.isValid() or not math.isfinite(area) or area <= 0.0:
+            raise ValueError("the profile does not enclose a finite, valid area")
+    except Exception as exc:
         raise _coded(
             "E_PROFILE_DEGENERATE",
-            "%s: the sketch exposes no measurable profile area, so its profile is degenerate "
-            "(open, self-intersecting, or empty)" % tool,
+            "%s: the sketch profile cannot form a valid planar face (%s)" % (tool, exc),
         ) from None
-    if not math.isfinite(value) or value <= 0.0:
-        raise _coded(
-            "E_PROFILE_DEGENERATE",
-            "%s: the sketch profile encloses %r area, so it is degenerate (open, "
-            "self-intersecting, or zero-thickness) and cannot produce a solid" % (tool, value),
-        )
-    return value
+    return face
+
+
+def _profile_area(sketch, tool):
+    return float(_profile_face(sketch, tool).Area)
+
+
+def _profile_object(feature):
+    """PartDesign Profile is a PropertyLinkSub on supported real hosts."""
+    profile = getattr(feature, "Profile", None)
+    return profile[0] if isinstance(profile, (tuple, list)) else profile
 
 
 def _check_volume_delta(read_back, tool, name, expected_delta, actual_delta, direction):
@@ -3593,10 +3603,19 @@ def _apply_side_type(feature, side_type, version, tool):
     name = _resolve_reversal_property(feature, version)
     if name == "SideType":
         setattr(feature, name, _SIDE_TYPE_ENUM[side_type])
+    elif side_type == "two_sides":
+        # Legacy Midplane splits Length equally; it does not activate Length2.
+        # Two independent extents require the old TwoLengths enumeration.
+        if not _has_property(feature, "Type"):
+            raise _coded("E_FEATURE_UNSUPPORTED", "%s: host exposes no two-length mode" % tool)
+        try:
+            feature.Type = "TwoLengths"
+        except Exception:
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED", "%s: host rejects the TwoLengths mode" % tool
+            ) from None
+        setattr(feature, name, False)
     else:
-        # ``Midplane`` and ``Symmetric`` are booleans: both exist only as a
-        # two-sided switch, which is what ``symmetric`` asks for. ``two_sides``
-        # additionally needs a second length, set by the caller.
         setattr(feature, name, True)
     return name
 
@@ -3684,10 +3703,10 @@ def _feature_result(
             "The stored object is not the %s that was requested." % type_id,
         )
         read_back.check(
-            getattr(getattr(stored, "Profile", None), "Name", None) == sketch_name,
+            getattr(_profile_object(stored), "Name", None) == sketch_name,
             "feature.profile",
             sketch_name,
-            getattr(getattr(stored, "Profile", None), "Name", None),
+            getattr(_profile_object(stored), "Name", None),
             "The feature is not built on the sketch it was asked to use.",
         )
         read_back.check(
@@ -4470,8 +4489,11 @@ def _revolution_expected_volume(sketch, profile_area, angle_degrees, axis, tool)
     toroidal volume -- and a sign or a missing factor here would make the check
     pass on geometry that is wrong.
     """
-    shape = getattr(sketch, "Shape", None)
-    centre = getattr(shape, "CenterOfMass", None) if shape is not None else None
+    face = _profile_face(sketch, tool)
+    centre = face.CenterOfMass
+    placement = getattr(sketch, "Placement", None)
+    if placement is not None:
+        centre = placement.inverse().multVec(centre)
     if centre is None:
         raise _coded(
             "E_PROFILE_DEGENERATE",
@@ -4501,11 +4523,21 @@ def partdesign_pad(params):
                 "E_FEATURE_UNSUPPORTED",
                 "%s: the host exposes no Length property on %s" % (tool, feature.TypeId),
             )
-        if side_type == "two_sides" and _has_property(feature, "Length2"):
+        if side_type == "two_sides":
+            if not _has_property(feature, "Length2"):
+                raise _coded(
+                    "E_FEATURE_UNSUPPORTED",
+                    "%s: the host exposes no Length2 property on %s" % (tool, feature.TypeId),
+                )
             feature.Length2 = length
 
     return _feature_result(
-        params, tool, _PAD_TYPE_ID, "add", configure, lambda area, sketch: area * length
+        params,
+        tool,
+        _PAD_TYPE_ID,
+        "add",
+        configure,
+        lambda area, sketch: area * length * (2.0 if side_type == "two_sides" else 1.0),
     )
 
 
@@ -4530,11 +4562,21 @@ def partdesign_pocket(params):
                 "E_FEATURE_UNSUPPORTED",
                 "%s: the host exposes no Length property on %s" % (tool, feature.TypeId),
             )
-        if side_type == "two_sides" and _has_property(feature, "Length2"):
+        if side_type == "two_sides":
+            if not _has_property(feature, "Length2"):
+                raise _coded(
+                    "E_FEATURE_UNSUPPORTED",
+                    "%s: the host exposes no Length2 property on %s" % (tool, feature.TypeId),
+                )
             feature.Length2 = length
 
     return _feature_result(
-        params, tool, _POCKET_TYPE_ID, "remove", configure, lambda area, sketch: area * length
+        params,
+        tool,
+        _POCKET_TYPE_ID,
+        "remove",
+        configure,
+        lambda area, sketch: area * length * (2.0 if side_type == "two_sides" else 1.0),
     )
 
 
@@ -4550,6 +4592,8 @@ def _revolution_extent(params, tool):
     """
     angle = _angle_extent(params, tool)
     axis_name = params.get("axis") or "vertical"
+    if axis_name not in ("vertical", "horizontal"):
+        raise _coded("E_AXIS_INVALID", "%s: axis must be vertical or horizontal" % tool)
 
     def configure(feature):
         if _has_property(feature, "Angle"):
@@ -4562,8 +4606,13 @@ def _revolution_extent(params, tool):
         # The axis is expressed as a reference to the sketch's own vertical or
         # horizontal axis, which is what PartDesign's revolution axis expects.
         # Anything the host does not accept is reported rather than coerced.
-        if axis_name != "vertical" and _has_property(feature, "Axis"):
-            feature.Axis = axis_name
+        if not _has_property(feature, "ReferenceAxis"):
+            raise _coded(
+                "E_FEATURE_UNSUPPORTED",
+                "%s: the host exposes no ReferenceAxis property on %s" % (tool, feature.TypeId),
+            )
+        axis_subname = "V_Axis" if axis_name == "vertical" else "H_Axis"
+        feature.ReferenceAxis = (_profile_object(feature), [axis_subname])
 
     return angle, configure, axis_name
 
@@ -4607,6 +4656,11 @@ def partdesign_loft(params):
             "%s: sketch_names must list at least two sketches to loft through, got %r"
             % (tool, sections),
         )
+    if sections[0] != params.get("sketch_name") or len(set(sections)) != len(sections):
+        raise _coded(
+            "E_SECTIONS_REQUIRED",
+            "%s: sketch_names must start with sketch_name and contain distinct profiles" % tool,
+        )
     length = _length_extent(params, tool)
 
     def extent_for_area(area, sketch):
@@ -4631,11 +4685,26 @@ def _sections_configure(sections, tool, length=None):
                 "E_FEATURE_UNSUPPORTED",
                 "%s: the host exposes no Sections property on %s" % (tool, feature.TypeId),
             )
-        feature.Sections = list(sections)
+        profile = _profile_object(feature)
+        feature.Sections = [
+            _feature_input_sketch(feature, name, tool) for name in sections if name != profile.Name
+        ]
         if _has_property(feature, "Length"):
             feature.Length = length
 
     return configure
+
+
+def _feature_input_sketch(feature, name, tool):
+    """Secondary profiles and paths must be constrained and in the same body."""
+    sketch = _open_sketch(feature.Document, name, tool)
+    profile = _profile_object(feature)
+    if _sketch_body(sketch, tool, name) != _sketch_body(profile, tool, profile.Name):
+        raise _coded("E_SKETCH_NOT_IN_BODY", "%s: all input sketches must share a body" % tool)
+    rules = _sketch_module()
+    dof, _ = _sketch_dof(sketch, _host_version(), tool)
+    rules.assert_feature_ready(rules.feature_state(dof, len(sketch.Geometry)), name, tool)
+    return sketch
 
 
 def partdesign_sweep(params):
@@ -4655,8 +4724,8 @@ def partdesign_sweep(params):
                 "E_FEATURE_UNSUPPORTED",
                 "%s: the host exposes no Spine property on %s" % (tool, feature.TypeId),
             )
-        feature.Sections = [params["sketch_name"]]
-        feature.Spine = path_name
+        feature.Sections = []
+        feature.Spine = _feature_input_sketch(feature, path_name, tool)
         if _has_property(feature, "Length"):
             feature.Length = length
 
@@ -4666,7 +4735,7 @@ def partdesign_sweep(params):
 
 
 def partdesign_hole(params):
-    """Cut a hole at a sketch point, proving the body lost volume.
+    """Cut a plain hole at a sketch circle's centre, proving the body lost volume.
 
     The hole's own geometry is what determines how much material it removes, so
     the expected volume is a cylinder of the requested diameter and depth rather
@@ -4683,6 +4752,12 @@ def partdesign_hole(params):
             "%s: unsupported hole_type: %s (supported: %s)"
             % (tool, hole_type, ", ".join(_HOLE_TYPES)),
         )
+    if hole_type != "none":
+        raise _coded(
+            "E_HOLE_TYPE_UNSUPPORTED",
+            "%s: counterbore and countersink require cut dimensions this tool does not expose; "
+            "only a plain cylindrical hole can be verified" % tool,
+        )
     expected_area = math.pi * (diameter / 2.0) ** 2
 
     def configure(feature):
@@ -4698,8 +4773,11 @@ def partdesign_hole(params):
             )
         feature.Diameter = diameter
         feature.Depth = depth
-        if hole_type != "none" and _has_property(feature, "HoleCutType"):
-            feature.HoleCutType = hole_type
+        # The contract specifies a cylinder, not the host's default angled drill tip.
+        if not _has_property(feature, "DrillPoint") or not _has_property(feature, "HoleCutType"):
+            raise _coded("E_FEATURE_UNSUPPORTED", "%s: hole geometry cannot be configured" % tool)
+        feature.DrillPoint = "Flat"
+        feature.HoleCutType = "None"
 
     return _feature_result(
         params,
