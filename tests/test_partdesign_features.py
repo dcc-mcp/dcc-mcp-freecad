@@ -106,9 +106,8 @@ class _Body(_Object):
 class _Sketch(_Object):
     """A sketch whose profile area is whatever the test says the host measured.
 
-    Real FreeCAD reports a sketch's enclosed area on ``Shape.Area``; the driver
-    reads it there, so the fake exposes it there and keeps it in step with the
-    ``area`` attribute a test sets.
+    Real FreeCAD sketches contain closed wires with zero surface area.
+    Only making a planar face exposes the enclosed area and surface centroid.
     """
 
     def __init__(self, name):
@@ -120,7 +119,16 @@ class _Sketch(_Object):
         self.MapMode = "FlatFace"
         self._area = PROFILE_AREA
         self._centre_x = PROFILE_CENTROID_X
-        self.Shape = _Shape(volume=0.0, area=PROFILE_AREA, centre=_Centre(x=PROFILE_CENTROID_X))
+        self.Shape = _Shape(volume=0.0, area=0.0)
+        self.Shape.Edges = [object()]
+        self.Shape.Wires = [
+            types.SimpleNamespace(
+                Edges=self.Shape.Edges,
+                isClosed=lambda: True,
+                area=PROFILE_AREA,
+                centre=_Centre(x=PROFILE_CENTROID_X),
+            )
+        ]
 
     @property
     def area(self):
@@ -129,7 +137,7 @@ class _Sketch(_Object):
     @area.setter
     def area(self, value):
         self._area = value
-        self.Shape.Area = float(value)
+        self.Shape.Wires[0].area = float(value)
 
     @property
     def centre_x(self):
@@ -138,7 +146,7 @@ class _Sketch(_Object):
     @centre_x.setter
     def centre_x(self, value):
         self._centre_x = value
-        self.Shape.CenterOfMass = _Centre(x=value)
+        self.Shape.Wires[0].centre = _Centre(x=value)
 
     def solve(self):
         return 0
@@ -155,7 +163,11 @@ class _Feature(_Object):
     def __init__(self, type_id, name, doc):
         super().__init__(type_id, name)
         self._doc = doc
+        self.Document = doc
         self.Profile = None
+        self.ReferenceAxis = None
+        self.Type = "Length"
+        self.DrillPoint = "Angled"
         self.Length = None
         self.Length2 = None
         self.Angle = None
@@ -171,6 +183,8 @@ class _Feature(_Object):
         self.side_property = doc.side_property
 
     def __setattr__(self, key, value):
+        if key == "Profile" and value is not None and not isinstance(value, tuple):
+            value = (value, [])
         object.__setattr__(self, key, value)
 
     def _has(self, name):
@@ -271,9 +285,12 @@ class _Document:
         """
         if self.feature_volume_override is not None:
             return self.feature_volume_override
-        area = float(getattr(getattr(obj, "Profile", None), "area", PROFILE_AREA) or 0.0)
+        profile = freecad_driver._profile_object(obj)
+        area = float(getattr(profile, "area", PROFILE_AREA) or 0.0)
         if obj.TypeId in (PAD_ID, POCKET_ID):
             length = float(obj.Length or 0.0)
+            if getattr(obj, "SideType", None) == "Two sides" or obj.Type == "TwoLengths":
+                length += float(obj.Length2 or 0.0)
             if obj.TypeId == PAD_ID:
                 return before + area * length
             return max(before - area * length, 0.0)
@@ -281,7 +298,7 @@ class _Document:
             # Pappus: the profile sweeps its area along the circular path its
             # centroid travels, so the radius is the centroid distance.
             angle = float(obj.Angle or 0.0)
-            profile = getattr(obj, "Profile", None)
+            profile = freecad_driver._profile_object(obj)
             radius = float(getattr(profile, "centre_x", PROFILE_CENTROID_X) or 0.0)
             swept = area * 2.0 * math.pi * radius * (angle / 360.0)
             return before + swept if obj.TypeId == REVOLUTION_ID else max(before - swept, 0.0)
@@ -327,6 +344,10 @@ class _App:
 class FakePart(types.ModuleType):
     def __init__(self):
         super().__init__("Part")
+
+    def makeFace(self, wires, maker):
+        assert maker == "Part::FaceMakerBullseye"
+        return _Shape(area=sum(wire.area for wire in wires), centre=wires[0].centre)
 
 
 @pytest.fixture()
@@ -573,7 +594,7 @@ def test_a_sketch_outside_a_body_is_refused(host, tmp_path):
 
 @pytest.mark.parametrize(
     "spelling,expected_value",
-    [("SideType", "Two sides"), ("Midplane", True), ("Symmetric", True)],
+    [("SideType", "Two sides"), ("Midplane", False), ("Symmetric", False)],
 )
 def test_the_side_type_uses_whichever_spelling_the_host_offers(
     host, tmp_path, spelling, expected_value
@@ -738,7 +759,7 @@ def test_loft_adds_volume(host, tmp_path):
     )
 
     assert result["volume"]["delta"] == pytest.approx(PROFILE_AREA * 40.0)
-    assert doc.getObject("Loft").Sections == ["ProfileSketch", "TopSketch"]
+    assert doc.getObject("Loft").Sections == [doc.getObject("TopSketch")]
 
 
 def test_a_loft_needs_at_least_two_sections(host, tmp_path):
@@ -774,7 +795,8 @@ def test_sweep_adds_volume(host, tmp_path):
     )
 
     assert result["volume"]["delta"] == pytest.approx(PROFILE_AREA * 60.0)
-    assert doc.getObject("Sweep").Spine == "PathSketch"
+    assert doc.getObject("Sweep").Spine == doc.getObject("PathSketch")
+    assert doc.getObject("Sweep").Sections == []
 
 
 def test_a_hole_removes_the_cylinder_volume(host, tmp_path):
@@ -886,3 +908,137 @@ def test_a_duplicate_result_name_is_refused(host, tmp_path):
         _pad(host, path)
 
     assert getattr(excinfo.value, "code", None) == "E_RESULT_EXISTS"
+
+
+def test_closed_wire_profile_has_zero_surface_area_but_pads(host, tmp_path):
+    doc, path = _document(host, tmp_path)
+    assert doc.getObject("ProfileSketch").Shape.Area == 0
+    assert _pad(host, path)["profile_area"] == pytest.approx(PROFILE_AREA)
+
+
+@pytest.mark.parametrize("bad_wire", ["open", "extra_edge", "empty", "invalid_face"])
+def test_invalid_wire_profiles_are_refused_before_feature_creation(
+    host, tmp_path, bad_wire, monkeypatch
+):
+    doc, path = _document(host, tmp_path)
+    shape = doc.getObject("ProfileSketch").Shape
+    if bad_wire == "open":
+        shape.Wires[0].isClosed = lambda: False
+    elif bad_wire == "extra_edge":
+        shape.Edges = shape.Edges + [object()]
+    elif bad_wire == "empty":
+        shape.Wires = []
+    else:
+        monkeypatch.setattr(
+            sys.modules["Part"], "makeFace", lambda *_: _Shape(area=400, valid=False)
+        )
+    with pytest.raises(ValueError) as excinfo:
+        _pad(host, path)
+    assert excinfo.value.code == "E_PROFILE_DEGENERATE"
+    assert doc.getObject("Pad") is None
+
+
+@pytest.mark.parametrize("method", ["partdesign_pad", "partdesign_pocket"])
+def test_two_sides_requires_length2(host, tmp_path, method, monkeypatch):
+    _doc, path = _document(host, tmp_path)
+    original = freecad_driver._has_property
+    monkeypatch.setattr(
+        freecad_driver, "_has_property", lambda obj, name: name != "Length2" and original(obj, name)
+    )
+    with pytest.raises(ValueError) as excinfo:
+        getattr(freecad_driver, method)(
+            {
+                "document_path": path,
+                "sketch_name": "ProfileSketch",
+                "result_name": "Feature",
+                "length": 10,
+                "side_type": "two_sides",
+            }
+        )
+    assert excinfo.value.code == "E_FEATURE_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("spelling", ["SideType", "Midplane", "Symmetric"])
+def test_two_sides_preserves_both_full_extents(host, tmp_path, spelling):
+    doc, path = _document(host, tmp_path)
+    doc.side_property = spelling
+    result = _pad(host, path, side_type="two_sides")
+    assert result["volume"]["expected_delta"] == pytest.approx(2 * PROFILE_AREA * 10)
+    assert result["volume"]["delta"] == pytest.approx(2 * PROFILE_AREA * 10)
+    if spelling != "SideType":
+        assert doc.getObject("Pad").Type == "TwoLengths"
+        assert getattr(doc.getObject("Pad"), spelling) is False
+
+
+@pytest.mark.parametrize("axis,subname", [("vertical", "V_Axis"), ("horizontal", "H_Axis")])
+def test_revolution_configures_reference_axis_link(axis, subname):
+    profile = object()
+    feature = types.SimpleNamespace(Angle=0, ReferenceAxis=None, Profile=(profile, []))
+    _, configure, _ = freecad_driver._revolution_extent(
+        {"angle_degrees": 90, "axis": axis}, "partdesign.revolution"
+    )
+    configure(feature)
+    assert feature.ReferenceAxis == (profile, [subname])
+
+
+def test_revolution_rejects_unknown_axis():
+    with pytest.raises(ValueError) as excinfo:
+        freecad_driver._revolution_extent(
+            {"angle_degrees": 90, "axis": "diagonal"}, "partdesign.revolution"
+        )
+    assert excinfo.value.code == "E_AXIS_INVALID"
+
+
+def test_revolution_uses_surface_centroid_in_sketch_coordinates(host, tmp_path):
+    doc, _ = _document(host, tmp_path)
+    sketch = doc.getObject("ProfileSketch")
+    sketch.Shape.CenterOfMass = _Centre(x=999)
+    sketch.Shape.Wires[0].centre = _Centre(x=125)
+    sketch.Placement = types.SimpleNamespace(
+        inverse=lambda: types.SimpleNamespace(multVec=lambda v: _Centre(x=v.x - 100))
+    )
+    expected = PROFILE_AREA * 2 * math.pi * 25
+    assert freecad_driver._revolution_expected_volume(
+        sketch, PROFILE_AREA, 360, "vertical", "partdesign.revolution"
+    ) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("hole_type", ["counterbore", "countersink"])
+def test_unparameterized_hole_cuts_are_explicitly_refused(host, tmp_path, hole_type):
+    doc, path = _document(host, tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        freecad_driver.partdesign_hole(
+            {
+                "document_path": path,
+                "sketch_name": "ProfileSketch",
+                "result_name": "Hole",
+                "diameter": 8,
+                "depth": 6,
+                "hole_type": hole_type,
+            }
+        )
+    assert excinfo.value.code == "E_HOLE_TYPE_UNSUPPORTED"
+    assert doc.getObject("Hole") is None
+
+
+@pytest.mark.parametrize(
+    "method,extra,name",
+    [
+        ("partdesign_loft", {"sketch_names": ["ProfileSketch", "TopSketch"]}, "TopSketch"),
+        ("partdesign_sweep", {"path_sketch_name": "PathSketch"}, "PathSketch"),
+    ],
+)
+def test_secondary_profiles_must_be_fully_constrained(host, tmp_path, method, extra, name):
+    doc, path = _document(host, tmp_path)
+    sketch = doc.getObject("Body").newObject(SKETCH_ID, name)
+    sketch.DoF = 1
+    with pytest.raises(sketch_rules.SketchStateError):
+        getattr(freecad_driver, method)(
+            dict(
+                document_path=path,
+                sketch_name="ProfileSketch",
+                result_name="Feature",
+                length=20,
+                **extra,
+            )
+        )

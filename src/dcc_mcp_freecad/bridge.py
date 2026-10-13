@@ -3062,7 +3062,7 @@ class FreecadBridge:
         result_label: Optional[str] = None,
         timeout_secs: float = 300,
     ) -> dict[str, Any]:
-        """Cut a hole at the sketch's point, removing a measurable volume."""
+        """Cut a plain hole at the sketch circle's centre, removing a measurable volume."""
         if hole_type not in HOLE_TYPES:
             raise BridgeError("hole_type must be one of %s" % ", ".join(HOLE_TYPES))
         return self._mutate_document(
