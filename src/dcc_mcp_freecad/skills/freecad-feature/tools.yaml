@@ -64,7 +64,7 @@ tools:
         document_path: {type: string, minLength: 1}
         sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch to revolve. An under-constrained sketch is refused.}
         result_name: {type: string, minLength: 1, maxLength: 64}
-        angle_degrees: {type: number, exclusiveMinimum: 0, maximum: 360, description: Sweep angle in degrees. Revolution carries no side-type property, so none is accepted.}
+        angle_degrees: {type: number, exclusiveMinimum: 0, maximum: 360, description: Sweep angle in degrees. Angular side modes are intentionally not exposed.}
         axis: {type: string, enum: [vertical, horizontal], default: vertical, description: Sketch axis to revolve about.}
         reversed: {type: boolean, default: false, description: Sweep along the negative profile normal.}
         result_label: {type: string, minLength: 1, maxLength: 256}
@@ -92,7 +92,7 @@ tools:
         document_path: {type: string, minLength: 1}
         sketch_name: {type: string, minLength: 1, maxLength: 64, description: Fully constrained sketch to revolve and cut. An under-constrained sketch is refused.}
         result_name: {type: string, minLength: 1, maxLength: 64}
-        angle_degrees: {type: number, exclusiveMinimum: 0, maximum: 360, description: Sweep angle in degrees. Groove carries no side-type property, so none is accepted.}
+        angle_degrees: {type: number, exclusiveMinimum: 0, maximum: 360, description: Sweep angle in degrees. Angular side modes are intentionally not exposed.}
         axis: {type: string, enum: [vertical, horizontal], default: vertical, description: Sketch axis to revolve about.}
         reversed: {type: boolean, default: false, description: Sweep along the negative profile normal.}
         result_label: {type: string, minLength: 1, maxLength: 256}

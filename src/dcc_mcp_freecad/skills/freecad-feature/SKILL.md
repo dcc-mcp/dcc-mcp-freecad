@@ -68,8 +68,8 @@ recognised after the fact. On legacy hosts, two full extents use `Type=TwoLength
 `Midplane=true` means a single total length split symmetrically.
 
 **`revolution_feature` and `groove_feature` deliberately accept no `side_type`.**
-They carry no reversal property at all — there is no second side to grow
-towards, only an angle to sweep. Writing one there would be a silent no-op.
+This API exposes one-direction angular sweeps. Host angular symmetry modes are
+separate from the linear pad/pocket side modes and are not exposed here.
 
 ## Verified scope
 

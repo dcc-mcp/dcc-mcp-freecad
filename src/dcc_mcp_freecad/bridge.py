@@ -2960,8 +2960,8 @@ class FreecadBridge:
     ) -> dict[str, Any]:
         """Revolve a fully constrained sketch about an axis into a solid.
 
-        Revolution carries no side-type property, so none is accepted here:
-        offering one would write to a property the host does not have.
+        This API intentionally exposes only one-direction angular sweeps;
+        host angular symmetry modes are separate from pad/pocket side_type.
         """
         return self._mutate_document(
             "partdesign.revolution",
