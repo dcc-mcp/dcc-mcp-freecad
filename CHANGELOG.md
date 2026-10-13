@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.9.0...v0.9.1) (2026-10-12)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([9937192](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/99371927ad201372392468a35900a0ce6839ac70))
+
 ## [0.9.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.8.0...v0.9.0) (2026-10-09)
 
 
