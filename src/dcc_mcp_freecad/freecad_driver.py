@@ -13,11 +13,18 @@ _CONTRACT_FILENAME = "write_contract.py"
 _COMPAT_MODULE = None
 _SIBLING_MODULES = {}
 
-# Exchange formats the Mesh module owns. 3MF joined the set because it is the
-# mainstream 3D-printing container and the host's MeshCore writer has shipped a
-# Reader3MF/Writer3MF pair on both supported release lines; it tessellates from
-# the same mesh as STL/OBJ and is therefore guarded by the same assertions.
-_MESH_SUFFIXES = ("stl", "obj", "3mf")
+# Exchange formats the Mesh module owns on the import side. This is deliberately
+# narrower than the export set: the bridge gate (_IMPORT_SUFFIXES) and the
+# documented contract both admit only STL and OBJ here, so a 3MF reaching the
+# import branch would be a contract violation rather than a supported path.
+_IMPORT_MESH_SUFFIXES = ("stl", "obj")
+
+# Exchange formats the Mesh module owns on the export side. 3MF joined the set
+# because it is the mainstream 3D-printing container and the host's MeshCore
+# writer has shipped a Reader3MF/Writer3MF pair on both supported release lines;
+# it tessellates from the same mesh as STL/OBJ and is therefore guarded by the
+# same assertions.
+_EXPORT_MESH_SUFFIXES = ("stl", "obj", "3mf")
 
 # Slack allowed when comparing an imported mesh against the envelope of the file
 # it was read from. A mesh format stores vertices, so the round-trip is exact up
@@ -2020,7 +2027,7 @@ def model_import_geometry(params):
     object_name = _required(params, "object_name", tool)
     label = params.get("label")
     suffix = input_path.lower().rsplit(".", 1)[-1]
-    is_mesh = suffix in _MESH_SUFFIXES
+    is_mesh = suffix in _IMPORT_MESH_SUFFIXES
     doc = _open_document(App, params["document_path"])
     try:
         read_back = _ReadBack(tool, version, params)
@@ -2162,7 +2169,7 @@ def model_insert_part(params):
     object_name = _required(params, "object_name", tool)
     label = params.get("label")
     suffix = part_path.lower().rsplit(".", 1)[-1]
-    is_mesh = suffix in ("stl", "obj")
+    is_mesh = suffix in _IMPORT_MESH_SUFFIXES
     doc = _open_document(App, params["document_path"])
     try:
         read_back = _ReadBack(tool, version, params)
@@ -2320,7 +2327,7 @@ def model_export_geometry(params):
     version = _host_version()
     output_path = _required(params, "output_path", tool)
     suffix = output_path.lower().rsplit(".", 1)[-1]
-    is_mesh = suffix in _MESH_SUFFIXES
+    is_mesh = suffix in _EXPORT_MESH_SUFFIXES
     doc = _open_document(App, params["document_path"])
     temp_meshes = []
     try:
