@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.9.1...v0.10.0) (2026-10-15)
+
+
+### Features
+
+* **partdesign:** add sketch feature tools with volume read-back ([152e247](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/152e2476176983e056b41daf34e1f06a5c894115))
+
+
+### Bug Fixes
+
+* **partdesign:** verify real sketch profiles and parametric feature links ([bfb97d2](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/bfb97d2dcb883beb458c1a68698a69d52c1410bb))
+
 ## [0.9.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.9.0...v0.9.1) (2026-10-12)
 
 
