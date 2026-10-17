@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.10.0...v0.11.0) (2026-10-17)
+
+
+### Features
+
+* **fem-review:** let a review report a location it cannot anchor ([#67](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/67)) ([1711c64](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/1711c645847ce8ffdb84952b6157afb71a608c17))
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([#70](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/70)) ([178a5bb](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/178a5bb4c20479d522b32943e9b3fb1e041e4597))
+
 ## [0.10.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.9.1...v0.10.0) (2026-10-15)
 
 
