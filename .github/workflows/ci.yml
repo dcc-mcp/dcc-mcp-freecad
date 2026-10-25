@@ -46,7 +46,7 @@ jobs:
   # exercises FreeCAD itself, so a host API break stays invisible until release.
   # This job installs a pinned official FreeCAD and runs the tests that do.
   # It covers native, GUI and SDK workflows. The count asserted below is the
-  # number of `-m "freecad and not freecad_gui"` cases, so adding or removing
+  # number of `-m "freecad and not freecad_gui and not freecad_mcp"` cases, so adding or removing
   # one of those tests requires updating it; the guard exists so a collection
   # failure cannot pass as a green run.
   # Installed via AppImage + `--appimage-extract`; the FreeCAD snap is unusable
