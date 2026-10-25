@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.11.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.10.0...v0.11.0) (2026-10-17)
+
+
+### Features
+
+* **fem-review:** let a review report a location it cannot anchor ([#67](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/67)) ([1711c64](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/1711c645847ce8ffdb84952b6157afb71a608c17))
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([#70](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/70)) ([178a5bb](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/178a5bb4c20479d522b32943e9b3fb1e041e4597))
+
+## [0.10.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.9.1...v0.10.0) (2026-10-15)
+
+
+### Features
+
+* **partdesign:** add sketch feature tools with volume read-back ([152e247](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/152e2476176983e056b41daf34e1f06a5c894115))
+
+
+### Bug Fixes
+
+* **partdesign:** verify real sketch profiles and parametric feature links ([bfb97d2](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/bfb97d2dcb883beb458c1a68698a69d52c1410bb))
+
+## [0.9.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.9.0...v0.9.1) (2026-10-12)
+
+
+### Documentation
+
+* refresh the generated DCC-MCP host matrix pointer ([9937192](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/99371927ad201372392468a35900a0ce6839ac70))
+
+## [0.9.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.8.0...v0.9.0) (2026-10-09)
+
+
+### Features
+
+* **import:** verify the imported object against the source file ([#64](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/64)) ([940bf3e](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/940bf3e0de3692fd564c81bc524a7e4fd1813d52))
+
+
+### Documentation
+
+* **fem-review:** drop misleading fallback_inputs aside from anchor step ([#62](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/62)) ([df35256](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/df3525687bdd5558cf35fdf23b9ba7a98dd2646c))
+* **listing:** align list_documents budget scope and paging caveats ([#61](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/61)) ([39cf7b5](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/39cf7b57e047e19db50c1f9e9d4f4c8d6f5c7c5d))
+
+## [0.8.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.7.0...v0.8.0) (2026-10-08)
+
+
+### Features
+
+* add bounded list_documents discovery under allowed roots ([3181bfc](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/3181bfceedb650494d162e9e2de61538de8a8fb4))
+* **analysis:** add fem-review recipe turning a solve into an engineering verdict ([#60](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/60)) ([e9a1209](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/e9a1209a9e75bb11ae34feb327b35a36029cb52c))
+* **analysis:** add typed FEM structural analysis with verified units ([#45](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/45)) ([c9837c4](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/c9837c4c2165da1e387f5612219fc27bbc236376))
+* **modeling:** add scale, copy and mirror plus wedge, helix and 3MF ([#55](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/55)) ([ddc93a5](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/ddc93a5b14ee89942b09be9d50674aca7289e418))
+
+
+### Bug Fixes
+
+* **listing:** page over sorted results instead of walk order ([334b038](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/334b0389a1c4ffcf044880ed27eea3a3babf6bf5))
+* **sketch:** export the sketch error types and document the sketch read-back contract ([#59](https://github.com/dcc-mcp/dcc-mcp-freecad/issues/59)) ([fee865d](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/fee865d8b7a094850aa43eba1a6e98eba44310a0))
+
 ## [0.7.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.6.0...v0.7.0) (2026-10-07)
 
 

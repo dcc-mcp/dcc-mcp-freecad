@@ -1,8 +1,8 @@
 # Real MCP and native-artifact CI
 
-The existing CI already runs three real FreeCAD cases and 27 GUI-persistence
-cases on each SHA-verified official FreeCAD 1.0.2 and 1.1.4 AppImage. Those tests
-exercise the native bridge directly; they are retained unchanged.
+The reconciled CI requires 56 headless native cases and 38 GUI-persistence
+cases on each SHA-verified official FreeCAD 1.0.2 and 1.1.4 AppImage. Those lanes
+exercise the native bridge directly; current main's PartDesign coverage is retained.
 
 The new `freecad_mcp` case adds the official MCP SDK transport: initialize and
 catalog discovery, actual wire-name resolution, full source/load-skill schema
@@ -38,10 +38,13 @@ captured output and exception details; the stage report identifies the failed
 step. Native model files and raw process logs are not uploaded. A failure cannot
 be reported as a native pass merely because a partial image or result exists.
 
-This source candidate has not yet passed the new real-MCP CI gate. Pure schema,
-artifact-sanitization and cleanup tests are contract evidence only. The candidate
-must receive its own exact-revision CI result before native qualification is
-claimed.
+Historical head `73bd3dcaa587479393676214f2b1400d1041e1ff` passed
+[CI on 2026-10-08](https://github.com/dcc-mcp/dcc-mcp-freecad/actions/runs/37721312386):
+41 headless, 38 GUI, one MCP and four FEM cases per host, with zero skips.
+The combination with current main requires **56 headless, 38 GUI, one MCP and
+four FEM cases per host** and has not yet received its own exact-revision result.
+Pure schema, artifact-sanitization and cleanup tests are contract evidence only;
+the historical run cannot qualify the newly reconciled candidate.
 
 The negative mutation case must return a completed Core job with the intended
 failed skill envelope. An observational test wrapper records the actual native

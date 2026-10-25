@@ -21,6 +21,7 @@ SKILL_NAMES = (
     "freecad-modify",
     "freecad-parts",
     "freecad-sketch",
+    "freecad-feature",
     "freecad-analysis",
 )
 
@@ -38,8 +39,8 @@ def test_all_tools_are_typed_bounded_and_affinity_explicit():
         payload = yaml.safe_load((SKILLS / name / "tools.yaml").read_text(encoding="utf-8"))
         tools.extend(payload["tools"])
 
-    assert len(tools) == 36
-    assert len({tool["name"] for tool in tools}) == 36
+    assert len(tools) == 43
+    assert len({tool["name"] for tool in tools}) == 43
     for tool in tools:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["additionalProperties"] is False
@@ -237,7 +238,7 @@ def test_capability_declarations_match_the_tool_catalog():
     payload = _served_capabilities()
     catalog = capability_checks.tool_catalog()
 
-    assert len(payload["tools"]) == len(catalog) == 36
+    assert len(payload["tools"]) == len(catalog) == 43
     problems = capability_checks.capability_problems(payload)
     assert problems == [], "get_capabilities drifted from tools.yaml:\n%s" % "\n".join(problems)
 
@@ -258,6 +259,62 @@ def test_advertised_limits_match_what_the_driver_enforces():
     assert "MAX_PATTERN_INSTANCES = %d" % payload["max_pattern_instances"] in driver
     assert payload["mirror_planes"] == ["xy", "xz", "yz"]
     assert payload["document_snapshots"] is True
+
+
+def test_import_and_export_mesh_suffix_sets_are_kept_apart():
+    """The driver must not accept 3MF on the import path.
+
+    ``tools.yaml``, ``SKILL.md``, ``README.md`` and ``capabilities()`` all
+    declare that import takes STEP/IGES/BREP/STL/OBJ only, and the bridge gate
+    rejects ``.3mf`` before the driver ever runs -- so an import branch that
+    accepts it is dead code that disagrees with the published contract. Export
+    keeps 3MF: that half is real, documented, and covered on real hosts.
+
+    Both sets are module-level constants precisely so this can be asserted
+    without a FreeCAD host: the driver imports FreeCAD lazily inside each
+    function, so the module itself imports cleanly anywhere.
+    """
+    from dcc_mcp_freecad import freecad_driver
+    from dcc_mcp_freecad.bridge import _EXPORT_SUFFIXES, _IMPORT_SUFFIXES
+
+    driver_import = set(freecad_driver._IMPORT_MESH_SUFFIXES)
+    driver_export = set(freecad_driver._EXPORT_MESH_SUFFIXES)
+
+    assert "3mf" not in driver_import, (
+        "the driver accepts 3MF on import, which the documented contract and the "
+        "bridge gate both refuse"
+    )
+    assert "3mf" in driver_export, "3MF export regressed; it is a supported format"
+
+    # The mesh half of each bridge gate, normalised to bare lowercase suffixes,
+    # has to be exactly what the matching driver branch handles -- in both
+    # directions, so widening either gate is caught here even without a host.
+    mesh_import = {s.lstrip(".").lower() for s in _IMPORT_SUFFIXES} & driver_export
+    mesh_export = {s.lstrip(".").lower() for s in _EXPORT_SUFFIXES} & driver_export
+    assert driver_import == mesh_import, (
+        "driver import suffixes %s disagree with the bridge gate %s"
+        % (sorted(driver_import), sorted(mesh_import))
+    )
+    assert driver_export == mesh_export, (
+        "driver export suffixes %s disagree with the bridge gate %s"
+        % (sorted(driver_export), sorted(mesh_export))
+    )
+
+    assert driver_import < driver_export, "import must stay a strict subset of export"
+    assert {"3mf"} == driver_export - driver_import, (
+        "3MF must be the only format export adds over import"
+    )
+
+    # The sibling import path (model.insert_part) used to restate the narrow set
+    # as a literal; keep both on the same constant so they cannot drift again.
+    source = (ROOT / "src" / "dcc_mcp_freecad" / "freecad_driver.py").read_text(encoding="utf-8")
+    import_callers = [
+        line for line in source.splitlines() if "suffix in _IMPORT_MESH_SUFFIXES" in line
+    ]
+    assert len(import_callers) == 2, (
+        "both import paths must read _IMPORT_MESH_SUFFIXES, found %d reader(s)"
+        % len(import_callers)
+    )
 
 
 def test_the_driver_entry_point_is_the_last_statement():
@@ -361,7 +418,7 @@ def test_declared_arguments_exist_on_the_implementation():
     )
     # Guard against the locks drifting apart: every tool must resolve to a
     # bridge method, so a renamed script cannot silently skip the check.
-    assert len(catalog) == 36
+    assert len(catalog) == 43
 
 
 def test_the_sketch_errors_are_exported_and_state_error_is_the_callers_one():
