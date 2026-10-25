@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.11.0...v0.11.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* reject failed native create and export before publication ([5a55812](https://github.com/dcc-mcp/dcc-mcp-freecad/commit/5a55812440ab5ce4372f9a3b555ce08aa90adaa2))
+
 ## [0.11.0](https://github.com/dcc-mcp/dcc-mcp-freecad/compare/v0.10.0...v0.11.0) (2026-10-17)
 
 
