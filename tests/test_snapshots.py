@@ -54,7 +54,10 @@ def workspace(tmp_path: Path):
 
 
 def make_bridge(root: Path, **kwargs) -> FreecadBridge:
-    return FreecadBridge(executable=None, allowed_roots=[root], **kwargs)
+    # None enables host discovery. Use the explicit missing-host configuration
+    # so byte-only snapshot contracts cannot launch an installed FreeCAD.
+    executable = root / "not-installed" / "FreeCADCmd"
+    return FreecadBridge(executable=str(executable), allowed_roots=[root], **kwargs)
 
 
 def write_document(root: Path, name: str = "part.FCStd", payload: bytes = DOCUMENT_BYTES) -> Path:
@@ -723,13 +726,22 @@ def test_orphan_bytes_count_against_the_limit_but_not_the_count(workspace):
     assert caught.value.error_code == ERROR_LIMIT_EXCEEDED
 
 
-def test_status_reports_the_snapshot_store(workspace):
+def test_status_reports_the_snapshot_store(workspace, monkeypatch):
+    def unexpected_host_access(*args, **kwargs):
+        pytest.fail("Snapshot-only contracts must not discover or launch a native host")
+
+    monkeypatch.setattr(bridge_module.shutil, "which", unexpected_host_access)
+    monkeypatch.setattr(bridge_module.subprocess, "Popen", unexpected_host_access)
     root, _ = workspace
     bridge = make_bridge(root)
     document = write_document(root)
     bridge.create_snapshot(str(document))
 
-    summary = bridge.status()["snapshot_store"]
+    status = bridge.status()
+    assert status["ready"] is False
+    assert status["executable"] is None
+    assert status["reason"] == "freecadcmd_not_found"
+    summary = status["snapshot_store"]
 
     assert summary["directory"] == str(bridge.snapshot_directory)
     assert summary["count"] == 1
