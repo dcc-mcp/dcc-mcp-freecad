@@ -134,3 +134,56 @@ def test_success_json_cannot_publish_a_mutation_after_nonzero_native_exit(
         bridge._mutate_document("model.add_primitive", str(model), {}, 30)
     assert model.read_bytes() == b"immutable source"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["FreeCADCmd", "model.FCStd"]
+
+
+@pytest.mark.parametrize("operation", ["create", "export"])
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("returncode", [1, -11])
+def test_nonzero_exit_cannot_publish_staged_output(
+    tmp_path, monkeypatch, operation, existing_output, returncode
+):
+    """Exercise real bridge publication with a controlled, never-run native child."""
+    executable = tmp_path / "FreeCADCmd"
+    executable.write_bytes(b"synthetic executable, never run")
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"immutable source")
+    output = tmp_path / ("created.FCStd" if operation == "create" else "export.step")
+    if existing_output:
+        output.write_bytes(b"existing user output")
+    bridge = FreecadBridge(str(executable), allowed_roots=[tmp_path])
+    calls = []
+
+    def popen(command, **kwargs):
+        request = json.loads(Path(command[-2]).read_text())
+        method = request["method"]
+        calls.append(method)
+        if method in {"document.create", "model.export_geometry"}:
+            key = "document_path" if method == "document.create" else "output_path"
+            Path(request["params"][key]).write_bytes(b"unverified staged output")
+        Path(command[-1]).write_text(json.dumps({"ok": True, "result": {"verified": True}}))
+        return SimpleNamespace(poll=lambda: returncode, returncode=returncode)
+
+    process_module = SimpleNamespace(**vars(bridge_module.subprocess))
+    process_module.Popen = popen
+    monkeypatch.setattr(bridge_module, "subprocess", process_module)
+    with pytest.raises(BridgeError, match="exited unsuccessfully"):
+        if operation == "create":
+            bridge.create_document(str(output), overwrite=existing_output)
+        else:
+            bridge.export_geometry(str(source), ["Body"], str(output), overwrite=existing_output)
+
+    expected_method = "document.create" if operation == "create" else "model.export_geometry"
+    assert calls == [expected_method]
+    assert source.read_bytes() == b"immutable source"
+    if existing_output:
+        assert output.read_bytes() == b"existing user output"
+    else:
+        assert not output.exists()
+    expected_files = {executable.name, source.name}
+    if existing_output:
+        expected_files.add(output.name)
+    assert {path.name for path in tmp_path.iterdir()} == expected_files
+    assert bridge._reject_nonzero_exit is False
+    # The failed write must not change the established read-only exit policy.
+    assert bridge._invoke("system.status", {})["exit_code"] == returncode
+    assert calls == [expected_method, "system.status"]

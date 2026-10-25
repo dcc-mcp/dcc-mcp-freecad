@@ -1640,11 +1640,12 @@ class FreecadBridge:
         staged.unlink()
         try:
             try:
-                result = self._invoke(
-                    "document.create",
-                    {"document_path": str(staged), "name": name},
-                    timeout_secs,
-                )
+                with self._rejecting_nonzero_exit():
+                    result = self._invoke(
+                        "document.create",
+                        {"document_path": str(staged), "name": name},
+                        timeout_secs,
+                    )
             except BaseException as exc:
                 raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
@@ -2388,17 +2389,18 @@ class FreecadBridge:
         staged.unlink()
         try:
             try:
-                result = self._invoke(
-                    "model.export_geometry",
-                    {
-                        "document_path": str(document),
-                        "object_names": names,
-                        "output_path": str(staged),
-                        "linear_deflection": linear_deflection,
-                        "angular_deflection_degrees": angular_deflection_degrees,
-                    },
-                    timeout_secs,
-                )
+                with self._rejecting_nonzero_exit():
+                    result = self._invoke(
+                        "model.export_geometry",
+                        {
+                            "document_path": str(document),
+                            "object_names": names,
+                            "output_path": str(staged),
+                            "linear_deflection": linear_deflection,
+                            "angular_deflection_degrees": angular_deflection_degrees,
+                        },
+                        timeout_secs,
+                    )
             except BaseException as exc:
                 raise _unstage_failure(exc, staged, output) from None
             if not staged.is_file() or staged.stat().st_size <= 0:
