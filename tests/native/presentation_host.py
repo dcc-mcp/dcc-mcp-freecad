@@ -288,6 +288,7 @@ def main():
     with open(request_path, encoding="utf-8") as stream:
         request = json.load(stream)
     driver = _driver()
+    cleanup_error = None
     if request["method"] == "document.save_copy":
         _save_with_fault(driver)
         return
@@ -308,6 +309,17 @@ def main():
         payload = {"ok": True, "result": result}
     except Exception as exc:
         payload = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}}
+    # The production driver closes the owned window before writing its payload.
+    # These fixtures open their own window, so teardown happens here instead.
+    try:
+        driver._close_owned_gui()
+    except Exception as exc:
+        cleanup_error = {"type": type(exc).__name__, "message": str(exc)}
+    if cleanup_error is not None:
+        if payload.get("ok"):
+            payload = {"ok": False, "error": cleanup_error}
+        else:
+            payload["error"]["gui_cleanup_error"] = cleanup_error
     with open(result_path, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, allow_nan=False)
 

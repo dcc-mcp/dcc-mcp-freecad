@@ -34,7 +34,7 @@ for lint plus packaging.
 FreeCAD tests are behind markers and are skipped unless a real host is present:
 
 ```bash
-python -m pytest -m "freecad and not freecad_gui" -v --junitxml=freecad-real.xml
+python -m pytest -m "freecad and not freecad_gui and not freecad_mcp" -v --junitxml=freecad-real.xml
 python -m pytest -m freecad_gui -v --junitxml=freecad-gui.xml
 ```
 

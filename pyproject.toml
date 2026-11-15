@@ -4,7 +4,7 @@ build-backend="hatchling.build"
 
 [project]
 name="dcc-mcp-freecad"
-version="0.11.0"
+version="0.11.1"
 description="Production FreeCAD adapter for typed parametric modeling, document validation, and CAD exchange"
 readme="README.md"
 requires-python=">=3.7"
@@ -66,6 +66,7 @@ testpaths=["tests"]
 pythonpath=["src","."]
 markers=[
   "freecad: requires a real FreeCADCmd executable",
+  "freecad_mcp: requires real SDK transport, pinned FreeCAD and native GUI pixels",
   "freecad_gui: requires real FreeCAD GUI view providers in an offscreen native process",
   "freecad_fem: requires a real FreeCAD host with the FEM workbench, ccx and gmsh",
 ]

@@ -18,7 +18,7 @@ _Illustrative workflow based on the live OpenSCAD → FreeCAD → Blender/Godot 
 **dcc-mcp-freecad** — FreeCAD adapter for typed parametric modeling, document
 validation, and CAD exchange.
 
-It is one of **47 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
+It is one of **48 host adapters** in the DCC-MCP catalog. Every adapter speaks the same
 MCP protocol and builds on the same core runtime contract; each one exposes the tools
 its own host needs on top of that.
 
@@ -394,3 +394,13 @@ FreeCAD's notification area, which can deadlock under the offscreen platform.
 See the [headless render qualification](docs/validation/render-view.md) record
 for the host API facts this relies on, the evidence per layer, and what is
 explicitly not claimed.
+
+## Real MCP workflow validation
+
+CI already exercises real FreeCAD 1.0.2 and 1.1.4, including native GUI
+presentation persistence. The additional SDK workflow gate follows actual MCP
+discovery through modeling, a parameter-driven recompute, rollback verification,
+appearance/save/reopen and an independent native PNG witness. See the
+[coverage and artifact contract](docs/validation/mcp-e2e.md).
+The [original pneumatic-cylinder recipe](docs/demos/README.md) documents the
+separate real-UI recording and native-qualification steps.
