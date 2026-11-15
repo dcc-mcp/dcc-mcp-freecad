@@ -282,6 +282,7 @@ def test_flange_topology_agrees_across_host_versions(tmp_path: Path):
     # geometry, not by whichever host is running.
     assert topo["faces"] == 6, topo
     assert topo["edges"] == 9, topo
+    assert topo["face_types"] == ["Part::GeomCylinder", "Part::GeomPlane"], topo
     assert topo["volume"] == pytest.approx(
         FLANGE_AREA * FLANGE_THICKNESS - COUNTERBORE_AREA * COUNTERBORE_DEPTH,
         rel=VOLUME_REL_TOLERANCE,
@@ -361,7 +362,7 @@ def test_polar_pattern_repeats_a_partdesign_cut_around_an_axis(tmp_path: Path):
     assert patterned["volume"] == pytest.approx(before * BOLT_COUNT, rel=VOLUME_REL_TOLERANCE)
 
 
-def test_edge_indices_are_stable_across_a_partdesign_feature_addition(tmp_path: Path):
+def test_edge_indices_change_across_a_partdesign_feature_addition(tmp_path: Path):
     """The edge-numbering fragility the parent issue called out.
 
     A PartDesign body's ``Edges`` are renumbered by the kernel as features are
@@ -386,6 +387,23 @@ def test_edge_indices_are_stable_across_a_partdesign_feature_addition(tmp_path: 
     # edge. Both fillet tests above resolve indices live for exactly this reason.
     assert len(after) > len(before), (len(before), len(after))
     assert [item["index"] for item in after] == list(range(1, len(after) + 1))
+    after_by_index = {item["index"]: item for item in after}
+    changed_indices = []
+    for previous in before:
+        current = after_by_index[previous["index"]]
+        radii_match = (
+            previous["radius"] is current["radius"]
+            if previous["radius"] is None or current["radius"] is None
+            else previous["radius"] == pytest.approx(current["radius"], rel=1e-9, abs=1e-9)
+        )
+        if (
+            previous["type"] != current["type"]
+            or not radii_match
+            or previous["com"] != pytest.approx(current["com"], rel=1e-9, abs=1e-9)
+            or previous["length"] != pytest.approx(current["length"], rel=1e-9, abs=1e-9)
+        ):
+            changed_indices.append(previous["index"])
+    assert changed_indices, "pocket appended edges without changing any pre-existing edge identity"
 
 
 # ---------------------------------------------------------------------------
