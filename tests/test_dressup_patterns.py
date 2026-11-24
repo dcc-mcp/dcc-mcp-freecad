@@ -245,9 +245,11 @@ def test_polar_pattern_accepts_either_an_angular_step_or_a_total_sweep(tmp_path:
         assert abs(result["volume"] - expected) <= PATTERN_VOLUME_REL_TOLERANCE * expected
 
     # Two ways of asking for the same thing must produce the same placement.
-    assert by_step["object"]["shape"]["bounding_box"] == pytest.approx(
-        by_total["object"]["shape"]["bounding_box"], rel=1e-9, abs=1e-9
-    )
+    step_bounds = by_step["object"]["shape"]["bounding_box"]
+    total_bounds = by_total["object"]["shape"]["bounding_box"]
+    assert step_bounds.keys() == total_bounds.keys()
+    for component, expected_bounds in total_bounds.items():
+        assert step_bounds[component] == pytest.approx(expected_bounds, rel=1e-9, abs=1e-9)
 
     _expect_refusal(
         "E_ANGLE_CONFLICT",
